@@ -160,7 +160,7 @@ impl Board {
                     'Q' => self.castles[1] = true,
                     'k' => self.castles[2] = true,
                     'q' => self.castles[3] = true,
-                    '-' => continue,
+                    '-' => self.castles = [false, false, false, false],
                     _ => return Err(format!("Invalid castling character '{}'", c)),
                 },
                 FenState::EnPassant => match c {
@@ -203,6 +203,7 @@ impl Board {
                 FenState::MovesHalf => match c {
                     ' ' => {
                         state = FenState::MovesFull;
+                        self.full_moves = 0;
                         continue;
                     }
                     '0'..='9' => {
@@ -225,5 +226,81 @@ impl Board {
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+}
+
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_fen_start() {
+        let mut board = Board::new();
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        assert!(board.load_fen(fen).is_ok());
+        assert_eq!(board.w_king, 0x0000000000000010);
+        assert_eq!(board.b_king, 0x1000000000000000);
+        assert_eq!(board.w_queen, 0x0000000000000008);
+        assert_eq!(board.b_queen, 0x0800000000000000);
+        assert_eq!(board.w_rook, 0x0000000000000081);
+        assert_eq!(board.b_rook, 0x8100000000000000);
+        assert_eq!(board.w_bishop, 0x0000000000000024);
+        assert_eq!(board.b_bishop, 0x2400000000000000);
+        assert_eq!(board.w_knight, 0x0000000000000042);
+        assert_eq!(board.b_knight, 0x4200000000000000);
+        assert_eq!(board.w_pawn, 0x000000000000FF00);
+        assert_eq!(board.b_pawn, 0x00FF000000000000);
+        assert!(board.w_move);
+        assert_eq!(board.castles, [true, true, true, true]);
+        assert!(board.en_passant.is_none());
+        assert_eq!(board.half_moves, 0);
+        assert_eq!(board.full_moves, 1);
+    }
+
+    #[test]
+    fn test_load_fen_e4() {
+        let mut board = Board::new();
+        let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
+        assert!(board.load_fen(fen).is_ok());
+        assert_eq!(board.w_king, 0x0000000000000010);
+        assert_eq!(board.b_king, 0x1000000000000000);
+        assert_eq!(board.w_queen, 0x0000000000000008);
+        assert_eq!(board.b_queen, 0x0800000000000000);
+        assert_eq!(board.w_rook, 0x0000000000000081);
+        assert_eq!(board.b_rook, 0x8100000000000000);
+        assert_eq!(board.w_bishop, 0x0000000000000024);
+        assert_eq!(board.b_bishop, 0x2400000000000000);
+        assert_eq!(board.w_knight, 0x0000000000000042);
+        assert_eq!(board.b_knight, 0x4200000000000000);
+        assert_eq!(board.w_pawn, 0x000000001000EF00);
+        assert_eq!(board.b_pawn, 0x00FF000000000000);
+        assert_eq!(board.w_move, false);
+        assert_eq!(board.castles, [true, true, true, true]);
+        assert_eq!(board.en_passant, Some(20));
+        assert_eq!(board.half_moves, 0);
+        assert_eq!(board.full_moves, 1);
+    }
+
+    #[test]
+    fn test_load_fen_endgame() {
+        let mut board = Board::new();
+        let fen = "6Q1/p1p3P1/1k1p2N1/p1n1p2P/5r2/1b6/2n4K/b1q2b2 b - - 29 30";
+        assert!(board.load_fen(fen).is_ok());
+        assert_eq!(board.w_king, 0x0000000000008000);
+        assert_eq!(board.b_king, 0x0000020000000000);
+        assert_eq!(board.w_queen, 0x4000000000000000);
+        assert_eq!(board.b_queen, 0x0000000000000004);
+        assert_eq!(board.w_rook, 0x0000000000000000);
+        assert_eq!(board.b_rook, 0x0000000020000000);
+        assert_eq!(board.w_bishop, 0x0000000000000000);
+        assert_eq!(board.b_bishop, 0x0000000000020021);
+        assert_eq!(board.w_knight, 0x0000400000000000);
+        assert_eq!(board.b_knight, 0x0000000400000400);
+        assert_eq!(board.w_pawn, 0x0040008000000000);
+        assert_eq!(board.b_pawn, 0x0005081100000000);
+        assert_eq!(board.w_move, false);
+        assert_eq!(board.castles, [false, false, false, false]);
+        assert_eq!(board.en_passant, None);
+        assert_eq!(board.half_moves, 29);
+        assert_eq!(board.full_moves, 30);
     }
 }

@@ -31,7 +31,7 @@ impl ChessUi {
             .position([0.0, 0.0], imgui::Condition::Always)
             .size([display_w, display_h], imgui::Condition::Always)
             .build(|| {
-                let [size_w, size_h] = ui.content_region_avail();
+                let [size_w, _] = ui.content_region_avail();
                 let board_size = 0.7;
 
                 let var_window_padding =
@@ -116,6 +116,7 @@ impl ChessUi {
                             ui.text(stringify!($name));
                             ui.text(format!("{:032b}", self.board.$name >> 32));
                             ui.text(format!("{:032b}", self.board.$name & 0xFFFFFFFF));
+                            // ui.text(format!("{:016X}", self.board.$name));
                         };
                     }
 
