@@ -1,8 +1,10 @@
+use image::GenericImageView;
 use imgui::*;
 use imgui_wgpu::{Renderer, RendererConfig};
 use imgui_winit_support::WinitPlatform;
 use pollster::block_on;
-use std::{sync::Arc, time::Instant};
+use std::{fs, sync::Arc, time::Instant};
+use wgpu::SamplerDescriptor;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, Position},
@@ -11,6 +13,8 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::Window,
 };
+
+use crate::{clipb, constant::PICE_IMAGES, ui};
 
 struct ImguiState {
     context: imgui::Context,
@@ -31,9 +35,15 @@ struct AppWindow {
     imgui: Option<ImguiState>,
 }
 
+pub struct DrawCtx<'a> {
+    pub ui: &'a mut imgui::Ui,
+    pub textures: [imgui::TextureId; 12],
+}
+
 pub struct App {
     window: Option<AppWindow>,
-    draw_fn: Box<dyn Fn(&mut imgui::Ui)>,
+    chess_ui: ui::ChessUi,
+    textures: Option<[imgui::TextureId; 12]>,
 }
 
 impl AppWindow {
@@ -43,7 +53,7 @@ impl AppWindow {
             ..Default::default()
         });
 
-        let window_size = LogicalSize::new(720.0, 720.0);
+        let window_size = LogicalSize::new(900.0, 700.0);
 
         let window = {
             let attributes = Window::default_attributes().with_inner_size(window_size);
@@ -96,6 +106,84 @@ impl AppWindow {
         }
     }
 
+    fn setup_textures(&mut self) -> Option<[imgui::TextureId; 12]> {
+        let texture_ids = PICE_IMAGES
+            .iter()
+            .map(|&path| {
+                let dynamic_image = image::load_from_memory(
+                    fs::read(path)
+                        .expect("Failed to read image file")
+                        .as_slice(),
+                )
+                .unwrap();
+
+                let image_rgba = dynamic_image.to_rgba8();
+                let image_dimensions = dynamic_image.dimensions();
+
+                let texture_size = wgpu::Extent3d {
+                    width: image_dimensions.0,
+                    height: image_dimensions.1,
+                    depth_or_array_layers: 1,
+                };
+
+                let renderer = &mut self.imgui.as_mut().unwrap().renderer;
+
+                let tx = imgui_wgpu::Texture::new(
+                    &self.device,
+                    renderer,
+                    imgui_wgpu::TextureConfig {
+                        sampler_desc: SamplerDescriptor {
+                            label: Some("imgui-wgpu sampler"),
+                            address_mode_u: wgpu::AddressMode::ClampToEdge,
+                            address_mode_v: wgpu::AddressMode::ClampToEdge,
+                            address_mode_w: wgpu::AddressMode::ClampToEdge,
+                            mag_filter: wgpu::FilterMode::Linear,
+                            min_filter: wgpu::FilterMode::Linear,
+                            mipmap_filter: wgpu::FilterMode::Nearest,
+                            lod_min_clamp: 0.0,
+                            lod_max_clamp: 100.0,
+                            compare: None,
+                            anisotropy_clamp: 1,
+                            border_color: None,
+                        },
+                        size: texture_size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        label: Some(&format!("texture {}", path)),
+                    },
+                );
+
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tx.texture(),
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &image_rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * image_dimensions.0),
+                        rows_per_image: Some(image_dimensions.1),
+                    },
+                    texture_size,
+                );
+
+                renderer.textures.insert(tx)
+            })
+            .collect::<Vec<TextureId>>();
+
+        Some(
+            texture_ids
+                .as_slice()
+                .try_into()
+                .unwrap_or_else(|_| panic!("Expected 12 textures, got {}", texture_ids.len())),
+        )
+    }
+
     fn setup_imgui(&mut self) {
         let mut context = imgui::Context::create();
         let mut platform = imgui_winit_support::WinitPlatform::new(&mut context);
@@ -118,6 +206,9 @@ impl AppWindow {
                 ..Default::default()
             }),
         }]);
+
+        let clipboard = clipb::Clipboard::new();
+        context.set_clipboard_backend(clipboard);
 
         let clear_color = wgpu::Color {
             r: 0.1,
@@ -153,17 +244,20 @@ impl AppWindow {
 }
 
 impl App {
-    pub fn new(draw_fn: Box<dyn Fn(&mut imgui::Ui) + 'static>) -> Self {
+    pub fn new(chess_ui: ui::ChessUi) -> Self {
         App {
             window: None,
-            draw_fn,
+            textures: None,
+            chess_ui,
         }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        self.window = Some(AppWindow::new(event_loop));
+        let mut window = AppWindow::new(event_loop);
+        self.textures = window.setup_textures();
+        self.window = Some(window);
     }
 
     fn window_event(
@@ -224,7 +318,9 @@ impl ApplicationHandler for App {
                 let ui = imgui.context.frame();
 
                 {
-                    self.draw_fn.as_mut()(ui);
+                    if let Some(textures) = self.textures {
+                        self.chess_ui.draw(DrawCtx { ui, textures });
+                    }
 
                     let fps = 1.0 / delta_s.as_secs_f64();
                     window.window.set_title(&format!(
