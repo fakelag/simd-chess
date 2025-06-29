@@ -1,11 +1,12 @@
-use crate::{chess, window};
+use crate::{chess, constant::PieceId, window};
 
-const CLR_DARK_SQUARE: [f32; 3] = [0.63, 0.42, 0.15];
-const CLR_LIGHT_SQUARE: [f32; 3] = [0.91, 0.65, 0.30];
+const CLR_DARK_SQUARE: [f32; 3] = [0.81, 0.53, 0.28]; // [0.63, 0.42, 0.15];
+const CLR_LIGHT_SQUARE: [f32; 3] = [0.99, 0.79, 0.61]; // [0.91, 0.65, 0.30];
 
 pub struct ChessUi {
     board: chess::Board,
     fen_input: String,
+    from_square: Option<u8>,
 }
 
 impl ChessUi {
@@ -15,6 +16,7 @@ impl ChessUi {
         Self {
             board,
             fen_input: String::from(fen),
+            from_square: None,
         }
     }
 
@@ -53,33 +55,92 @@ impl ChessUi {
                                 let square_h = size_h / 8.0;
                                 let square_w = size_w / 8.0;
 
-                                for rank in 0..8 {
+                                for rank in (0..8).rev() {
                                     for file in 0..8 {
                                         let x = wnd_x + file as f32 * square_w;
-                                        let y = wnd_y + rank as f32 * square_h;
+                                        let y = wnd_y + (rank ^ 7) as f32 * square_h;
 
-                                        let color = if (rank + file) % 2 == 0 {
-                                            CLR_LIGHT_SQUARE
-                                        } else {
-                                            CLR_DARK_SQUARE
-                                        };
+                                        let sq_min = [x, y];
+                                        let sq_max = [x + square_w, y + square_h];
+                                        let sq_bit = rank * 8 + file;
+
+                                        let (primary_clr, secondary_clr) =
+                                            if ((rank ^ 7) + file) % 2 == 0 {
+                                                (CLR_LIGHT_SQUARE, CLR_DARK_SQUARE)
+                                            } else {
+                                                (CLR_DARK_SQUARE, CLR_LIGHT_SQUARE)
+                                            };
 
                                         draw_list
-                                            .add_rect([x, y], [x + square_w, y + square_h], color)
+                                            .add_rect(sq_min, sq_max, primary_clr)
                                             .filled(true)
                                             .build();
 
-                                        if let Some(piece_id) =
-                                            self.board.piece_at_slow(rank ^ 7, file)
+                                        let square_text =
+                                            format!("{}{}", (b'a' + file as u8) as char, rank + 1);
+                                        let square_text_width = ui.calc_text_size(&square_text)[0];
+
+                                        draw_list.add_text(
+                                            [x + square_w - square_text_width - 1.0, y + 1.0],
+                                            secondary_clr,
+                                            &square_text,
+                                        );
+
+                                        let is_hovering = ui.is_mouse_hovering_rect(sq_min, sq_max);
+
+                                        let moved = if let Some(from_square) = self.from_square {
+                                            if is_hovering
+                                                && from_square != sq_bit
+                                                && ui.is_mouse_clicked(imgui::MouseButton::Left)
+                                            {
+                                                self.board.move_piece_slow(
+                                                    ((from_square as u16) & 0x3F)
+                                                        | ((sq_bit as u16 & 0x3F) << 6),
+                                                );
+                                                self.from_square = None;
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
+
+                                        if let Some(piece_id) = self.board.piece_at_slow(rank, file)
                                         {
+                                            if is_hovering
+                                                && ui.is_mouse_clicked(imgui::MouseButton::Left)
+                                                && !moved
+                                            {
+                                                if let Some(from_square) = self.from_square {
+                                                    if from_square == sq_bit {
+                                                        self.from_square = None;
+                                                    } else {
+                                                        self.from_square = Some(sq_bit);
+                                                    }
+                                                } else {
+                                                    self.from_square = Some(sq_bit);
+                                                }
+                                            }
+
+                                            if let Some(from_square) = self.from_square {
+                                                if from_square == sq_bit {
+                                                    draw_list
+                                                        .add_rect(
+                                                            sq_min,
+                                                            sq_max,
+                                                            [1.0, 0.0, 0.0, 0.5],
+                                                        )
+                                                        .filled(true)
+                                                        .build();
+                                                }
+                                            }
+
                                             draw_list
                                                 .add_image(
                                                     ctx.textures[piece_id as usize],
-                                                    [x.floor(), y.floor()],
-                                                    [
-                                                        (x + square_w).floor(),
-                                                        (y + square_h).floor(),
-                                                    ],
+                                                    sq_min,
+                                                    sq_max,
                                                 )
                                                 .build();
                                         }
@@ -114,27 +175,35 @@ impl ChessUi {
                     macro_rules! display_bitboard {
                         ($name:ident) => {
                             ui.text(stringify!($name));
-                            ui.text(format!("{:032b}", self.board.$name >> 32));
-                            ui.text(format!("{:032b}", self.board.$name & 0xFFFFFFFF));
-                            // ui.text(format!("{:016X}", self.board.$name));
+                            ui.text(format!(
+                                "{:032b}",
+                                self.board.board.pieces[PieceId::$name as usize] >> 32
+                            ));
+                            ui.text(format!(
+                                "{:032b}",
+                                self.board.board.pieces[PieceId::$name as usize] & 0xFFFFFFFF
+                            ));
+                            // ui.text(format!("{:016X}", self.board.pieces[PieceId::$name as usize]));
                         };
                     }
 
-                    display_bitboard!(w_king);
-                    display_bitboard!(w_queen);
-                    display_bitboard!(w_rook);
-                    display_bitboard!(w_bishop);
-                    display_bitboard!(w_knight);
-                    display_bitboard!(w_pawn);
+                    ui.text(format!("is_valid: {}", self.board.is_valid()));
+
+                    display_bitboard!(WhiteKing);
+                    display_bitboard!(WhiteQueen);
+                    display_bitboard!(WhiteRook);
+                    display_bitboard!(WhiteBishop);
+                    display_bitboard!(WhiteKnight);
+                    display_bitboard!(WhitePawn);
 
                     ui.separator();
 
-                    display_bitboard!(b_king);
-                    display_bitboard!(b_queen);
-                    display_bitboard!(b_rook);
-                    display_bitboard!(b_bishop);
-                    display_bitboard!(b_knight);
-                    display_bitboard!(b_pawn);
+                    display_bitboard!(BlackKing);
+                    display_bitboard!(BlackQueen);
+                    display_bitboard!(BlackRook);
+                    display_bitboard!(BlackBishop);
+                    display_bitboard!(BlackKnight);
+                    display_bitboard!(BlackPawn);
                 });
             });
     }
