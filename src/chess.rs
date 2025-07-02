@@ -43,26 +43,25 @@ impl Board {
         None
     }
 
-    // This function will return 16 (invalid value) if there is no piece at the given square
-    #[inline(never)]
+    // This function will return 0 (WhiteKing) if there is no piece at the given square
+    #[inline(always)]
     fn piece_at_avx512(&mut self, sq_bit: u64) -> usize {
         unsafe {
-            let white_vec = _mm512_loadu_si512(self.board.pieces.as_ptr() as *const _);
             let select_vec = _mm512_set1_epi64(sq_bit as i64);
-            let from_mask_white = (_mm512_test_epi64_mask(white_vec, select_vec) & 0b111111) as u16;
+            let index_vec = _mm512_set_epi32(11, 10, 9, 8, 7, 6, 5, 4, 7, 6, 5, 4, 3, 2, 1, 0);
 
-            let black_vec = _mm512_loadu_si512(self.board.pieces.as_ptr().add(6) as *const _);
-            let from_mask_black = (_mm512_test_epi64_mask(black_vec, select_vec) & 0b111111) as u16;
-            let from_mask: u16 = from_mask_white | (from_mask_black << 6);
+            let white_vec = _mm512_loadu_si512(self.board.pieces.as_ptr() as *const _);
+            let rest_vec = _mm512_loadu_si512(self.board.pieces.as_ptr().add(4) as *const _);
 
-            // println!(
-            //     "From mask: {:06b} (white: {:06b}, black: {:06b})",
-            //     from_mask, from_mask_white, from_mask_black
-            // );
+            let from_mask_white = _mm512_test_epi64_mask(white_vec, select_vec) as u16;
+            let from_mask_rest = _mm512_test_epi64_mask(rest_vec, select_vec) as u16;
 
-            let piece_idx = from_mask.trailing_zeros() as usize;
-
-            // debug_assert!(piece_idx != 16, "Invalid piece index: {}", piece_idx);
+            let piece_vec = _mm512_mask_compress_epi32(
+                _mm512_setzero_si512(),
+                _mm512_kunpackb(from_mask_rest, from_mask_white),
+                index_vec,
+            );
+            let piece_idx = _mm_cvtsi128_si32(_mm512_castsi512_si128(piece_vec)) as usize;
 
             piece_idx
         }
@@ -74,7 +73,12 @@ impl Board {
 
         let from_piece = self.piece_at_avx512(from_bit);
         let to_piece = self.piece_at_avx512(to_bit);
-        // println!("From piece: {:?}, To piece: {:?}", from_piece, to_piece);
+
+        println!(
+            "From piece: {:?}, To piece: {:?}",
+            PieceId::from(from_piece),
+            to_piece
+        );
 
         if to_piece != 16 {
             self.board.pieces[to_piece] &= !to_bit;
@@ -244,7 +248,7 @@ impl Board {
 
     pub fn is_valid(&self) -> bool {
         if self.board.pieces[PieceId::WhiteKing as usize].count_ones() != 1
-            || self.board.pieces[PieceId::WhiteKing as usize].count_ones() != 1
+            || self.board.pieces[PieceId::BlackKing as usize].count_ones() != 1
         {
             return false;
         }

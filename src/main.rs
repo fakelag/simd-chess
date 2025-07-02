@@ -1,5 +1,3 @@
-#![feature(stdarch_x86_avx512)]
-
 use winit::event_loop::{ControlFlow, EventLoop};
 
 mod chess;
