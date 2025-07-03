@@ -14,7 +14,11 @@ use winit::{
     window::Window,
 };
 
-use crate::{clipb, constant::PICE_IMAGES, ui};
+use crate::{
+    clipb,
+    constant::PICE_IMAGES,
+    ui::{self, chess_ui::ChessUi},
+};
 
 struct ImguiState {
     context: imgui::Context,
@@ -42,7 +46,7 @@ pub struct DrawCtx<'a> {
 
 pub struct App {
     window: Option<AppWindow>,
-    chess_ui: ui::ChessUi,
+    chess_ui: ChessUi,
     textures: Option<[imgui::TextureId; 12]>,
 }
 
@@ -244,7 +248,7 @@ impl AppWindow {
 }
 
 impl App {
-    pub fn new(chess_ui: ui::ChessUi) -> Self {
+    pub fn new(chess_ui: ChessUi) -> Self {
         App {
             window: None,
             textures: None,

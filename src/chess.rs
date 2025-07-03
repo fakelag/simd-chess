@@ -27,28 +27,24 @@ impl Board {
         }
     }
 
-    pub fn piece_at_slow(&self, rank: u8, file: u8) -> Option<PieceId> {
-        if rank > 7 || file > 7 {
-            return None;
-        }
-
-        let bit = 1 << (rank * 8 + file);
-
+    // Returns 0 if there is no piece, PieceId+1 otherwise
+    pub fn piece_at_slow(&self, sq_bit: u64) -> usize {
         for i in PieceId::WhiteKing as usize..PieceId::PieceMax as usize {
-            if self.board.pieces[i] & bit != 0 {
-                return Some(i.into());
+            if self.board.pieces[i] & sq_bit != 0 {
+                return i + 1;
             }
         }
 
-        None
+        0
     }
 
-    // This function will return 0 (WhiteKing) if there is no piece at the given square
+    // Returns 0 if there is no piece, PieceId+1 otherwise
+    // Cost estimate: 15 cycles on Skylake
     #[inline(always)]
     fn piece_at_avx512(&mut self, sq_bit: u64) -> usize {
         unsafe {
             let select_vec = _mm512_set1_epi64(sq_bit as i64);
-            let index_vec = _mm512_set_epi32(11, 10, 9, 8, 7, 6, 5, 4, 7, 6, 5, 4, 3, 2, 1, 0);
+            let index_vec = _mm512_set_epi32(12, 11, 10, 9, 8, 7, 6, 5, 8, 7, 6, 5, 4, 3, 2, 1);
 
             let white_vec = _mm512_loadu_si512(self.board.pieces.as_ptr() as *const _);
             let rest_vec = _mm512_loadu_si512(self.board.pieces.as_ptr().add(4) as *const _);
@@ -71,20 +67,19 @@ impl Board {
         let from_bit: u64 = 1 << (mv & 0x3F);
         let to_bit: u64 = 1 << ((mv >> 6) & 0x3F);
 
-        let from_piece = self.piece_at_avx512(from_bit);
-        let to_piece = self.piece_at_avx512(to_bit);
+        let from_piece = self.piece_at_slow(from_bit);
+        let to_piece = self.piece_at_slow(to_bit);
 
         println!(
             "From piece: {:?}, To piece: {:?}",
-            PieceId::from(from_piece),
+            PieceId::from(from_piece - 1),
             to_piece
         );
 
-        if to_piece != 16 {
-            self.board.pieces[to_piece] &= !to_bit;
+        if to_piece != 0 {
+            self.board.pieces[to_piece - 1] &= !to_bit;
         }
-        self.board.pieces[from_piece] &= !from_bit;
-        self.board.pieces[from_piece] |= to_bit;
+        self.board.pieces[from_piece - 1] ^= to_bit | from_bit;
 
         debug_assert!(self.is_valid(), "Board is invalid after move");
     }
