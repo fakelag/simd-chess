@@ -2,7 +2,7 @@ use crate::{constant::PieceId, engine::chess};
 
 const CLR_DARK_SQUARE: [f32; 3] = [0.81, 0.53, 0.28];
 const CLR_LIGHT_SQUARE: [f32; 3] = [0.99, 0.79, 0.61];
-const CLR_HIGHLIGHT: [f32; 4] = [1.0, 0.0, 0.0, 0.5];
+const CLR_HIGHLIGHT: [f32; 4] = [1.0, 0.0, 0.0, 0.75];
 
 pub struct SquareUi<'a> {
     ui: &'a imgui::Ui,
@@ -10,11 +10,12 @@ pub struct SquareUi<'a> {
     board: &'a mut chess::Board,
     sq_min: [f32; 2],
     sq_max: [f32; 2],
-    sq_bit_index: u8,
     sq_piece: Option<PieceId>,
     is_hovering: bool,
     primary_clr: [f32; 3],
     secondary_clr: [f32; 3],
+
+    pub sq_bit_index: u8,
 }
 
 impl<'a> SquareUi<'a> {
@@ -119,19 +120,33 @@ impl<'a> SquareUi<'a> {
             }
         }
 
-        if self.is_hovering {
-            self.draw_list
-                .add_circle(
-                    [
-                        self.x() + self.sq_width() / 2.0,
-                        self.y() + self.sq_height() / 2.0,
-                    ],
-                    self.sq_width() / 2.0 * 0.4,
-                    CLR_HIGHLIGHT,
-                )
-                .filled(true)
-                .build();
-        }
+        // if self.is_hovering {
+        //     self.draw_list
+        //         .add_circle(
+        //             [
+        //                 self.x() + self.sq_width() / 2.0,
+        //                 self.y() + self.sq_height() / 2.0,
+        //             ],
+        //             self.sq_width() / 2.0 * 0.4,
+        //             CLR_HIGHLIGHT,
+        //         )
+        //         .filled(true)
+        //         .build();
+        // }
+    }
+
+    pub fn draw_move_indicator(&self) {
+        self.draw_list
+            .add_circle(
+                [
+                    self.x() + self.sq_width() / 2.0,
+                    self.y() + self.sq_height() / 2.0,
+                ],
+                self.sq_width() / 2.0 * 0.4,
+                CLR_HIGHLIGHT,
+            )
+            .filled(true)
+            .build();
     }
 
     pub fn draw_texture(&self, piece_tex: &[imgui::TextureId; 12]) {

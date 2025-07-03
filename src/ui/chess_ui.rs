@@ -1,4 +1,4 @@
-use crate::{constant::PieceId, engine::chess, ui::square_ui::SquareUi, window};
+use crate::{constant::PieceId, engine::*, ui::square_ui::SquareUi, window};
 
 pub struct ChessUi {
     board: chess::Board,
@@ -51,6 +51,24 @@ impl ChessUi {
                                 let draw_list = ui.get_window_draw_list();
                                 let square_h = size_h / 8.0;
                                 let square_w = size_w / 8.0;
+                                let square_wh = [square_w, square_h];
+
+                                let hovering_sq_index = (0..64).find_map(|square_index| {
+                                    let rank = square_index / 8;
+                                    let file = square_index % 8;
+
+                                    let x = wnd_x + file as f32 * square_w;
+                                    let y = wnd_y + (rank ^ 7) as f32 * square_h;
+
+                                    if ui.is_mouse_hovering_rect(
+                                        [x, y],
+                                        [x + square_w, y + square_h],
+                                    ) {
+                                        Some(square_index as u8)
+                                    } else {
+                                        None
+                                    }
+                                });
 
                                 for rank in (0..8).rev() {
                                     for file in 0..8 {
@@ -59,7 +77,7 @@ impl ChessUi {
                                             [wnd_x, wnd_y],
                                             rank,
                                             file,
-                                            [square_w, square_h],
+                                            square_wh,
                                             ui,
                                             &draw_list,
                                         );
@@ -70,6 +88,15 @@ impl ChessUi {
                                         square.draw_texture(&ctx.textures);
 
                                         square.draw_highlights(self.from_square);
+
+                                        if let Some(hovering_sq_index) = hovering_sq_index {
+                                            if (tables::LT_KING_MOVES[hovering_sq_index as usize]
+                                                & (1 << square.sq_bit_index))
+                                                != 0
+                                            {
+                                                square.draw_move_indicator();
+                                            }
+                                        }
                                     }
                                 }
                             });
