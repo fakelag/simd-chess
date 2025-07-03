@@ -1,4 +1,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    White,
+    Black,
+    SideMax,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceId {
     WhiteKing,
     WhiteQueen,

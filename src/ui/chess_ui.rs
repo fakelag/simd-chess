@@ -1,4 +1,9 @@
-use crate::{constant::PieceId, engine::*, ui::square_ui::SquareUi, window};
+use crate::{
+    constant::{PieceId, Side},
+    engine::*,
+    ui::square_ui::SquareUi,
+    window,
+};
 
 pub struct ChessUi {
     board: chess::Board,
@@ -90,7 +95,7 @@ impl ChessUi {
                                         square.draw_highlights(self.from_square);
 
                                         if let Some(hovering_sq_index) = hovering_sq_index {
-                                            if (tables::LT_KING_MOVES[hovering_sq_index as usize]
+                                            if (tables::LT_KNIGHT_MOVES[hovering_sq_index as usize]
                                                 & (1 << square.sq_bit_index))
                                                 != 0
                                             {
