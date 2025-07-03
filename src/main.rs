@@ -2,10 +2,9 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::ui::chess_ui::ChessUi;
 
-mod chess;
 mod clipb;
 mod constant;
-mod tables;
+mod engine;
 mod ui;
 mod window;
 

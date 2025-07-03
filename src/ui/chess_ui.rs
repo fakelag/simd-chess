@@ -1,4 +1,4 @@
-use crate::{chess, constant::PieceId, ui::square_ui::SquareUi, window};
+use crate::{constant::PieceId, engine::chess, ui::square_ui::SquareUi, window};
 
 pub struct ChessUi {
     board: chess::Board,

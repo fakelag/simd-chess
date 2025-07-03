@@ -1,4 +1,4 @@
-use crate::{chess, constant::PieceId};
+use crate::{constant::PieceId, engine::chess};
 
 const CLR_DARK_SQUARE: [f32; 3] = [0.81, 0.53, 0.28];
 const CLR_LIGHT_SQUARE: [f32; 3] = [0.99, 0.79, 0.61];
