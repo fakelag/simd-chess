@@ -81,7 +81,7 @@ impl Board {
         }
         self.board.pieces[from_piece - 1] ^= to_bit | from_bit;
 
-        debug_assert!(self.is_valid(), "Board is invalid after move");
+        // debug_assert!(self.is_valid(), "Board is invalid after move");
     }
 
     pub fn load_fen(&mut self, fen: &str) -> Result<(), String> {

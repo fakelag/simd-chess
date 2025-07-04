@@ -94,8 +94,13 @@ impl ChessUi {
 
                                         square.draw_highlights(self.from_square);
 
+                                        // if (tables::EX_OUTER & (1 << square.sq_bit_index)) != 0 {
+                                        //     square.draw_move_indicator();
+                                        // }
+
                                         if let Some(hovering_sq_index) = hovering_sq_index {
-                                            if (tables::LT_KNIGHT_MOVES[hovering_sq_index as usize]
+                                            if (tables::LT_ROOK_MOVE_MASKS
+                                                [hovering_sq_index as usize]
                                                 & (1 << square.sq_bit_index))
                                                 != 0
                                             {
