@@ -1,6 +1,6 @@
 use crate::{
     constant::{PieceId, Side},
-    engine::*,
+    engine::{tables::Tables, *},
     ui::square_ui::SquareUi,
     window,
 };
@@ -9,6 +9,7 @@ pub struct ChessUi {
     board: chess::Board,
     fen_input: String,
     from_square: Option<u8>,
+    tables: Tables,
 }
 
 impl ChessUi {
@@ -19,6 +20,7 @@ impl ChessUi {
             board,
             fen_input: String::from(fen),
             from_square: None,
+            tables: Tables::new(),
         }
     }
 
@@ -75,6 +77,23 @@ impl ChessUi {
                                     }
                                 });
 
+                                let blockers = self
+                                    .board
+                                    .board
+                                    .pieces
+                                    .into_iter()
+                                    .reduce(|acc, bitboard| acc | bitboard)
+                                    .unwrap();
+
+                                let white_pieces = self
+                                    .board
+                                    .board
+                                    .pieces
+                                    .into_iter()
+                                    .take(PieceId::WhitePawn as usize)
+                                    .reduce(|acc, bitboard| acc | bitboard)
+                                    .unwrap();
+
                                 for rank in (0..8).rev() {
                                     for file in 0..8 {
                                         let mut square = SquareUi::new(
@@ -99,13 +118,29 @@ impl ChessUi {
                                         // }
 
                                         if let Some(hovering_sq_index) = hovering_sq_index {
-                                            if (tables::LT_ROOK_MOVE_MASKS
-                                                [hovering_sq_index as usize]
+                                            let hovering_sq_rook_occupancy_mask =
+                                                Tables::LT_ROOK_OCCUPANCY_MASKS
+                                                    [hovering_sq_index as usize];
+
+                                            let rook_blockers =
+                                                blockers & hovering_sq_rook_occupancy_mask;
+
+                                            let rook_moves = self.tables.get_rook_move_mask(
+                                                hovering_sq_index as usize,
+                                                rook_blockers,
+                                            );
+
+                                            if ((rook_moves & !white_pieces)
                                                 & (1 << square.sq_bit_index))
                                                 != 0
                                             {
                                                 square.draw_move_indicator();
                                             }
+                                            // if (0x0001010001010150u64 & (1 << square.sq_bit_index))
+                                            //     != 0
+                                            // {
+                                            //     square.draw_move_indicator();
+                                            // }
                                         }
                                     }
                                 }

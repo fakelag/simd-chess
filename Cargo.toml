@@ -12,6 +12,7 @@ wgpu = "25.0.2"
 winit = "0.30.0"
 image = { version = "0.24", features = ["png"] }
 clipboard = "0.5.0"
+rand = "0.9.1"
 
 [profile.release]
 debug = true
