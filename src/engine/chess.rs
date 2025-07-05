@@ -1,14 +1,14 @@
-use crate::constant::PieceId;
+use crate::{constant::PieceId, engine::tables::Tables};
 use std::arch::x86_64::*;
 
 #[repr(C)]
-pub struct Pieces {
-    pub pieces: [u64; 12],
+pub struct Bitboards {
+    pub bitboards: [u64; 12],
 }
 
 pub struct Board {
-    pub board: Pieces,
-    pub w_move: bool,
+    pub board: Bitboards,
+    pub b_move: bool,
     pub castles: [bool; 4], // [white kingside, white queenside, black kingside, black queenside]
     pub en_passant: Option<u8>,
     pub half_moves: u32,
@@ -18,8 +18,8 @@ pub struct Board {
 impl Board {
     pub fn new() -> Self {
         Self {
-            board: Pieces { pieces: [0; 12] },
-            w_move: true,
+            board: Bitboards { bitboards: [0; 12] },
+            b_move: false,
             castles: [true, true, true, true],
             en_passant: None,
             half_moves: 0,
@@ -27,10 +27,62 @@ impl Board {
         }
     }
 
+    pub fn gen_moves_slow(&self, move_list: &mut [u16; 256]) -> usize {
+        // @perf - total rewrite
+        let mut move_cursor = 0;
+        let side_cursor = 6 * self.b_move as usize;
+        let bitboards = &self.board.bitboards[side_cursor..side_cursor + 6];
+        let friendly_board = bitboards
+            .iter()
+            .copied()
+            .reduce(|acc, curr| acc | curr)
+            .unwrap();
+
+        for square in 0..64 {
+            let sq_bit: u64 = 1 << square;
+
+            // Only friendly pieces
+            if friendly_board & sq_bit == 0 {
+                continue;
+            }
+
+            let piece_at_square = self.piece_at_slow(sq_bit);
+
+            // Skip if no piece
+            if piece_at_square == 0 {
+                continue;
+            }
+
+            match PieceId::from(piece_at_square - 1) {
+                PieceId::WhiteKing | PieceId::BlackKing => {
+                    let mut move_mask = Tables::LT_KING_MOVE_MASKS[square] & !friendly_board;
+
+                    loop {
+                        if move_mask == 0 {
+                            break;
+                        }
+
+                        let tz = move_mask.trailing_zeros();
+
+                        move_list[move_cursor] =
+                            (((tz & 0x3F) as u16) << 6) | (square & 0x3F) as u16;
+
+                        move_mask &= !(1 << tz);
+
+                        move_cursor += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        move_cursor
+    }
+
     // Returns 0 if there is no piece, PieceId+1 otherwise
     pub fn piece_at_slow(&self, sq_bit: u64) -> usize {
         for i in PieceId::WhiteKing as usize..PieceId::PieceMax as usize {
-            if self.board.pieces[i] & sq_bit != 0 {
+            if self.board.bitboards[i] & sq_bit != 0 {
                 return i + 1;
             }
         }
@@ -46,8 +98,8 @@ impl Board {
             let select_vec = _mm512_set1_epi64(sq_bit as i64);
             let index_vec = _mm512_set_epi32(12, 11, 10, 9, 8, 7, 6, 5, 8, 7, 6, 5, 4, 3, 2, 1);
 
-            let white_vec = _mm512_loadu_si512(self.board.pieces.as_ptr() as *const _);
-            let rest_vec = _mm512_loadu_si512(self.board.pieces.as_ptr().add(4) as *const _);
+            let white_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr() as *const _);
+            let rest_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr().add(4) as *const _);
 
             let from_mask_white = _mm512_test_epi64_mask(white_vec, select_vec) as u16;
             let from_mask_rest = _mm512_test_epi64_mask(rest_vec, select_vec) as u16;
@@ -77,9 +129,11 @@ impl Board {
         );
 
         if to_piece != 0 {
-            self.board.pieces[to_piece - 1] &= !to_bit;
+            self.board.bitboards[to_piece - 1] &= !to_bit;
         }
-        self.board.pieces[from_piece - 1] ^= to_bit | from_bit;
+        self.board.bitboards[from_piece - 1] ^= to_bit | from_bit;
+
+        self.b_move = !self.b_move;
 
         // debug_assert!(self.is_valid(), "Board is invalid after move");
     }
@@ -118,18 +172,42 @@ impl Board {
                     }
 
                     match (c, file < 8) {
-                        ('r', true) => self.board.pieces[PieceId::BlackRook as usize] |= 1 << pos,
-                        ('n', true) => self.board.pieces[PieceId::BlackKnight as usize] |= 1 << pos,
-                        ('b', true) => self.board.pieces[PieceId::BlackBishop as usize] |= 1 << pos,
-                        ('q', true) => self.board.pieces[PieceId::BlackQueen as usize] |= 1 << pos,
-                        ('k', true) => self.board.pieces[PieceId::BlackKing as usize] |= 1 << pos,
-                        ('p', true) => self.board.pieces[PieceId::BlackPawn as usize] |= 1 << pos,
-                        ('R', true) => self.board.pieces[PieceId::WhiteRook as usize] |= 1 << pos,
-                        ('N', true) => self.board.pieces[PieceId::WhiteKnight as usize] |= 1 << pos,
-                        ('B', true) => self.board.pieces[PieceId::WhiteBishop as usize] |= 1 << pos,
-                        ('Q', true) => self.board.pieces[PieceId::WhiteQueen as usize] |= 1 << pos,
-                        ('K', true) => self.board.pieces[PieceId::WhiteKing as usize] |= 1 << pos,
-                        ('P', true) => self.board.pieces[PieceId::WhitePawn as usize] |= 1 << pos,
+                        ('r', true) => {
+                            self.board.bitboards[PieceId::BlackRook as usize] |= 1 << pos
+                        }
+                        ('n', true) => {
+                            self.board.bitboards[PieceId::BlackKnight as usize] |= 1 << pos
+                        }
+                        ('b', true) => {
+                            self.board.bitboards[PieceId::BlackBishop as usize] |= 1 << pos
+                        }
+                        ('q', true) => {
+                            self.board.bitboards[PieceId::BlackQueen as usize] |= 1 << pos
+                        }
+                        ('k', true) => {
+                            self.board.bitboards[PieceId::BlackKing as usize] |= 1 << pos
+                        }
+                        ('p', true) => {
+                            self.board.bitboards[PieceId::BlackPawn as usize] |= 1 << pos
+                        }
+                        ('R', true) => {
+                            self.board.bitboards[PieceId::WhiteRook as usize] |= 1 << pos
+                        }
+                        ('N', true) => {
+                            self.board.bitboards[PieceId::WhiteKnight as usize] |= 1 << pos
+                        }
+                        ('B', true) => {
+                            self.board.bitboards[PieceId::WhiteBishop as usize] |= 1 << pos
+                        }
+                        ('Q', true) => {
+                            self.board.bitboards[PieceId::WhiteQueen as usize] |= 1 << pos
+                        }
+                        ('K', true) => {
+                            self.board.bitboards[PieceId::WhiteKing as usize] |= 1 << pos
+                        }
+                        ('P', true) => {
+                            self.board.bitboards[PieceId::WhitePawn as usize] |= 1 << pos
+                        }
                         ('1'..='8', true) => {
                             let empty_squares = c.to_digit(10).unwrap();
                             file += empty_squares;
@@ -160,8 +238,8 @@ impl Board {
                         state = FenState::Castling;
                         continue;
                     }
-                    'w' => self.w_move = true,
-                    'b' => self.w_move = false,
+                    'w' => self.b_move = false,
+                    'b' => self.b_move = true,
                     _ => return Err(format!("Invalid turn character '{}'", c)),
                 },
                 FenState::Castling => match c {
@@ -242,8 +320,8 @@ impl Board {
     }
 
     pub fn is_valid(&self) -> bool {
-        if self.board.pieces[PieceId::WhiteKing as usize].count_ones() != 1
-            || self.board.pieces[PieceId::BlackKing as usize].count_ones() != 1
+        if self.board.bitboards[PieceId::WhiteKing as usize].count_ones() != 1
+            || self.board.bitboards[PieceId::BlackKing as usize].count_ones() != 1
         {
             return false;
         }
@@ -253,7 +331,7 @@ impl Board {
             let bit = 1 << bit_pos;
 
             for piece_id in PieceId::WhiteKing as usize..PieceId::PieceMax as usize {
-                sum += if self.board.pieces[piece_id] & bit != 0 {
+                sum += if self.board.bitboards[piece_id] & bit != 0 {
                     1
                 } else {
                     0
@@ -296,14 +374,14 @@ mod tests {
 
         for (i, &pos) in piece_positions.iter().enumerate() {
             assert_eq!(
-                board.board.pieces[i],
+                board.board.bitboards[i],
                 pos,
                 "Piece {:?} does not match expected position",
                 PieceId::from(i)
             );
         }
 
-        assert!(board.w_move);
+        assert!(!board.b_move);
         assert_eq!(board.castles, [true, true, true, true]);
         assert!(board.en_passant.is_none());
         assert_eq!(board.half_moves, 0);
@@ -334,14 +412,14 @@ mod tests {
 
         for (i, &pos) in piece_positions.iter().enumerate() {
             assert_eq!(
-                board.board.pieces[i],
+                board.board.bitboards[i],
                 pos,
                 "Piece {:?} does not match expected position",
                 PieceId::from(i)
             );
         }
 
-        assert_eq!(board.w_move, false);
+        assert_eq!(board.b_move, true);
         assert_eq!(board.castles, [true, true, true, true]);
         assert_eq!(board.en_passant, Some(20));
         assert_eq!(board.half_moves, 0);
@@ -372,14 +450,14 @@ mod tests {
 
         for (i, &pos) in piece_positions.iter().enumerate() {
             assert_eq!(
-                board.board.pieces[i],
+                board.board.bitboards[i],
                 pos,
                 "Piece {:?} does not match expected position",
                 PieceId::from(i)
             );
         }
 
-        assert_eq!(board.w_move, false);
+        assert_eq!(board.b_move, true);
         assert_eq!(board.castles, [false, false, false, false]);
         assert_eq!(board.en_passant, None);
         assert_eq!(board.half_moves, 29);
@@ -391,15 +469,15 @@ mod tests {
         let mut board = Board::new();
         board.reset();
 
-        board.board.pieces[PieceId::WhiteKing as usize] = 0b11;
+        board.board.bitboards[PieceId::WhiteKing as usize] = 0b11;
 
         assert!(
             !board.is_valid(),
             "Board should be invalid with duplicate kings"
         );
 
-        board.board.pieces[PieceId::WhiteKing as usize] = 0b1;
-        board.board.pieces[PieceId::WhiteQueen as usize] = 0b1;
+        board.board.bitboards[PieceId::WhiteKing as usize] = 0b1;
+        board.board.bitboards[PieceId::WhiteQueen as usize] = 0b1;
 
         assert!(
             !board.is_valid(),

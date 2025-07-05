@@ -85,7 +85,7 @@ impl ChessUi {
                                 let blockers = self
                                     .board
                                     .board
-                                    .pieces
+                                    .bitboards
                                     .into_iter()
                                     .reduce(|acc, bitboard| acc | bitboard)
                                     .unwrap();
@@ -93,11 +93,14 @@ impl ChessUi {
                                 let white_pieces = self
                                     .board
                                     .board
-                                    .pieces
+                                    .bitboards
                                     .into_iter()
-                                    .take(PieceId::WhitePawn as usize)
+                                    .take(PieceId::WhitePawn as usize + 1)
                                     .reduce(|acc, bitboard| acc | bitboard)
                                     .unwrap();
+
+                                let mut moves = [0u16; 256];
+                                let move_count = self.board.gen_moves_slow(&mut moves);
 
                                 for rank in (0..8).rev() {
                                     for file in 0..8 {
@@ -114,26 +117,34 @@ impl ChessUi {
                                         //     square.draw_move_indicator();
                                         // }
 
-                                        if let Some(hovering_sq_index) = hovering_sq_index {
-                                            let hovering_sq_occupancy_mask =
-                                                Tables::LT_BISHOP_OCCUPANCY_MASKS
-                                                    [hovering_sq_index as usize];
-
-                                            let slider_blockers =
-                                                blockers & hovering_sq_occupancy_mask;
-
-                                            let slider_moves =
-                                                self.tables.get_slider_move_mask::<false>(
-                                                    hovering_sq_index as usize,
-                                                    slider_blockers,
-                                                );
-
-                                            if ((slider_moves & !white_pieces)
-                                                & (1 << square.sq_bit_index))
-                                                != 0
+                                        for mv_index in 0..move_count {
+                                            if square.sq_bit_index
+                                                == ((moves[mv_index] >> 6) as u8 & 0x3F)
                                             {
                                                 square.draw_move_indicator(ui);
                                             }
+                                        }
+
+                                        if let Some(hovering_sq_index) = hovering_sq_index {
+                                            // let hovering_sq_occupancy_mask =
+                                            //     Tables::LT_BISHOP_OCCUPANCY_MASKS
+                                            //         [hovering_sq_index as usize];
+
+                                            // let slider_blockers =
+                                            //     blockers & hovering_sq_occupancy_mask;
+
+                                            // let slider_moves =
+                                            //     self.tables.get_slider_move_mask::<false>(
+                                            //         hovering_sq_index as usize,
+                                            //         slider_blockers,
+                                            //     );
+
+                                            // if ((slider_moves & !white_pieces)
+                                            //     & (1 << square.sq_bit_index))
+                                            //     != 0
+                                            // {
+                                            //     square.draw_move_indicator(ui);
+                                            // }
 
                                             // if (Tables::LT_BISHOP_OCCUPANCY_MASKS
                                             //     [hovering_sq_index as usize]
@@ -183,11 +194,11 @@ impl ChessUi {
                             ui.text(stringify!($name));
                             ui.text(format!(
                                 "{:032b}",
-                                self.board.board.pieces[PieceId::$name as usize] >> 32
+                                self.board.board.bitboards[PieceId::$name as usize] >> 32
                             ));
                             ui.text(format!(
                                 "{:032b}",
-                                self.board.board.pieces[PieceId::$name as usize] & 0xFFFFFFFF
+                                self.board.board.bitboards[PieceId::$name as usize] & 0xFFFFFFFF
                             ));
                             // ui.text(format!("{:016X}", self.board.pieces[PieceId::$name as usize]));
                         };

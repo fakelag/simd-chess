@@ -39,7 +39,7 @@ impl From<usize> for PieceId {
             9 => PieceId::BlackBishop,
             10 => PieceId::BlackKnight,
             11 => PieceId::BlackPawn,
-            _ => panic!("Invalid piece ID"),
+            _ => panic!("Invalid piece ID: {}", value),
         }
     }
 }
