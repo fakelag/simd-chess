@@ -354,19 +354,22 @@ impl Tables {
         let occupancy_premutations = Self::gen_slider_occupancy_premutations::<false>();
 
         for square in 0..64 {
-            let rank = square / 8;
-            let file = square % 8;
+            let rank = (square / 8) as i32;
+            let file = (square % 8) as i32;
 
             for occ_id in 0..Self::BISHOP_OCCUPANCY_MAX {
                 let blockers = occupancy_premutations[square * Self::BISHOP_OCCUPANCY_MAX + occ_id];
                 let occupancy_index = Self::calc_occupancy_index::<false>(square, blockers);
 
-                let mut file_it = file.max(1) - 1;
+                let mut file_it = file - 1;
 
                 for rank_it in rank + 1..8 {
+                    if file_it == -1 {
+                        break;
+                    }
                     let bit = 1 << (rank_it * 8 + file_it);
                     moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
-                    if blockers & bit != 0 || file_it == 0 {
+                    if blockers & bit != 0 {
                         break;
                     }
                     file_it -= 1;
@@ -388,7 +391,7 @@ impl Tables {
 
                 file_it = file + 1;
 
-                for rank_it in (0..=rank.max(1) - 1).rev() {
+                for rank_it in (0..=rank - 1).rev() {
                     if file_it == 8 {
                         break;
                     }
@@ -400,12 +403,15 @@ impl Tables {
                     file_it += 1;
                 }
 
-                file_it = file.max(1) - 1;
+                file_it = file - 1;
 
-                for rank_it in (0..=rank.max(1) - 1).rev() {
+                for rank_it in (0..=rank - 1).rev() {
+                    if file_it == -1 {
+                        break;
+                    }
                     let bit = 1 << (rank_it * 8 + file_it);
                     moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
-                    if blockers & bit != 0 || file_it == 0 {
+                    if blockers & bit != 0 {
                         break;
                     }
                     file_it -= 1;
