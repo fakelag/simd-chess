@@ -57,19 +57,28 @@ const EX_H_FILE: u64 = const { ex_mask!(FileOrRank::File(File::H)) };
 const EX_A_FILE: u64 = const { ex_mask!(FileOrRank::File(File::A)) };
 const EX_G_FILE: u64 = const { ex_mask!(FileOrRank::File(File::G)) };
 const EX_B_FILE: u64 = const { ex_mask!(FileOrRank::File(File::B)) };
+const EX_OUTER: u64 = const {
+    ex_mask!(FileOrRank::File(File::A))
+        & ex_mask!(FileOrRank::File(File::H))
+        & ex_mask!(FileOrRank::Rank(Rank::One))
+        & ex_mask!(FileOrRank::Rank(Rank::Eight))
+};
 
 pub struct Tables {
     rook_move_mask: Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]>,
+    bishop_move_mask: Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]>,
 }
 
 impl Tables {
     pub fn new() -> Self {
         Self {
             rook_move_mask: Self::gen_rook_move_table(),
+            bishop_move_mask: Self::gen_bishop_move_table(),
         }
     }
 
     const ROOK_OCCUPANCY_MAX: usize = 1 << 12;
+    const BISHOP_OCCUPANCY_MAX: usize = 1 << 9;
 
     pub const LT_KING_MOVE_MASKS: [u64; 64] = const {
         let mut moves = [0; 64];
@@ -180,26 +189,6 @@ impl Tables {
         moves
     };
 
-    #[cfg_attr(any(), rustfmt::skip)]
-    pub const LT_ROOK_OCCUPANCY_MAGICS: [u64; 64] = [
-        0x2a0010c201006080, 0x3080200212814000, 0x0100084020001100, 0x0100100100a08844,
-        0x8a00220004102088, 0x8100010002285400, 0x4400011048118204, 0x0100014021000682,
-        0x0000802040028001, 0x0000401000402000, 0x0001002001004810, 0x0203002049045000,
-        0x0211001004080300, 0x0002002200241059, 0x0482000402003881, 0x0603800100004080,
-        0x04108180024000a1, 0x0402404000a01000, 0x2440110040200100, 0xc000120028204201,
-        0x5208008008808401, 0x0002008002800400, 0x00080c0010080122, 0x4228020004088851,
-        0x4102400180218001, 0x0069400040201000, 0x00a0016080500082, 0x0008001010010200,
-        0x0008000900049100, 0x0404040080800200, 0x0801280400021110, 0x0524012200008044,
-        0x0080002000400140, 0x5860045000400420, 0x0240520082002240, 0x0100825000802800,
-        0x4000800400804800, 0x1001000209001c00, 0x0002800200801100, 0x2149040042001491,
-        0x1020400180068020, 0x8000810040010020, 0x0810200010008080, 0xc0300021004b0010,
-        0x8024008040080800, 0x1082000491020008, 0x00808802810c0030, 0x6002010880420004,
-        0x8001034082002200, 0x0020044008a18080, 0x8400100020008680, 0x11b0008212080080,
-        0x0404840008008080, 0x000a000400801280, 0x0360800200010080, 0x4401004104208200,
-        0x0042800101302441, 0x0000120109c02082, 0x800c20010140120b, 0x0012350120300029,
-        0x0026000820b08c02, 0x1005000204000801, 0x0000009005020804, 0x004020c024008906,
-    ];
-
     pub const LT_ROOK_OCCUPANCY_SHIFTS: [u8; 64] = const {
         let mut shifts = [0; 64];
         let mut square = 0;
@@ -213,17 +202,92 @@ impl Tables {
         shifts
     };
 
-    pub fn get_rook_move_mask(&self, square: usize, blockers: u64) -> u64 {
+    pub const LT_BISHOP_OCCUPANCY_MASKS: [u64; 64] = const {
+        let mut moves = [0; 64];
+        let mut square: usize = 0;
+
+        while square < 64 {
+            let rank = square as u64 / 8;
+            let file = square as u64 % 8;
+
+            let mut rank_it = rank;
+            let mut file_it = file;
+
+            while rank_it < 8 && file_it > 0 {
+                moves[square] |= 1 << (rank_it * 8 + file_it);
+                file_it -= 1;
+                rank_it += 1;
+            }
+
+            rank_it = rank;
+            file_it = file;
+
+            while rank_it < 8 && file_it < 8 {
+                moves[square] |= 1 << (rank_it * 8 + file_it);
+                file_it += 1;
+                rank_it += 1;
+            }
+
+            rank_it = rank;
+            file_it = file;
+
+            while rank_it > 0 && file_it < 8 {
+                moves[square] |= 1 << (rank_it * 8 + file_it);
+                file_it += 1;
+                rank_it -= 1;
+            }
+
+            rank_it = rank;
+            file_it = file;
+
+            while rank_it > 0 && file_it > 0 {
+                moves[square] |= 1 << (rank_it * 8 + file_it);
+                file_it -= 1;
+                rank_it -= 1;
+            }
+
+            moves[square] &= !(1 << square);
+            moves[square] &= EX_OUTER;
+
+            square += 1;
+        }
+
+        moves
+    };
+
+    pub const LT_BISHOP_OCCUPANCY_SHIFTS: [u8; 64] = const {
+        let mut shifts = [0; 64];
+        let mut square = 0;
+
+        while square < 64 {
+            let shamt = (64 - Self::LT_BISHOP_OCCUPANCY_MASKS[square].count_ones()) as u8;
+            shifts[square] = shamt;
+            square += 1;
+        }
+
+        shifts
+    };
+
+    pub fn get_slider_move_mask<const IS_ROOK: bool>(&self, square: usize, blockers: u64) -> u64 {
         debug_assert!(square < 64, "Square index out of bounds");
 
-        let occupancy_index = Self::calc_occupancy_index(square, blockers);
+        let occupancy_index = Self::calc_occupancy_index::<IS_ROOK>(square, blockers);
 
         debug_assert!(
-            occupancy_index < Self::ROOK_OCCUPANCY_MAX,
+            occupancy_index
+                < if IS_ROOK {
+                    Self::ROOK_OCCUPANCY_MAX
+                } else {
+                    Self::BISHOP_OCCUPANCY_MAX
+                },
             "Occupancy index out of bounds"
         );
 
-        self.rook_move_mask[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index]
+        if IS_ROOK {
+            self.rook_move_mask[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index]
+        } else {
+            self.bishop_move_mask[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index]
+        }
     }
 
     fn gen_rook_move_table() -> Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]> {
@@ -241,7 +305,7 @@ impl Tables {
 
             for occ_id in 0..Self::ROOK_OCCUPANCY_MAX {
                 let blockers = occupancy_premutations[square * Self::ROOK_OCCUPANCY_MAX + occ_id];
-                let occupancy_index = Self::calc_occupancy_index(square, blockers);
+                let occupancy_index = Self::calc_occupancy_index::<true>(square, blockers);
 
                 for file_it in file + 1..8 {
                     let bit = 1 << (rank * 8 + file_it);
@@ -280,28 +344,118 @@ impl Tables {
         moves
     }
 
-    fn calc_occupancy_index(square: usize, blockers: u64) -> usize {
-        (blockers.wrapping_mul(Tables::LT_ROOK_OCCUPANCY_MAGICS[square])
-            >> Tables::LT_ROOK_OCCUPANCY_SHIFTS[square]) as usize
-    }
-
-    fn gen_slider_occupancy_premutations<const IS_ROOK: bool>()
-    -> Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]> {
-        let mut masks: Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]> =
-            vec![0u64; 64 * Self::ROOK_OCCUPANCY_MAX]
+    fn gen_bishop_move_table() -> Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]> {
+        let mut moves: Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]> =
+            vec![0u64; 64 * Self::BISHOP_OCCUPANCY_MAX]
                 .into_boxed_slice()
                 .try_into()
                 .unwrap();
 
-        for square in 0..64 {
-            let rook_occupancy_mask = Self::LT_ROOK_OCCUPANCY_MASKS[square];
+        let occupancy_premutations = Self::gen_slider_occupancy_premutations::<false>();
 
-            let popcnt = rook_occupancy_mask.count_ones();
+        for square in 0..64 {
+            let rank = square / 8;
+            let file = square % 8;
+
+            for occ_id in 0..Self::BISHOP_OCCUPANCY_MAX {
+                let blockers = occupancy_premutations[square * Self::BISHOP_OCCUPANCY_MAX + occ_id];
+                let occupancy_index = Self::calc_occupancy_index::<false>(square, blockers);
+
+                let mut file_it = file.max(1) - 1;
+
+                for rank_it in rank + 1..8 {
+                    let bit = 1 << (rank_it * 8 + file_it);
+                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    if blockers & bit != 0 || file_it == 0 {
+                        break;
+                    }
+                    file_it -= 1;
+                }
+
+                file_it = file + 1;
+
+                for rank_it in rank + 1..8 {
+                    if file_it == 8 {
+                        break;
+                    }
+                    let bit = 1 << (rank_it * 8 + file_it);
+                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    if blockers & bit != 0 {
+                        break;
+                    }
+                    file_it += 1;
+                }
+
+                file_it = file + 1;
+
+                for rank_it in (0..=rank.max(1) - 1).rev() {
+                    if file_it == 8 {
+                        break;
+                    }
+                    let bit = 1 << (rank_it * 8 + file_it);
+                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    if blockers & bit != 0 {
+                        break;
+                    }
+                    file_it += 1;
+                }
+
+                file_it = file.max(1) - 1;
+
+                for rank_it in (0..=rank.max(1) - 1).rev() {
+                    let bit = 1 << (rank_it * 8 + file_it);
+                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    if blockers & bit != 0 || file_it == 0 {
+                        break;
+                    }
+                    file_it -= 1;
+                }
+            }
+        }
+
+        moves
+    }
+
+    fn calc_occupancy_index<const IS_ROOK: bool>(square: usize, blockers: u64) -> usize {
+        let (magic, shamt) = if IS_ROOK {
+            (
+                Tables::LT_ROOK_OCCUPANCY_MAGICS[square],
+                Tables::LT_ROOK_OCCUPANCY_SHIFTS[square],
+            )
+        } else {
+            (
+                Tables::LT_BISHOP_OCCUPANCY_MAGICS[square],
+                Tables::LT_BISHOP_OCCUPANCY_SHIFTS[square],
+            )
+        };
+        (blockers.wrapping_mul(magic) >> shamt) as usize
+    }
+
+    fn gen_slider_occupancy_premutations<const IS_ROOK: bool>() -> Box<[u64]> {
+        let occupancy_table_size = if IS_ROOK {
+            Self::ROOK_OCCUPANCY_MAX
+        } else {
+            Self::BISHOP_OCCUPANCY_MAX
+        };
+
+        let mut masks: Box<[u64]> = vec![0u64; 64 * occupancy_table_size]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+
+        for square in 0..64 {
+            let occupancy_mask = if IS_ROOK {
+                Self::LT_ROOK_OCCUPANCY_MASKS[square]
+            } else {
+                Self::LT_BISHOP_OCCUPANCY_MASKS[square]
+            };
+
+            let popcnt = occupancy_mask.count_ones();
             debug_assert!(popcnt < 13, "Popcount exceeds 12 bits");
 
             for premut_index in 0..(1 << popcnt) {
-                let premut = unsafe { _pdep_u64(!premut_index, rook_occupancy_mask) };
-                masks[square * Self::ROOK_OCCUPANCY_MAX + premut_index as usize] = premut;
+                let premut = unsafe { _pdep_u64(!premut_index, occupancy_mask) };
+                masks[square * occupancy_table_size + premut_index as usize] = premut;
             }
         }
 
@@ -312,6 +466,12 @@ impl Tables {
         use rand::Rng;
         let mut rng = rand::rng();
 
+        let occupancy_table_size = if IS_ROOK {
+            Self::ROOK_OCCUPANCY_MAX
+        } else {
+            Self::BISHOP_OCCUPANCY_MAX
+        };
+
         rng.reseed().unwrap();
 
         let premuts = Self::gen_slider_occupancy_premutations::<IS_ROOK>();
@@ -319,14 +479,18 @@ impl Tables {
         let mut hash_shifts = [0u8; 64];
 
         for square in 0..64 {
-            let rook_occupancy_mask = Self::LT_ROOK_OCCUPANCY_MASKS[square];
-            let occupancy_bits = rook_occupancy_mask.count_ones() as usize;
+            let occupancy_mask = if IS_ROOK {
+                Self::LT_ROOK_OCCUPANCY_MASKS[square]
+            } else {
+                Self::LT_BISHOP_OCCUPANCY_MASKS[square]
+            };
+
+            let occupancy_bits = occupancy_mask.count_ones() as usize;
             let shamt = (64 - occupancy_bits) as u8;
 
             hash_shifts[square] = shamt;
 
             let mut rng_magic: u64;
-
             let mut used_keys = vec![false; 1 << occupancy_bits];
 
             'outer: loop {
@@ -336,7 +500,7 @@ impl Tables {
                 rng_magic &= rng.random::<u64>();
 
                 for occupancy_index in 0..(1 << occupancy_bits) {
-                    let premutation = premuts[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index];
+                    let premutation = premuts[square * occupancy_table_size + occupancy_index];
                     let hash_key = premutation.wrapping_mul(rng_magic) >> shamt;
 
                     if used_keys[hash_key as usize] {
@@ -353,4 +517,44 @@ impl Tables {
 
         (hash_magics, hash_shifts)
     }
+
+    #[cfg_attr(any(), rustfmt::skip)]
+    pub const LT_ROOK_OCCUPANCY_MAGICS: [u64; 64] = [
+        0x2a0010c201006080, 0x3080200212814000, 0x0100084020001100, 0x0100100100a08844,
+        0x8a00220004102088, 0x8100010002285400, 0x4400011048118204, 0x0100014021000682,
+        0x0000802040028001, 0x0000401000402000, 0x0001002001004810, 0x0203002049045000,
+        0x0211001004080300, 0x0002002200241059, 0x0482000402003881, 0x0603800100004080,
+        0x04108180024000a1, 0x0402404000a01000, 0x2440110040200100, 0xc000120028204201,
+        0x5208008008808401, 0x0002008002800400, 0x00080c0010080122, 0x4228020004088851,
+        0x4102400180218001, 0x0069400040201000, 0x00a0016080500082, 0x0008001010010200,
+        0x0008000900049100, 0x0404040080800200, 0x0801280400021110, 0x0524012200008044,
+        0x0080002000400140, 0x5860045000400420, 0x0240520082002240, 0x0100825000802800,
+        0x4000800400804800, 0x1001000209001c00, 0x0002800200801100, 0x2149040042001491,
+        0x1020400180068020, 0x8000810040010020, 0x0810200010008080, 0xc0300021004b0010,
+        0x8024008040080800, 0x1082000491020008, 0x00808802810c0030, 0x6002010880420004,
+        0x8001034082002200, 0x0020044008a18080, 0x8400100020008680, 0x11b0008212080080,
+        0x0404840008008080, 0x000a000400801280, 0x0360800200010080, 0x4401004104208200,
+        0x0042800101302441, 0x0000120109c02082, 0x800c20010140120b, 0x0012350120300029,
+        0x0026000820b08c02, 0x1005000204000801, 0x0000009005020804, 0x004020c024008906,
+    ];
+
+    #[cfg_attr(any(), rustfmt::skip)]
+    pub const LT_BISHOP_OCCUPANCY_MAGICS: [u64; 64] = [
+        0x0004100a00410a00, 0x080a104411004020, 0x010c08008304820a, 0x1004040180900000,
+        0x0111114001060000, 0x0208882008166000, 0x0911420220603000, 0x0001004644200812,
+        0x2880c80208080100, 0x0100040104440182, 0x0000100186004051, 0x0001084845002540,
+        0x20d0020a1000a048, 0x0820011002900540, 0x0464040b11082012, 0x8804020200c20804,
+        0x81c0400810240282, 0x0488004210040180, 0x0048001000242022, 0x8041000824050130,
+        0x0000800400a02101, 0x004a000410440401, 0x4003204201104220, 0x0110844904880100,
+        0x0010080005081004, 0x0208180020434100, 0x0204010050010060, 0x0400404014010200,
+        0x8110040002802102, 0x282800c0820100a1, 0x0014142220410404, 0x0820411802010501,
+        0x801009081445b001, 0x0200882040440400, 0x3820402800100040, 0x4004120281080080,
+        0x0009100400008021, 0x0030004044060100, 0x0008010840840a01, 0x2022020200004248,
+        0x0040981d40001010, 0x0044010d10000918, 0x1042540228040400, 0x0204420202009420,
+        0x0008200410422400, 0x40c4008809400200, 0x8220440142138040, 0x0011012210816e08,
+        0x2048424230400480, 0x0203040211140580, 0x0800208404060020, 0x000a0400420200c0,
+        0x130000c0104100a8, 0x4044396008128000, 0x8020240c02b41004, 0x0444080481020000,
+        0x4042008404020238, 0x0040002582082000, 0x0880400022011090, 0x40a00001802a0800,
+        0x40018a0c04104405, 0x0400002020220182, 0x0000216002008302, 0x40d0024809002208,
+    ];
 }
