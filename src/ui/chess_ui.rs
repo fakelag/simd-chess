@@ -10,17 +10,27 @@ pub struct ChessUi {
     fen_input: String,
     from_square: Option<u8>,
     tables: Tables,
+    squares: Vec<SquareUi>,
 }
 
 impl ChessUi {
     pub fn new(fen: &str) -> Self {
         let mut board = chess::Board::new();
         board.load_fen(fen).unwrap();
+
+        let mut squares = Vec::with_capacity(64);
+        for rank in (0..8).rev() {
+            for file in 0..8 {
+                squares.push(SquareUi::new(rank, file));
+            }
+        }
+
         Self {
             board,
             fen_input: String::from(fen),
             from_square: None,
             tables: Tables::new(),
+            squares,
         }
     }
 
@@ -52,17 +62,12 @@ impl ChessUi {
                             .size([size_w * board_size, size_w * board_size])
                             .scroll_bar(false)
                             .build(|| {
-                                let [wnd_x, wnd_y] = ui.window_pos();
-                                let [size_w, size_h] = ui.content_region_avail();
-
-                                let draw_list = ui.get_window_draw_list();
-                                let square_h = size_h / 8.0;
-                                let square_w = size_w / 8.0;
-                                let square_wh = [square_w, square_h];
-
                                 let hovering_sq_index = (0..64).find_map(|square_index| {
+                                    let [wnd_x, wnd_y] = ui.window_pos();
                                     let rank = square_index / 8;
                                     let file = square_index % 8;
+
+                                    let [square_w, square_h] = SquareUi::calc_square_wh(ui);
 
                                     let x = wnd_x + file as f32 * square_w;
                                     let y = wnd_y + (rank ^ 7) as f32 * square_h;
@@ -96,22 +101,14 @@ impl ChessUi {
 
                                 for rank in (0..8).rev() {
                                     for file in 0..8 {
-                                        let mut square = SquareUi::new(
-                                            &mut self.board,
-                                            [wnd_x, wnd_y],
-                                            rank,
-                                            file,
-                                            square_wh,
-                                            ui,
-                                            &draw_list,
-                                        );
+                                        let square = &mut self.squares[rank * 8 + file];
 
-                                        square.handle_move(&mut self.from_square);
+                                        square.update(ui, &mut self.board, &mut self.from_square);
 
-                                        square.draw_bg();
-                                        square.draw_texture(&ctx.textures);
+                                        square.draw_bg(ui, &self.from_square);
+                                        square.draw_texture(ui, &ctx.textures);
 
-                                        square.draw_highlights(self.from_square);
+                                        // square.draw_highlights(self.from_square, &ctx.textures);
 
                                         // if (tables::EX_OUTER & (1 << square.sq_bit_index)) != 0 {
                                         //     square.draw_move_indicator();
@@ -135,7 +132,7 @@ impl ChessUi {
                                                 & (1 << square.sq_bit_index))
                                                 != 0
                                             {
-                                                square.draw_move_indicator();
+                                                square.draw_move_indicator(ui);
                                             }
 
                                             // if (Tables::LT_BISHOP_OCCUPANCY_MASKS
@@ -146,6 +143,13 @@ impl ChessUi {
                                             //     square.draw_move_indicator();
                                             // }
                                         }
+                                    }
+                                }
+
+                                for rank in (0..8).rev() {
+                                    for file in 0..8 {
+                                        let square = &self.squares[rank * 8 + file];
+                                        square.draw_highlights(ui, &ctx.textures);
                                     }
                                 }
                             });

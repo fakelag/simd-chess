@@ -78,3 +78,10 @@ pub const PICE_IMAGES: [&str; PieceId::PieceMax as usize] = [
     "assets/b_knight.png",
     "assets/b_pawn.png",
 ];
+
+pub const fn hex_to_f4_color(hex: u32, a: f32) -> [f32; 4] {
+    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
+    let b = ((hex >> 0) & 0xFF) as f32 / 255.0;
+    [r, g, b, a]
+}

@@ -1,77 +1,65 @@
-use crate::{constant::PieceId, engine::chess};
+use crate::{
+    constant::{PieceId, hex_to_f4_color},
+    engine::chess,
+};
 
-const CLR_DARK_SQUARE: [f32; 3] = [0.81, 0.53, 0.28];
-const CLR_LIGHT_SQUARE: [f32; 3] = [0.99, 0.79, 0.61];
-const CLR_HIGHLIGHT: [f32; 4] = [1.0, 0.0, 0.0, 0.75];
+const CLR_DARK_SQUARE: [f32; 4] = hex_to_f4_color(0xce8747, 1.0);
+const CLR_LIGHT_SQUARE: [f32; 4] = hex_to_f4_color(0xfcc99b, 1.0);
+const CLR_HIGHLIGHT: [f32; 4] = hex_to_f4_color(0xcb474b, 0.75);
+const CLR_HIGHLIGHT_DARK: [f32; 4] = hex_to_f4_color(0x478ece, 1.0);
+const CLR_HIGHLIGHT_LIGHT: [f32; 4] = hex_to_f4_color(0x9bcefc, 1.0);
 
-pub struct SquareUi<'a> {
-    ui: &'a imgui::Ui,
-    draw_list: &'a imgui::DrawListMut<'a>,
-    board: &'a mut chess::Board,
+pub struct SquareUi {
     sq_min: [f32; 2],
     sq_max: [f32; 2],
     sq_piece: Option<PieceId>,
+    primary_clr: [f32; 4],
+    secondary_clr: [f32; 4],
+    highlight_clr: [f32; 4],
+
     is_hovering: bool,
-    primary_clr: [f32; 3],
-    secondary_clr: [f32; 3],
+    is_moving: bool,
+    is_dragging: bool,
 
     pub sq_bit_index: u8,
 }
 
-impl<'a> SquareUi<'a> {
-    pub fn new(
-        board: &'a mut chess::Board,
-        wnd_xy: [f32; 2],
-        rank: u8,
-        file: u8,
-        square_wh: [f32; 2],
-        ui: &'a imgui::Ui,
-        draw_list: &'a imgui::DrawListMut<'a>,
-    ) -> Self {
-        let x = wnd_xy[0] + file as f32 * square_wh[0];
-        let y = wnd_xy[1] + (rank ^ 7) as f32 * square_wh[1];
-
-        let sq_min = [x, y];
-        let sq_max = [x + square_wh[0], y + square_wh[1]];
+impl SquareUi {
+    pub fn new(rank: u8, file: u8) -> Self {
         let sq_bit_index = rank * 8 + file;
-        let sq_piece = board.piece_at_slow(1 << sq_bit_index);
 
-        let is_hovering = ui.is_mouse_hovering_rect(sq_min, sq_max);
-
-        let (primary_clr, secondary_clr) = if ((rank ^ 7) + file) % 2 == 0 {
-            (CLR_LIGHT_SQUARE, CLR_DARK_SQUARE)
+        let (primary_clr, secondary_clr, highlight_clr) = if ((rank ^ 7) + file) % 2 == 0 {
+            (CLR_LIGHT_SQUARE, CLR_DARK_SQUARE, CLR_HIGHLIGHT_LIGHT)
         } else {
-            (CLR_DARK_SQUARE, CLR_LIGHT_SQUARE)
+            (CLR_DARK_SQUARE, CLR_LIGHT_SQUARE, CLR_HIGHLIGHT_LIGHT)
         };
 
         Self {
-            ui,
-            draw_list,
-            board,
-            sq_min,
-            sq_max,
+            sq_min: [0.0; 2],
+            sq_max: [0.0; 2],
             sq_bit_index,
-            sq_piece: if sq_piece == 0 {
-                None
-            } else {
-                Some(PieceId::from(sq_piece - 1))
-            },
-            is_hovering,
+            sq_piece: None,
             primary_clr,
             secondary_clr,
+            highlight_clr,
+            is_hovering: false,
+            is_moving: false,
+            is_dragging: false,
         }
     }
 
-    pub fn draw_bg(&self) {
-        self.draw_list
+    pub fn draw_bg(&self, ui: &imgui::Ui, sq_from: &Option<u8>) {
+        let draw_list = ui.get_window_draw_list();
+
+        draw_list
             .add_rect(self.sq_min, self.sq_max, self.primary_clr)
             .filled(true)
             .build();
 
         let square_text = format!("{}{}", (b'a' + self.file() as u8) as char, self.rank() + 1);
-        let square_text_width = self.ui.calc_text_size(&square_text)[0];
+        let square_text_width = ui.calc_text_size(&square_text)[0];
 
-        self.draw_list.add_text(
+        draw_list.add_text(
             [
                 self.x() + self.sq_width() - square_text_width - 1.0,
                 self.y() + 1.0,
@@ -79,15 +67,51 @@ impl<'a> SquareUi<'a> {
             self.secondary_clr,
             &square_text,
         );
+
+        if self.is_hovering && !self.is_moving && sq_from.is_some() {
+            draw_list
+                .add_rect(self.sq_min, self.sq_max, self.highlight_clr)
+                .thickness(2.0)
+                .build();
+        }
     }
 
-    pub fn handle_move(&mut self, sq_from: &mut Option<u8>) {
+    pub fn calc_square_wh(ui: &imgui::Ui) -> [f32; 2] {
+        let [content_avail_w, content_avail_h] = ui.content_region_avail();
+
+        let square_h = content_avail_h / 8.0;
+        let square_w = content_avail_w / 8.0;
+        [square_w, square_h]
+    }
+
+    pub fn update(&mut self, ui: &imgui::Ui, board: &mut chess::Board, sq_from: &mut Option<u8>) {
+        let sq_piece = board.piece_at_slow(1 << self.sq_bit_index);
+
+        self.sq_piece = if sq_piece == 0 {
+            None
+        } else {
+            Some(PieceId::from(sq_piece - 1))
+        };
+
+        self.is_hovering = ui.is_mouse_hovering_rect(self.sq_min, self.sq_max);
+
+        let square_wh = Self::calc_square_wh(ui);
+
+        let wnd_xy = ui.window_pos();
+
+        let x = wnd_xy[0] + self.file() as f32 * square_wh[0];
+        let y = wnd_xy[1] + (self.rank() ^ 7) as f32 * square_wh[1];
+
+        self.sq_min = [x, y];
+        self.sq_max = [x + square_wh[0], y + square_wh[1]];
+
         if let Some(from_square) = sq_from {
             if self.is_hovering
                 && *from_square != self.sq_bit_index
-                && self.ui.is_mouse_clicked(imgui::MouseButton::Left)
+                && (ui.is_mouse_clicked(imgui::MouseButton::Left)
+                    || ui.is_mouse_released(imgui::MouseButton::Left))
             {
-                self.board.move_piece_slow(
+                board.move_piece_slow(
                     ((*from_square as u16) & 0x3F) | ((self.sq_bit_index as u16 & 0x3F) << 6),
                 );
                 *sq_from = None;
@@ -96,7 +120,7 @@ impl<'a> SquareUi<'a> {
         }
 
         if self.sq_piece.is_some() {
-            if self.is_hovering && self.ui.is_mouse_clicked(imgui::MouseButton::Left) {
+            if self.is_hovering && ui.is_mouse_clicked(imgui::MouseButton::Left) {
                 if let Some(from_square) = sq_from {
                     if *from_square == self.sq_bit_index {
                         *sq_from = None;
@@ -108,35 +132,50 @@ impl<'a> SquareUi<'a> {
                 }
             }
         }
-    }
 
-    pub fn draw_highlights(&self, sq_from: Option<u8>) {
+        self.is_moving = false;
+        self.is_dragging = false;
+
         if let Some(sq_from) = sq_from {
-            if self.sq_bit_index == sq_from {
-                self.draw_list
-                    .add_rect(self.sq_min, self.sq_max, CLR_HIGHLIGHT)
-                    .filled(true)
-                    .build();
+            if self.sq_bit_index == *sq_from {
+                self.is_moving = true;
+
+                if self.sq_piece.is_some() && ui.is_mouse_down(imgui::MouseButton::Left) {
+                    self.is_dragging = true;
+                }
             }
         }
-
-        // if self.is_hovering {
-        //     self.draw_list
-        //         .add_circle(
-        //             [
-        //                 self.x() + self.sq_width() / 2.0,
-        //                 self.y() + self.sq_height() / 2.0,
-        //             ],
-        //             self.sq_width() / 2.0 * 0.4,
-        //             CLR_HIGHLIGHT,
-        //         )
-        //         .filled(true)
-        //         .build();
-        // }
     }
 
-    pub fn draw_move_indicator(&self) {
-        self.draw_list
+    pub fn draw_highlights(&self, ui: &imgui::Ui, piece_tex: &[imgui::TextureId; 12]) {
+        if self.is_moving {
+            ui.get_window_draw_list()
+                .add_rect(self.sq_min, self.sq_max, CLR_HIGHLIGHT)
+                .filled(true)
+                .build();
+
+            if let Some(sq_piece) = self.sq_piece {
+                if self.is_dragging {
+                    let mouse_xy = ui.io().mouse_pos;
+                    let tex_min = [
+                        mouse_xy[0] - self.sq_width() / 2.0,
+                        mouse_xy[1] - self.sq_height() / 2.0,
+                    ];
+                    let tex_max = [
+                        mouse_xy[0] + self.sq_width() / 2.0,
+                        mouse_xy[1] + self.sq_height() / 2.0,
+                    ];
+                    ui.get_window_draw_list()
+                        .add_image(piece_tex[sq_piece as usize], tex_min, tex_max)
+                        .col([1.0, 1.0, 1.0, 0.75])
+                        .build();
+                }
+            }
+        }
+    }
+
+    pub fn draw_move_indicator(&self, ui: &imgui::Ui) {
+        ui.get_window_draw_list()
             .add_circle(
                 [
                     self.x() + self.sq_width() / 2.0,
@@ -149,9 +188,9 @@ impl<'a> SquareUi<'a> {
             .build();
     }
 
-    pub fn draw_texture(&self, piece_tex: &[imgui::TextureId; 12]) {
+    pub fn draw_texture(&self, ui: &imgui::Ui, piece_tex: &[imgui::TextureId; 12]) {
         if let Some(sq_piece) = self.sq_piece {
-            self.draw_list
+            ui.get_window_draw_list()
                 .add_image(piece_tex[sq_piece as usize], self.sq_min, self.sq_max)
                 .build();
         }
