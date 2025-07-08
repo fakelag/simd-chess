@@ -118,10 +118,13 @@ impl ChessUi {
                                         // }
 
                                         for mv_index in 0..move_count {
-                                            if square.sq_bit_index
-                                                == ((moves[mv_index] >> 6) as u8 & 0x3F)
-                                            {
-                                                square.draw_move_indicator(ui);
+                                            if let Some(from_sq) = self.from_square {
+                                                if moves[mv_index] & 0x3F == from_sq as u16
+                                                    && square.sq_bit_index
+                                                        == ((moves[mv_index] >> 6) as u8 & 0x3F)
+                                                {
+                                                    square.draw_move_indicator(ui);
+                                                }
                                             }
                                         }
 

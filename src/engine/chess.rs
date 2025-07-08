@@ -74,6 +74,9 @@ impl Board {
         );
 
         move_cursor +=
+            self.gen_knight_moves(&mut move_list[move_cursor..], side_cursor, friendly_board);
+
+        move_cursor +=
             self.gen_king_moves(&mut move_list[move_cursor..], side_cursor, friendly_board);
 
         move_cursor
@@ -110,7 +113,7 @@ impl Board {
                 if (full_board & (1 << dst_sq)) == 0 {
                     match src_sq / 8 {
                         1 => {
-                            todo!("Promotion");
+                            eprintln!("Black pawn promotion");
                         }
                         6 => {
                             move_list[move_cursor] = (dst_sq << 6) | src_sq;
@@ -134,7 +137,7 @@ impl Board {
                 if (full_board & (1 << dst_sq)) == 0 {
                     match src_sq / 8 {
                         6 => {
-                            todo!("Promotion");
+                            eprintln!("White pawn promotion");
                         }
                         1 => {
                             move_list[move_cursor] = (dst_sq << 6) | src_sq;
@@ -152,6 +155,32 @@ impl Board {
                         }
                     };
                 }
+            }
+        }
+
+        move_cursor
+    }
+
+    pub fn gen_knight_moves(
+        &self,
+        move_list: &mut [u16],
+        side_cursor: usize,
+        friendly_board: u64,
+    ) -> usize {
+        let mut move_cursor = 0;
+
+        let mut knight_bitboard = self.board.bitboards[PieceId::WhiteKnight as usize + side_cursor];
+
+        loop {
+            let src_sq = pop_ls1b!(knight_bitboard);
+
+            let mut knight_moves_bitboard =
+                Tables::LT_KNIGHT_MOVE_MASKS[src_sq as usize] & !friendly_board;
+
+            loop {
+                let dst_sq = pop_ls1b!(knight_moves_bitboard);
+                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                move_cursor += 1;
             }
         }
 
