@@ -41,7 +41,7 @@ impl Board {
         }
     }
 
-    pub fn gen_moves_slow(&self, move_list: &mut [u16; 256]) -> usize {
+    pub fn gen_moves_slow(&self, tables: &Tables, move_list: &mut [u16; 256]) -> usize {
         let mut move_cursor = 0;
         let side_cursor = 6 * self.b_move as usize;
         let opponent_cursor = 6 * !self.b_move as usize;
@@ -70,6 +70,37 @@ impl Board {
             &mut move_list[move_cursor..],
             side_cursor,
             opponent_board,
+            full_board,
+        );
+
+        move_cursor += self.gen_slider_moves::<true>(
+            tables,
+            &mut move_list[move_cursor..],
+            self.board.bitboards[PieceId::WhiteRook as usize + side_cursor],
+            friendly_board,
+            full_board,
+        );
+
+        move_cursor += self.gen_slider_moves::<false>(
+            tables,
+            &mut move_list[move_cursor..],
+            self.board.bitboards[PieceId::WhiteBishop as usize + side_cursor],
+            friendly_board,
+            full_board,
+        );
+
+        move_cursor += self.gen_slider_moves::<false>(
+            tables,
+            &mut move_list[move_cursor..],
+            self.board.bitboards[PieceId::WhiteQueen as usize + side_cursor],
+            friendly_board,
+            full_board,
+        );
+        move_cursor += self.gen_slider_moves::<true>(
+            tables,
+            &mut move_list[move_cursor..],
+            self.board.bitboards[PieceId::WhiteQueen as usize + side_cursor],
+            friendly_board,
             full_board,
         );
 
@@ -155,6 +186,44 @@ impl Board {
                         }
                     };
                 }
+            }
+        }
+
+        move_cursor
+    }
+
+    pub fn gen_slider_moves<const IS_ROOK: bool>(
+        &self,
+        tables: &Tables,
+        move_list: &mut [u16],
+        piece_board: u64,
+        friendly_board: u64,
+        full_board: u64,
+    ) -> usize {
+        let mut move_cursor = 0;
+
+        // let mut rook_bitboard = self.board.bitboards[PieceId::WhiteRook as usize + side_cursor];
+        let mut piece_board = piece_board;
+
+        loop {
+            let src_sq = pop_ls1b!(piece_board);
+
+            let occupancy_mask = if IS_ROOK {
+                Tables::LT_ROOK_OCCUPANCY_MASKS[src_sq as usize]
+            } else {
+                Tables::LT_BISHOP_OCCUPANCY_MASKS[src_sq as usize]
+            };
+
+            let slider_blockers = full_board & occupancy_mask;
+
+            let mut slider_moves = tables
+                .get_slider_move_mask::<IS_ROOK>(src_sq as usize, slider_blockers)
+                & !friendly_board;
+
+            loop {
+                let dst_sq = pop_ls1b!(slider_moves);
+                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                move_cursor += 1;
             }
         }
 

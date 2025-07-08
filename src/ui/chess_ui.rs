@@ -100,7 +100,8 @@ impl ChessUi {
                                     .unwrap();
 
                                 let mut moves = [0u16; 256];
-                                let move_count = self.board.gen_moves_slow(&mut moves);
+                                let move_count =
+                                    self.board.gen_moves_slow(&self.tables, &mut moves);
 
                                 for rank in (0..8).rev() {
                                     for file in 0..8 {
