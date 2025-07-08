@@ -1,6 +1,20 @@
 use crate::{constant::PieceId, engine::tables::Tables};
 use std::arch::x86_64::*;
 
+macro_rules! pop_ls1b {
+    ($bitboard:ident) => {{
+        let ls1b_index = $bitboard.trailing_zeros() as u16;
+
+        if ls1b_index == 64 {
+            break;
+        }
+
+        $bitboard ^= 1 << ls1b_index;
+
+        ls1b_index
+    }};
+}
+
 #[repr(C)]
 pub struct Bitboards {
     pub bitboards: [u64; 12],
@@ -28,52 +42,139 @@ impl Board {
     }
 
     pub fn gen_moves_slow(&self, move_list: &mut [u16; 256]) -> usize {
-        // @perf - total rewrite
         let mut move_cursor = 0;
         let side_cursor = 6 * self.b_move as usize;
-        let bitboards = &self.board.bitboards[side_cursor..side_cursor + 6];
-        let friendly_board = bitboards
+        let opponent_cursor = 6 * !self.b_move as usize;
+
+        let friendly_board = self.board.bitboards[side_cursor..side_cursor + 6]
             .iter()
             .copied()
             .reduce(|acc, curr| acc | curr)
             .unwrap();
 
-        for square in 0..64 {
-            let sq_bit: u64 = 1 << square;
+        let opponent_board = self.board.bitboards[opponent_cursor..opponent_cursor + 6]
+            .iter()
+            .copied()
+            .reduce(|acc, curr| acc | curr)
+            .unwrap();
 
-            // Only friendly pieces
-            if friendly_board & sq_bit == 0 {
-                continue;
+        let full_board = self
+            .board
+            .bitboards
+            .iter()
+            .copied()
+            .reduce(|acc, curr| acc | curr)
+            .unwrap();
+
+        move_cursor += self.gen_pawn_moves(
+            &mut move_list[move_cursor..],
+            side_cursor,
+            opponent_board,
+            full_board,
+        );
+
+        move_cursor +=
+            self.gen_king_moves(&mut move_list[move_cursor..], side_cursor, friendly_board);
+
+        move_cursor
+    }
+
+    pub fn gen_pawn_moves(
+        &self,
+        move_list: &mut [u16],
+        side_cursor: usize,
+        opponent_board: u64,
+        full_board: u64,
+    ) -> usize {
+        let mut move_cursor = 0;
+        let mut pawn_bitboard = self.board.bitboards[PieceId::WhitePawn as usize + side_cursor];
+
+        loop {
+            let src_sq = pop_ls1b!(pawn_bitboard);
+
+            // Pawn captures
+            let mut pawn_cap_bitboard = Tables::LT_PAWN_CAPTURE_MASKS[self.b_move as usize]
+                [src_sq as usize]
+                & opponent_board;
+
+            loop {
+                let dst_sq = pop_ls1b!(pawn_cap_bitboard);
+                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                move_cursor += 1;
             }
 
-            let piece_at_square = self.piece_at_slow(sq_bit);
+            // Pawn push
+            if self.b_move {
+                let dst_sq = src_sq - 8;
 
-            // Skip if no piece
-            if piece_at_square == 0 {
-                continue;
-            }
-
-            match PieceId::from(piece_at_square - 1) {
-                PieceId::WhiteKing | PieceId::BlackKing => {
-                    let mut move_mask = Tables::LT_KING_MOVE_MASKS[square] & !friendly_board;
-
-                    loop {
-                        if move_mask == 0 {
-                            break;
+                if (full_board & (1 << dst_sq)) == 0 {
+                    match src_sq / 8 {
+                        1 => {
+                            todo!("Promotion");
                         }
+                        6 => {
+                            move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                            move_cursor += 1;
 
-                        let tz = move_mask.trailing_zeros();
-
-                        move_list[move_cursor] =
-                            (((tz & 0x3F) as u16) << 6) | (square & 0x3F) as u16;
-
-                        move_mask &= !(1 << tz);
-
-                        move_cursor += 1;
-                    }
+                            let dst_sq = src_sq - 16;
+                            if (full_board & (1 << dst_sq)) == 0 {
+                                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                                move_cursor += 1;
+                            }
+                        }
+                        _ => {
+                            move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                            move_cursor += 1;
+                        }
+                    };
                 }
-                _ => {}
+            } else {
+                let dst_sq = src_sq + 8;
+
+                if (full_board & (1 << dst_sq)) == 0 {
+                    match src_sq / 8 {
+                        6 => {
+                            todo!("Promotion");
+                        }
+                        1 => {
+                            move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                            move_cursor += 1;
+
+                            let dst_sq = src_sq + 16;
+                            if (full_board & (1 << dst_sq)) == 0 {
+                                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                                move_cursor += 1;
+                            }
+                        }
+                        _ => {
+                            move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                            move_cursor += 1;
+                        }
+                    };
+                }
             }
+        }
+
+        move_cursor
+    }
+
+    pub fn gen_king_moves(
+        &self,
+        move_list: &mut [u16],
+        side_cursor: usize,
+        friendly_board: u64,
+    ) -> usize {
+        let mut move_cursor = 0;
+
+        let king_bitboard = self.board.bitboards[PieceId::WhiteKing as usize + side_cursor];
+        let src_sq = king_bitboard.trailing_zeros() as u16;
+
+        let mut king_moves_bitboard = Tables::LT_KING_MOVE_MASKS[src_sq as usize] & !friendly_board;
+
+        loop {
+            let dst_sq = pop_ls1b!(king_moves_bitboard);
+            move_list[move_cursor] = (dst_sq << 6) | src_sq;
+            move_cursor += 1;
         }
 
         move_cursor

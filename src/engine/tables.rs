@@ -103,7 +103,7 @@ impl Tables {
         moves
     };
 
-    pub const LT_PAWN_ATTACK_MASKS: [[u64; 64]; Side::SideMax as usize] = const {
+    pub const LT_PAWN_CAPTURE_MASKS: [[u64; 64]; Side::SideMax as usize] = const {
         let mut moves = [[0; 64]; Side::SideMax as usize];
         let mut square = 0;
 
