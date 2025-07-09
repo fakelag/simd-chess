@@ -1,6 +1,10 @@
 use crate::{constant::PieceId, engine::tables::Tables};
 use std::arch::x86_64::*;
 
+const MV_FLAGS: u16 = 0b1111 << 12;
+const MV_FLAG_DPP: u16 = 0b0001 << 12;
+const MV_FLAG_EPCAP: u16 = 0b0101 << 12;
+
 macro_rules! pop_ls1b {
     ($bitboard:ident) => {{
         let ls1b_index = $bitboard.trailing_zeros() as u16;
@@ -127,14 +131,22 @@ impl Board {
             let src_sq = pop_ls1b!(pawn_bitboard);
 
             // Pawn captures
-            let mut pawn_cap_bitboard = Tables::LT_PAWN_CAPTURE_MASKS[self.b_move as usize]
-                [src_sq as usize]
-                & opponent_board;
+            let pawn_cap_mask =
+                Tables::LT_PAWN_CAPTURE_MASKS[self.b_move as usize][src_sq as usize];
+            let mut pawn_cap_bitboard = pawn_cap_mask & opponent_board;
 
             loop {
                 let dst_sq = pop_ls1b!(pawn_cap_bitboard);
                 move_list[move_cursor] = (dst_sq << 6) | src_sq;
                 move_cursor += 1;
+            }
+
+            // En passant
+            if let Some(ep_target) = self.en_passant {
+                if pawn_cap_mask & (1 << ep_target) != 0 {
+                    move_list[move_cursor] = ((ep_target as u16) << 6) | src_sq | MV_FLAG_EPCAP;
+                    move_cursor += 1;
+                }
             }
 
             // Pawn push
@@ -152,7 +164,7 @@ impl Board {
 
                             let dst_sq = src_sq - 16;
                             if (full_board & (1 << dst_sq)) == 0 {
-                                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                                move_list[move_cursor] = (dst_sq << 6) | src_sq | MV_FLAG_DPP;
                                 move_cursor += 1;
                             }
                         }
@@ -176,7 +188,7 @@ impl Board {
 
                             let dst_sq = src_sq + 16;
                             if (full_board & (1 << dst_sq)) == 0 {
-                                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                                move_list[move_cursor] = (dst_sq << 6) | src_sq | MV_FLAG_DPP;
                                 move_cursor += 1;
                             }
                         }
@@ -202,7 +214,6 @@ impl Board {
     ) -> usize {
         let mut move_cursor = 0;
 
-        // let mut rook_bitboard = self.board.bitboards[PieceId::WhiteRook as usize + side_cursor];
         let mut piece_board = piece_board;
 
         loop {
@@ -314,7 +325,7 @@ impl Board {
         }
     }
 
-    pub fn move_piece_slow(&mut self, mv: u16) {
+    pub fn make_move_slow(&mut self, mv: u16) {
         let from_bit: u64 = 1 << (mv & 0x3F);
         let to_bit: u64 = 1 << ((mv >> 6) & 0x3F);
 
@@ -331,6 +342,29 @@ impl Board {
             self.board.bitboards[to_piece - 1] &= !to_bit;
         }
         self.board.bitboards[from_piece - 1] ^= to_bit | from_bit;
+
+        self.en_passant = None;
+
+        match mv & MV_FLAGS {
+            MV_FLAG_EPCAP => {
+                debug_assert!(self.en_passant.is_some());
+
+                if self.b_move {
+                    self.board.bitboards[PieceId::WhitePawn as usize] &= !(to_bit << 8);
+                } else {
+                    self.board.bitboards[PieceId::BlackPawn as usize] &= !(to_bit >> 8);
+                }
+            }
+            MV_FLAG_DPP => {
+                let from_sq = ((mv >> 6) & 0x3F) as u8;
+                self.en_passant = if self.b_move {
+                    Some(from_sq + 8)
+                } else {
+                    Some(from_sq - 8)
+                };
+            }
+            _ => {}
+        }
 
         self.b_move = !self.b_move;
 

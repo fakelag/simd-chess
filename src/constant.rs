@@ -85,3 +85,9 @@ pub const fn hex_to_f4_color(hex: u32, a: f32) -> [f32; 4] {
     let b = ((hex >> 0) & 0xFF) as f32 / 255.0;
     [r, g, b, a]
 }
+
+pub fn square_name(index: u8) -> String {
+    let file = index % 8;
+    let rank = index / 8;
+    format!("{}{}", (b'a' + file as u8) as char, rank + 1)
+}
