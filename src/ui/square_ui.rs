@@ -1,5 +1,5 @@
 use crate::{
-    constant::{PieceId, hex_to_f4_color},
+    constant::{PieceId, hex_to_f4_color, square_name},
     engine::chess,
 };
 
@@ -56,7 +56,7 @@ impl SquareUi {
             .filled(true)
             .build();
 
-        let square_text = format!("{}{}", (b'a' + self.file() as u8) as char, self.rank() + 1);
+        let square_text = square_name(self.sq_bit_index);
         let square_text_width = ui.calc_text_size(&square_text)[0];
 
         draw_list.add_text(
@@ -84,7 +84,12 @@ impl SquareUi {
         [square_w, square_h]
     }
 
-    pub fn update(&mut self, ui: &imgui::Ui, board: &mut chess::Board, sq_from: &mut Option<u8>) {
+    pub fn update(
+        &mut self,
+        ui: &imgui::Ui,
+        board: &mut chess::Board,
+        sq_from: &mut Option<u8>,
+    ) -> bool {
         let sq_piece = board.piece_at_slow(1 << self.sq_bit_index);
 
         self.sq_piece = if sq_piece == 0 {
@@ -111,11 +116,7 @@ impl SquareUi {
                 && (ui.is_mouse_clicked(imgui::MouseButton::Left)
                     || ui.is_mouse_released(imgui::MouseButton::Left))
             {
-                board.move_piece_slow(
-                    ((*from_square as u16) & 0x3F) | ((self.sq_bit_index as u16 & 0x3F) << 6),
-                );
-                *sq_from = None;
-                return;
+                return true;
             }
         }
 
@@ -145,6 +146,8 @@ impl SquareUi {
                 }
             }
         }
+
+        false
     }
 
     pub fn draw_highlights(&self, ui: &imgui::Ui, piece_tex: &[imgui::TextureId; 12]) {

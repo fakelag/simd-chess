@@ -1,5 +1,5 @@
 use crate::{
-    constant::{PieceId, Side},
+    constant::{PieceId, square_name},
     engine::{tables::Tables, *},
     ui::square_ui::SquareUi,
     window,
@@ -107,7 +107,20 @@ impl ChessUi {
                                     for file in 0..8 {
                                         let square = &mut self.squares[rank * 8 + file];
 
-                                        square.update(ui, &mut self.board, &mut self.from_square);
+                                        if square.update(ui, &mut self.board, &mut self.from_square)
+                                        {
+                                            for mv_index in 0..move_count {
+                                                if let Some(from_sq) = self.from_square {
+                                                    if moves[mv_index] & 0x3F == from_sq as u16
+                                                        && square.sq_bit_index
+                                                            == ((moves[mv_index] >> 6) as u8 & 0x3F)
+                                                    {
+                                                        self.board.make_move_slow(moves[mv_index]);
+                                                        self.from_square = None;
+                                                    }
+                                                }
+                                            }
+                                        }
 
                                         square.draw_bg(ui, &self.from_square);
                                         square.draw_texture(ui, &ctx.textures);
@@ -129,35 +142,13 @@ impl ChessUi {
                                             }
                                         }
 
-                                        if let Some(hovering_sq_index) = hovering_sq_index {
-                                            // let hovering_sq_occupancy_mask =
-                                            //     Tables::LT_BISHOP_OCCUPANCY_MASKS
-                                            //         [hovering_sq_index as usize];
+                                        // if let Some(ep_square) = self.board.en_passant {
+                                        //     if square.sq_bit_index == ep_square {
+                                        //         square.draw_move_indicator(ui);
+                                        //     }
+                                        // }
 
-                                            // let slider_blockers =
-                                            //     blockers & hovering_sq_occupancy_mask;
-
-                                            // let slider_moves =
-                                            //     self.tables.get_slider_move_mask::<false>(
-                                            //         hovering_sq_index as usize,
-                                            //         slider_blockers,
-                                            //     );
-
-                                            // if ((slider_moves & !white_pieces)
-                                            //     & (1 << square.sq_bit_index))
-                                            //     != 0
-                                            // {
-                                            //     square.draw_move_indicator(ui);
-                                            // }
-
-                                            // if (Tables::LT_BISHOP_OCCUPANCY_MASKS
-                                            //     [hovering_sq_index as usize]
-                                            //     & (1 << square.sq_bit_index))
-                                            //     != 0
-                                            // {
-                                            //     square.draw_move_indicator();
-                                            // }
-                                        }
+                                        if let Some(hovering_sq_index) = hovering_sq_index {}
                                     }
                                 }
 
@@ -209,22 +200,26 @@ impl ChessUi {
                     }
 
                     ui.text(format!("is_valid: {}", self.board.is_valid()));
+                    ui.text(format!(
+                        "ep_square: {:?}",
+                        self.board.en_passant.and_then(|sq| Some(square_name(sq)))
+                    ));
 
-                    display_bitboard!(WhiteKing);
-                    display_bitboard!(WhiteQueen);
-                    display_bitboard!(WhiteRook);
-                    display_bitboard!(WhiteBishop);
-                    display_bitboard!(WhiteKnight);
-                    display_bitboard!(WhitePawn);
+                    // display_bitboard!(WhiteKing);
+                    // display_bitboard!(WhiteQueen);
+                    // display_bitboard!(WhiteRook);
+                    // display_bitboard!(WhiteBishop);
+                    // display_bitboard!(WhiteKnight);
+                    // display_bitboard!(WhitePawn);
 
-                    ui.separator();
+                    // ui.separator();
 
-                    display_bitboard!(BlackKing);
-                    display_bitboard!(BlackQueen);
-                    display_bitboard!(BlackRook);
-                    display_bitboard!(BlackBishop);
-                    display_bitboard!(BlackKnight);
-                    display_bitboard!(BlackPawn);
+                    // display_bitboard!(BlackKing);
+                    // display_bitboard!(BlackQueen);
+                    // display_bitboard!(BlackRook);
+                    // display_bitboard!(BlackBishop);
+                    // display_bitboard!(BlackKnight);
+                    // display_bitboard!(BlackPawn);
                 });
             });
     }
