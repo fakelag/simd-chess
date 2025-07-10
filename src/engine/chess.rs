@@ -1,9 +1,15 @@
 use crate::{constant::PieceId, engine::tables::Tables};
 use std::arch::x86_64::*;
 
-const MV_FLAGS: u16 = 0b1111 << 12;
-const MV_FLAG_DPP: u16 = 0b0001 << 12;
-const MV_FLAG_EPCAP: u16 = 0b0101 << 12;
+pub const MV_FLAGS: u16 = 0b1111 << 12;
+pub const MV_FLAG_PROMOTION: u16 = 0b1000 << 12;
+
+pub const MV_FLAG_DPP: u16 = 0b0001 << 12;
+pub const MV_FLAG_EPCAP: u16 = 0b0101 << 12;
+pub const MV_FLAGS_PR_KNIGHT: u16 = 0b1000 << 12;
+pub const MV_FLAGS_PR_BISHOP: u16 = 0b1001 << 12;
+pub const MV_FLAGS_PR_ROOK: u16 = 0b1010 << 12;
+pub const MV_FLAGS_PR_QUEEN: u16 = 0b1011 << 12;
 
 macro_rules! pop_ls1b {
     ($bitboard:ident) => {{
@@ -72,7 +78,7 @@ impl Board {
 
         move_cursor += self.gen_pawn_moves(
             &mut move_list[move_cursor..],
-            side_cursor,
+            self.b_move,
             opponent_board,
             full_board,
         );
@@ -109,10 +115,10 @@ impl Board {
         );
 
         move_cursor +=
-            self.gen_knight_moves(&mut move_list[move_cursor..], side_cursor, friendly_board);
+            self.gen_knight_moves(&mut move_list[move_cursor..], self.b_move, friendly_board);
 
         move_cursor +=
-            self.gen_king_moves(&mut move_list[move_cursor..], side_cursor, friendly_board);
+            self.gen_king_moves(&mut move_list[move_cursor..], self.b_move, friendly_board);
 
         move_cursor
     }
@@ -120,19 +126,19 @@ impl Board {
     pub fn gen_pawn_moves(
         &self,
         move_list: &mut [u16],
-        side_cursor: usize,
+        b_move: bool,
         opponent_board: u64,
         full_board: u64,
     ) -> usize {
         let mut move_cursor = 0;
-        let mut pawn_bitboard = self.board.bitboards[PieceId::WhitePawn as usize + side_cursor];
+        let mut pawn_bitboard =
+            self.board.bitboards[PieceId::WhitePawn as usize + 6 * b_move as usize];
 
         loop {
             let src_sq = pop_ls1b!(pawn_bitboard);
 
             // Pawn captures
-            let pawn_cap_mask =
-                Tables::LT_PAWN_CAPTURE_MASKS[self.b_move as usize][src_sq as usize];
+            let pawn_cap_mask = Tables::LT_PAWN_CAPTURE_MASKS[b_move as usize][src_sq as usize];
             let mut pawn_cap_bitboard = pawn_cap_mask & opponent_board;
 
             loop {
@@ -150,13 +156,21 @@ impl Board {
             }
 
             // Pawn push
-            if self.b_move {
+            if b_move {
                 let dst_sq = src_sq - 8;
 
                 if (full_board & (1 << dst_sq)) == 0 {
                     match src_sq / 8 {
                         1 => {
-                            eprintln!("Black pawn promotion");
+                            for promotion_flag in [
+                                MV_FLAGS_PR_KNIGHT,
+                                MV_FLAGS_PR_BISHOP,
+                                MV_FLAGS_PR_ROOK,
+                                MV_FLAGS_PR_QUEEN,
+                            ] {
+                                move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
+                                move_cursor += 1;
+                            }
                         }
                         6 => {
                             move_list[move_cursor] = (dst_sq << 6) | src_sq;
@@ -180,7 +194,15 @@ impl Board {
                 if (full_board & (1 << dst_sq)) == 0 {
                     match src_sq / 8 {
                         6 => {
-                            eprintln!("White pawn promotion");
+                            for promotion_flag in [
+                                MV_FLAGS_PR_KNIGHT,
+                                MV_FLAGS_PR_BISHOP,
+                                MV_FLAGS_PR_ROOK,
+                                MV_FLAGS_PR_QUEEN,
+                            ] {
+                                move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
+                                move_cursor += 1;
+                            }
                         }
                         1 => {
                             move_list[move_cursor] = (dst_sq << 6) | src_sq;
@@ -244,12 +266,13 @@ impl Board {
     pub fn gen_knight_moves(
         &self,
         move_list: &mut [u16],
-        side_cursor: usize,
+        b_move: bool,
         friendly_board: u64,
     ) -> usize {
         let mut move_cursor = 0;
 
-        let mut knight_bitboard = self.board.bitboards[PieceId::WhiteKnight as usize + side_cursor];
+        let mut knight_bitboard =
+            self.board.bitboards[PieceId::WhiteKnight as usize + 6 * b_move as usize];
 
         loop {
             let src_sq = pop_ls1b!(knight_bitboard);
@@ -270,12 +293,12 @@ impl Board {
     pub fn gen_king_moves(
         &self,
         move_list: &mut [u16],
-        side_cursor: usize,
+        b_move: bool,
         friendly_board: u64,
     ) -> usize {
         let mut move_cursor = 0;
 
-        let king_bitboard = self.board.bitboards[PieceId::WhiteKing as usize + side_cursor];
+        let king_bitboard = self.board.bitboards[PieceId::WhiteKing as usize + 6 * b_move as usize];
         let src_sq = king_bitboard.trailing_zeros() as u16;
 
         let mut king_moves_bitboard = Tables::LT_KING_MOVE_MASKS[src_sq as usize] & !friendly_board;
@@ -347,8 +370,6 @@ impl Board {
 
         match mv & MV_FLAGS {
             MV_FLAG_EPCAP => {
-                debug_assert!(self.en_passant.is_some());
-
                 if self.b_move {
                     self.board.bitboards[PieceId::WhitePawn as usize] &= !(to_bit << 8);
                 } else {
@@ -364,6 +385,25 @@ impl Board {
                 };
             }
             _ => {}
+        }
+
+        if mv & MV_FLAG_PROMOTION != 0 {
+            let promotion_piece = match mv & MV_FLAGS {
+                MV_FLAGS_PR_KNIGHT => PieceId::WhiteKnight as usize + 6 * self.b_move as usize,
+                MV_FLAGS_PR_BISHOP => PieceId::WhiteBishop as usize + 6 * self.b_move as usize,
+                MV_FLAGS_PR_ROOK => PieceId::WhiteRook as usize + 6 * self.b_move as usize,
+                MV_FLAGS_PR_QUEEN => PieceId::WhiteQueen as usize + 6 * self.b_move as usize,
+                _ => unreachable!(),
+            };
+            println!(
+                "Promoting from {:?} to {:?}. to_bit: {}, from_bit: {}",
+                PieceId::from(from_piece - 1),
+                PieceId::from(promotion_piece),
+                to_bit.trailing_zeros(),
+                from_bit.trailing_zeros()
+            );
+            self.board.bitboards[from_piece - 1] &= !to_bit;
+            self.board.bitboards[promotion_piece] |= to_bit;
         }
 
         self.b_move = !self.b_move;

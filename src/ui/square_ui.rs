@@ -20,6 +20,7 @@ pub struct SquareUi {
     is_hovering: bool,
     is_moving: bool,
     is_dragging: bool,
+    mouse_xy: [f32; 2],
 
     pub sq_bit_index: u8,
 }
@@ -37,6 +38,7 @@ impl SquareUi {
         Self {
             sq_min: [0.0; 2],
             sq_max: [0.0; 2],
+            mouse_xy: [0.0; 2],
             sq_bit_index,
             sq_piece: None,
             primary_clr,
@@ -84,12 +86,20 @@ impl SquareUi {
         [square_w, square_h]
     }
 
+    pub fn reset_moving(&mut self) {
+        self.is_moving = false;
+        self.is_dragging = false;
+    }
+
     pub fn update(
         &mut self,
         ui: &imgui::Ui,
         board: &mut chess::Board,
         sq_from: &mut Option<u8>,
     ) -> bool {
+        self.reset_moving();
+        self.mouse_xy = ui.io().mouse_pos;
+
         let sq_piece = board.piece_at_slow(1 << self.sq_bit_index);
 
         self.sq_piece = if sq_piece == 0 {
@@ -110,16 +120,6 @@ impl SquareUi {
         self.sq_min = [x, y];
         self.sq_max = [x + square_wh[0], y + square_wh[1]];
 
-        if let Some(from_square) = sq_from {
-            if self.is_hovering
-                && *from_square != self.sq_bit_index
-                && (ui.is_mouse_clicked(imgui::MouseButton::Left)
-                    || ui.is_mouse_released(imgui::MouseButton::Left))
-            {
-                return true;
-            }
-        }
-
         if self.sq_piece.is_some() {
             if self.is_hovering && ui.is_mouse_clicked(imgui::MouseButton::Left) {
                 if let Some(from_square) = sq_from {
@@ -134,9 +134,6 @@ impl SquareUi {
             }
         }
 
-        self.is_moving = false;
-        self.is_dragging = false;
-
         if let Some(sq_from) = sq_from {
             if self.sq_bit_index == *sq_from {
                 self.is_moving = true;
@@ -144,6 +141,16 @@ impl SquareUi {
                 if self.sq_piece.is_some() && ui.is_mouse_down(imgui::MouseButton::Left) {
                     self.is_dragging = true;
                 }
+            }
+        }
+
+        if let Some(from_square) = sq_from {
+            if self.is_hovering
+                && *from_square != self.sq_bit_index
+                && (ui.is_mouse_clicked(imgui::MouseButton::Left)
+                    || ui.is_mouse_released(imgui::MouseButton::Left))
+            {
+                return true;
             }
         }
 
@@ -159,7 +166,7 @@ impl SquareUi {
 
             if let Some(sq_piece) = self.sq_piece {
                 if self.is_dragging {
-                    let mouse_xy = ui.io().mouse_pos;
+                    let mouse_xy = self.mouse_xy;
                     let tex_min = [
                         mouse_xy[0] - self.sq_width() / 2.0,
                         mouse_xy[1] - self.sq_height() / 2.0,
