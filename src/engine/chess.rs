@@ -324,7 +324,7 @@ impl Board {
     }
 
     // Returns 0 if there is no piece, PieceId+1 otherwise
-    // Cost estimate: 15 cycles on Skylake
+    // Cost estimate: 7 cycles on Skylake-X
     #[inline(always)]
     fn piece_at_avx512(&mut self, sq_bit: u64) -> usize {
         unsafe {
