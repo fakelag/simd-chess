@@ -1,4 +1,7 @@
-use crate::{constant::PieceId, engine::tables::Tables};
+use crate::{
+    constant::{PieceId, square_name},
+    engine::tables::{self, Tables},
+};
 use std::arch::x86_64::*;
 
 pub const MV_FLAGS: u16 = 0b1111 << 12;
@@ -6,10 +9,14 @@ pub const MV_FLAG_PROMOTION: u16 = 0b1000 << 12;
 
 pub const MV_FLAG_DPP: u16 = 0b0001 << 12;
 pub const MV_FLAG_EPCAP: u16 = 0b0101 << 12;
+
 pub const MV_FLAGS_PR_KNIGHT: u16 = 0b1000 << 12;
 pub const MV_FLAGS_PR_BISHOP: u16 = 0b1001 << 12;
 pub const MV_FLAGS_PR_ROOK: u16 = 0b1010 << 12;
 pub const MV_FLAGS_PR_QUEEN: u16 = 0b1011 << 12;
+
+pub const MV_FLAGS_CASTLE_KING: u16 = 0b0010 << 12;
+pub const MV_FLAGS_CASTLE_QUEEN: u16 = 0b0011 << 12;
 
 macro_rules! pop_ls1b {
     ($bitboard:ident) => {{
@@ -26,14 +33,16 @@ macro_rules! pop_ls1b {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct Bitboards {
     pub bitboards: [u64; 12],
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Board {
     pub board: Bitboards,
     pub b_move: bool,
-    pub castles: [bool; 4], // [white kingside, white queenside, black kingside, black queenside]
+    pub castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
     pub en_passant: Option<u8>,
     pub half_moves: u32,
     pub full_moves: u32,
@@ -44,7 +53,7 @@ impl Board {
         Self {
             board: Bitboards { bitboards: [0; 12] },
             b_move: false,
-            castles: [true, true, true, true],
+            castles: 0b1111,
             en_passant: None,
             half_moves: 0,
             full_moves: 1,
@@ -58,23 +67,13 @@ impl Board {
 
         let friendly_board = self.board.bitboards[side_cursor..side_cursor + 6]
             .iter()
-            .copied()
-            .reduce(|acc, curr| acc | curr)
-            .unwrap();
+            .fold(0, |acc, &bb| acc | bb);
 
         let opponent_board = self.board.bitboards[opponent_cursor..opponent_cursor + 6]
             .iter()
-            .copied()
-            .reduce(|acc, curr| acc | curr)
-            .unwrap();
+            .fold(0, |acc, &bb| acc | bb);
 
-        let full_board = self
-            .board
-            .bitboards
-            .iter()
-            .copied()
-            .reduce(|acc, curr| acc | curr)
-            .unwrap();
+        let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
 
         move_cursor += self.gen_pawn_moves(
             &mut move_list[move_cursor..],
@@ -117,10 +116,75 @@ impl Board {
         move_cursor +=
             self.gen_knight_moves(&mut move_list[move_cursor..], self.b_move, friendly_board);
 
-        move_cursor +=
-            self.gen_king_moves(&mut move_list[move_cursor..], self.b_move, friendly_board);
+        move_cursor += self.gen_king_moves(
+            &mut move_list[move_cursor..],
+            self.b_move,
+            friendly_board,
+            full_board,
+        );
 
         move_cursor
+    }
+
+    pub fn in_check_slow(&self, tables: &Tables, b_move: bool) -> bool {
+        let king_sq = self.board.bitboards[PieceId::WhiteKing as usize + 6 * b_move as usize]
+            .trailing_zeros() as u8;
+
+        self.is_square_attacked(king_sq, b_move, tables)
+    }
+
+    pub fn is_square_attacked(&self, sq_index: u8, b_move: bool, tables: &Tables) -> bool {
+        let pawn_attack_mask = Tables::LT_PAWN_CAPTURE_MASKS[b_move as usize][sq_index as usize];
+        if self.board.bitboards[PieceId::WhitePawn as usize + 6 * !b_move as usize]
+            & pawn_attack_mask
+            != 0
+        {
+            return true;
+        }
+
+        // @todo - En passant check
+
+        let knight_attack_mask = Tables::LT_KNIGHT_MOVE_MASKS[sq_index as usize];
+        if self.board.bitboards[PieceId::WhiteKnight as usize + 6 * !b_move as usize]
+            & knight_attack_mask
+            != 0
+        {
+            return true;
+        }
+
+        // @todo - King might not be able to attack all squares if pinned
+        let king_attack_mask = Tables::LT_KING_MOVE_MASKS[sq_index as usize];
+        if self.board.bitboards[PieceId::WhiteKing as usize + 6 * !b_move as usize]
+            & king_attack_mask
+            != 0
+        {
+            return true;
+        }
+
+        let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+
+        let opponent_rook_board =
+            self.board.bitboards[PieceId::WhiteRook as usize + 6 * !b_move as usize];
+        let opponent_bishop_board =
+            self.board.bitboards[PieceId::WhiteBishop as usize + 6 * !b_move as usize];
+        let opponent_queen_board =
+            self.board.bitboards[PieceId::WhiteQueen as usize + 6 * !b_move as usize];
+
+        let rook_occupancy_mask = Tables::LT_ROOK_OCCUPANCY_MASKS[sq_index as usize];
+        let rook_blockers = full_board & rook_occupancy_mask;
+        let rook_moves = tables.get_slider_move_mask::<true>(sq_index as usize, rook_blockers);
+        if (opponent_rook_board | opponent_queen_board) & rook_moves != 0 {
+            return true;
+        }
+
+        let bishop_occupancy_mask = Tables::LT_BISHOP_OCCUPANCY_MASKS[sq_index as usize];
+        let bishop_blockers = full_board & bishop_occupancy_mask;
+        let bishop_moves = tables.get_slider_move_mask::<false>(sq_index as usize, bishop_blockers);
+        if (opponent_bishop_board | opponent_queen_board) & bishop_moves != 0 {
+            return true;
+        }
+
+        false
     }
 
     pub fn gen_pawn_moves(
@@ -143,6 +207,20 @@ impl Board {
 
             loop {
                 let dst_sq = pop_ls1b!(pawn_cap_bitboard);
+
+                // Capture can also be a promotion
+                if dst_sq / 8 == !b_move as u16 * 7 {
+                    for promotion_flag in [
+                        MV_FLAGS_PR_KNIGHT,
+                        MV_FLAGS_PR_BISHOP,
+                        MV_FLAGS_PR_ROOK,
+                        MV_FLAGS_PR_QUEEN,
+                    ] {
+                        move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
+                        move_cursor += 1;
+                    }
+                    continue;
+                }
                 move_list[move_cursor] = (dst_sq << 6) | src_sq;
                 move_cursor += 1;
             }
@@ -157,6 +235,7 @@ impl Board {
 
             // Pawn push
             if b_move {
+                // println!("src_sq: {}", src_sq);
                 let dst_sq = src_sq - 8;
 
                 if (full_board & (1 << dst_sq)) == 0 {
@@ -295,6 +374,7 @@ impl Board {
         move_list: &mut [u16],
         b_move: bool,
         friendly_board: u64,
+        full_board: u64,
     ) -> usize {
         let mut move_cursor = 0;
 
@@ -307,6 +387,22 @@ impl Board {
             let dst_sq = pop_ls1b!(king_moves_bitboard);
             move_list[move_cursor] = (dst_sq << 6) | src_sq;
             move_cursor += 1;
+        }
+
+        // Castles
+        if self.castles & (0b10 << (!b_move as u8 * 2)) != 0 {
+            // King side castle
+            if (full_board & (0b11 << (src_sq + 1))) == 0 {
+                move_list[move_cursor] = ((src_sq + 2) << 6) | src_sq | MV_FLAGS_CASTLE_KING;
+                move_cursor += 1;
+            }
+        }
+        if self.castles & (0b1 << (!b_move as u8 * 2)) != 0 {
+            // Queen side castle
+            if (full_board & (0b111 << (src_sq - 3))) == 0 {
+                move_list[move_cursor] = ((src_sq - 2) << 6) | src_sq | MV_FLAGS_CASTLE_QUEEN;
+                move_cursor += 1;
+            }
         }
 
         move_cursor
@@ -348,27 +444,62 @@ impl Board {
         }
     }
 
-    pub fn make_move_slow(&mut self, mv: u16) {
-        let from_bit: u64 = 1 << (mv & 0x3F);
+    pub fn make_move_slow(&mut self, mv: u16, tables: &Tables) -> bool {
+        let from_sq = (mv & 0x3F) as u8;
+        let from_bit: u64 = 1 << from_sq;
         let to_bit: u64 = 1 << ((mv >> 6) & 0x3F);
 
-        let from_piece = self.piece_at_slow(from_bit);
+        let move_flags = mv & MV_FLAGS;
+
+        match move_flags {
+            MV_FLAGS_CASTLE_KING => {
+                if [from_sq, from_sq + 1, from_sq + 2]
+                    .iter()
+                    .any(|&square| self.is_square_attacked(square, self.b_move, tables))
+                {
+                    return false;
+                }
+
+                let rook_from_bit = to_bit << 1;
+                let rook_to_bit = to_bit >> 1;
+
+                let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
+                self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
+            }
+            MV_FLAGS_CASTLE_QUEEN => {
+                if [from_sq, from_sq - 1, from_sq - 2]
+                    .iter()
+                    .any(|&square| self.is_square_attacked(square, self.b_move, tables))
+                {
+                    return false;
+                }
+
+                let rook_from_bit = to_bit >> 2;
+                let rook_to_bit = to_bit << 1;
+
+                let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
+                self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
+            }
+            _ => {}
+        }
+
+        let from_piece = self.piece_at_slow(from_bit) - 1;
         let to_piece = self.piece_at_slow(to_bit);
 
-        println!(
-            "From piece: {:?}, To piece: {:?}",
-            PieceId::from(from_piece - 1),
-            to_piece
-        );
+        // println!(
+        //     "From piece: {:?}, To piece: {:?}",
+        //     PieceId::from(from_piece),
+        //     to_piece
+        // );
 
         if to_piece != 0 {
             self.board.bitboards[to_piece - 1] &= !to_bit;
         }
-        self.board.bitboards[from_piece - 1] ^= to_bit | from_bit;
+        self.board.bitboards[from_piece] ^= to_bit | from_bit;
 
         self.en_passant = None;
 
-        match mv & MV_FLAGS {
+        match move_flags {
             MV_FLAG_EPCAP => {
                 if self.b_move {
                     self.board.bitboards[PieceId::WhitePawn as usize] &= !(to_bit << 8);
@@ -395,20 +526,80 @@ impl Board {
                 MV_FLAGS_PR_QUEEN => PieceId::WhiteQueen as usize + 6 * self.b_move as usize,
                 _ => unreachable!(),
             };
-            println!(
-                "Promoting from {:?} to {:?}. to_bit: {}, from_bit: {}",
-                PieceId::from(from_piece - 1),
-                PieceId::from(promotion_piece),
-                to_bit.trailing_zeros(),
-                from_bit.trailing_zeros()
-            );
+            // println!(
+            //     "Promoting from {:?} to {:?}. to_bit: {}, from_bit: {}",
+            //     PieceId::from(from_piece - 1),
+            //     PieceId::from(promotion_piece),
+            //     to_bit.trailing_zeros(),
+            //     from_bit.trailing_zeros()
+            // );
             self.board.bitboards[from_piece - 1] &= !to_bit;
             self.board.bitboards[promotion_piece] |= to_bit;
+        }
+
+        if to_piece != 0 {
+            if (to_piece - 1) == PieceId::WhiteRook as usize + 6 * !self.b_move as usize {
+                match to_bit.trailing_zeros() {
+                    0 => self.castles &= !0b0100,
+                    7 => self.castles &= !0b1000,
+                    56 => self.castles &= !0b0001,
+                    63 => self.castles &= !0b0010,
+
+                    _ => {}
+                }
+            }
+        }
+
+        if from_piece == PieceId::WhiteKing as usize + 6 * self.b_move as usize {
+            self.castles &= !(0b11 << (!self.b_move as u8 * 2));
+        } else if from_piece == PieceId::WhiteRook as usize + 6 * self.b_move as usize {
+            match from_bit.trailing_zeros() {
+                0 => self.castles &= !0b0100,
+                7 => self.castles &= !0b1000,
+                56 => self.castles &= !0b0001,
+                63 => self.castles &= !0b0010,
+                _ => {}
+            }
         }
 
         self.b_move = !self.b_move;
 
         // debug_assert!(self.is_valid(), "Board is invalid after move");
+        true
+    }
+
+    pub fn perft(&mut self, depth: u8, log: bool, tables: &Tables) -> u64 {
+        if depth == 0 {
+            return 1;
+        }
+
+        let mut move_list = [0; 256];
+        let move_count = self.gen_moves_slow(tables, &mut move_list);
+
+        let mut node_count = 0;
+
+        for mv_index in 0..move_count {
+            let mv = move_list[mv_index];
+
+            let board_copy = self.clone();
+
+            if self.make_move_slow(mv, tables) && !self.in_check_slow(tables, !self.b_move) {
+                let nodes = self.perft(depth - 1, false, tables);
+                node_count += nodes;
+
+                if log {
+                    println!(
+                        "{}{}:{}",
+                        square_name((mv & 0x3F) as u8),
+                        square_name(((mv >> 6) & 0x3F) as u8),
+                        nodes
+                    );
+                }
+            }
+            *self = board_copy;
+        }
+
+        node_count
     }
 
     pub fn load_fen(&mut self, fen: &str) -> Result<(), String> {
@@ -520,11 +711,11 @@ impl Board {
                         state = FenState::EnPassant;
                         continue;
                     }
-                    'K' => self.castles[0] = true,
-                    'Q' => self.castles[1] = true,
-                    'k' => self.castles[2] = true,
-                    'q' => self.castles[3] = true,
-                    '-' => self.castles = [false, false, false, false],
+                    'K' => self.castles |= 0b1000,
+                    'Q' => self.castles |= 0b0100,
+                    'k' => self.castles |= 0b0010,
+                    'q' => self.castles |= 0b0001,
+                    '-' => self.castles = 0b0000,
                     _ => return Err(format!("Invalid castling character '{}'", c)),
                 },
                 FenState::EnPassant => match c {
@@ -621,6 +812,8 @@ impl Board {
 }
 
 mod tests {
+    use crate::constant::{create_move, square_index};
+
     use super::*;
 
     #[test]
@@ -655,7 +848,7 @@ mod tests {
         }
 
         assert!(!board.b_move);
-        assert_eq!(board.castles, [true, true, true, true]);
+        assert_eq!(board.castles, 0b1111);
         assert!(board.en_passant.is_none());
         assert_eq!(board.half_moves, 0);
         assert_eq!(board.full_moves, 1);
@@ -693,7 +886,7 @@ mod tests {
         }
 
         assert_eq!(board.b_move, true);
-        assert_eq!(board.castles, [true, true, true, true]);
+        assert_eq!(board.castles, 0b1111);
         assert_eq!(board.en_passant, Some(20));
         assert_eq!(board.half_moves, 0);
         assert_eq!(board.full_moves, 1);
@@ -731,7 +924,7 @@ mod tests {
         }
 
         assert_eq!(board.b_move, true);
-        assert_eq!(board.castles, [false, false, false, false]);
+        assert_eq!(board.castles, 0b0000);
         assert_eq!(board.en_passant, None);
         assert_eq!(board.half_moves, 29);
         assert_eq!(board.full_moves, 30);
@@ -756,5 +949,39 @@ mod tests {
             !board.is_valid(),
             "Board should be invalid with duplicate queens"
         );
+    }
+
+    #[test]
+    fn test_perft_rnbqkbnr_pppppppp_8_8_8_8_PPPPPPPP_RNBQKBNR() {
+        let mut board = Board::new();
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        assert!(board.load_fen(fen).is_ok());
+
+        let tables = Tables::new();
+
+        assert_eq!(board.perft(4, false, &tables), 197281);
+        // assert_eq!(board.perft(5, &tables), 4865609);
+        // assert_eq!(board.perft(6, &tables), 119060324);
+    }
+
+    #[test]
+    fn test_perft_r3k2r_p1ppqpb1_bn2pnp1_3PN3_1p2P3_2N2Q1p_PPPBBPPP_R3K2R() {
+        let mut board = Board::new();
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -";
+        assert!(board.load_fen(fen).is_ok());
+
+        let tables = Tables::new();
+
+        assert!(square_index("a2") == 8);
+
+        // assert!(board.make_move_slow(create_move("a2a3"), &tables));
+        // assert!(board.make_move_slow(create_move("h3g2"), &tables));
+        // assert!(board.make_move_slow(create_move("b2b3"), &tables));
+
+        assert_eq!(board.perft(1, false, &tables), 48);
+        assert_eq!(board.perft(2, false, &tables), 2039);
+        assert_eq!(board.perft(3, false, &tables), 97862);
+        assert_eq!(board.perft(4, false, &tables), 4085603);
+        // assert_eq!(board.perft(6, false, &tables), 8031647685);
     }
 }

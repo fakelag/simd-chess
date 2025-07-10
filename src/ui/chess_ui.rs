@@ -58,6 +58,9 @@ impl ChessUi {
                 let mut board_cursor_xy: [f32; 2] = [0.0; 2];
                 let mut square_wh = [0.0; 2];
 
+                let mut moves = [0u16; 256];
+                let move_count = self.board.gen_moves_slow(&self.tables, &mut moves);
+
                 ui.child_window("board_container")
                     .size([size_w * board_size, -1.0])
                     .scroll_bar(false)
@@ -86,10 +89,6 @@ impl ChessUi {
                                         None
                                     }
                                 });
-
-                                let mut moves = [0u16; 256];
-                                let move_count =
-                                    self.board.gen_moves_slow(&self.tables, &mut moves);
 
                                 board_cursor_xy = ui.cursor_screen_pos();
 
@@ -128,7 +127,7 @@ impl ChessUi {
                                                     break;
                                                 }
 
-                                                self.board.make_move_slow(curmove);
+                                                self.board.make_move_slow(curmove, &self.tables);
                                                 self.from_square = None;
                                             }
                                         }
@@ -152,6 +151,14 @@ impl ChessUi {
                                                 }
                                             }
                                         }
+
+                                        // if self.board.is_square_attacked(
+                                        //     square.sq_bit_index,
+                                        //     self.board.b_move,
+                                        //     &self.tables,
+                                        // ) {
+                                        //     square.draw_move_indicator(ui);
+                                        // }
 
                                         // if let Some(ep_square) = self.board.en_passant {
                                         //     if square.sq_bit_index == ep_square {
@@ -215,6 +222,42 @@ impl ChessUi {
                         "ep_square: {:?}",
                         self.board.en_passant.and_then(|sq| Some(square_name(sq)))
                     ));
+                    ui.text(format!(
+                        "b_move: {}",
+                        if self.board.b_move { "black" } else { "white" }
+                    ));
+
+                    ui.text(format!("Castles: {:04b}", self.board.castles));
+
+                    ui.text(format!(
+                        "half_moves: {}, full_moves: {}",
+                        self.board.half_moves, self.board.full_moves
+                    ));
+
+                    ui.text(format!(
+                        "In check: {}",
+                        self.board.in_check_slow(&self.tables, self.board.b_move)
+                    ));
+
+                    ui.text("Castle moves:");
+                    for mv_index in 0..move_count {
+                        let curmove = moves[mv_index];
+
+                        let from_sq = curmove & 0x3F;
+                        let to_sq = (curmove >> 6) & 0x3F;
+                        let flag = curmove & chess::MV_FLAGS;
+
+                        if flag == chess::MV_FLAGS_CASTLE_KING
+                            || flag == chess::MV_FLAGS_CASTLE_QUEEN
+                        {
+                            ui.text(format!(
+                                "{} -> {}, flag: {:04b}",
+                                square_name(from_sq as u8),
+                                square_name(to_sq as u8),
+                                flag
+                            ));
+                        }
+                    }
 
                     // display_bitboard!(WhiteKing);
                     // display_bitboard!(WhiteQueen);
@@ -287,8 +330,10 @@ impl ChessUi {
                                 [option_x + square_wh[0], option_y + square_wh[1]],
                             )
                         {
-                            self.board
-                                .make_move_slow((from_sq as u16) | ((to_sq as u16) << 6) | *flag);
+                            self.board.make_move_slow(
+                                (from_sq as u16) | ((to_sq as u16) << 6) | *flag,
+                                &self.tables,
+                            );
                             self.ask_promotion = None;
                             self.from_square = None;
                         }

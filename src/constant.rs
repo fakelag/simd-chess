@@ -91,3 +91,15 @@ pub fn square_name(index: u8) -> String {
     let rank = index / 8;
     format!("{}{}", (b'a' + file as u8) as char, rank + 1)
 }
+
+pub fn square_index(name: &str) -> u8 {
+    let file = name.chars().next().unwrap() as u8 - b'a';
+    let rank = name.chars().nth(1).unwrap().to_digit(10).unwrap() as u8 - 1;
+    rank * 8 + file
+}
+
+pub fn create_move(move_str: &str) -> u16 {
+    let from = square_index(&move_str[0..2]);
+    let to = square_index(&move_str[2..4]);
+    (from as u16) | ((to as u16) << 6)
+}
