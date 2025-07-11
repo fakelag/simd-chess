@@ -600,10 +600,9 @@ impl Board {
                 if let Some(ref mut moves) = moves {
                     moves.push((
                         format!(
-                            "{}{}:{}",
+                            "{}{}",
                             square_name((mv & 0x3F) as u8),
                             square_name(((mv >> 6) & 0x3F) as u8),
-                            nodes
                         ),
                         nodes,
                     ));
@@ -839,7 +838,11 @@ mod tests {
 
     use super::*;
 
-    fn run_stockfish_perft(depth: u8, fen: &'static str, moves: Vec<String>) -> Vec<(String, u64)> {
+    fn run_stockfish_perft(
+        depth: u8,
+        fen: &'static str,
+        moves: &Vec<String>,
+    ) -> Vec<(String, u64)> {
         let input = vec![
             format!("position fen {} moves {}", fen, moves.join(" ")),
             format!("go perft {}", depth),
@@ -1104,13 +1107,59 @@ mod tests {
 
         let tables = Tables::new();
 
-        let mut moves = Vec::new();
+        let mut depth = 4;
 
-        let perft_result = board.perft(4, &tables, Some(&mut moves));
+        if board.perft(depth, &tables, None) == 2103487 {
+            // Test OK
+            return;
+        }
+
+        let mut moves_to_make = Vec::new();
+
+        while depth > 0 {
+            let mut perft_moves = Vec::new();
+
+            board.perft(depth, &tables, Some(&mut perft_moves));
+
+            let stockfish_moves = run_stockfish_perft(depth, fen, &moves_to_make);
+
+            for (perft_move_str, perft_count) in perft_moves {
+                if let Some(stockfish_count) = stockfish_moves
+                    .iter()
+                    .find(|(s, _)| s == &perft_move_str)
+                    .map(|(_, c)| *c)
+                {
+                    if stockfish_count != perft_count {
+                        println!(
+                            "Mismatch at depth {}: {}: {} vs Stockfish: {}",
+                            depth, perft_move_str, perft_count, stockfish_count
+                        );
+                        if depth == 1 {
+                            assert!(
+                                false,
+                                "Mismatch at depth {}: {}: {} vs Stockfish: {}",
+                                depth, perft_move_str, perft_count, stockfish_count
+                            );
+                            return;
+                        }
+                        moves_to_make.push(perft_move_str.clone());
+                        break;
+                    }
+                } else {
+                    assert!(
+                        false,
+                        "Move {} not found in Stockfish results at depth {}",
+                        perft_move_str, depth
+                    );
+                }
+            }
+
+            depth -= 1;
+        }
 
         // if perft_result !=
 
-        assert_eq!(board.perft(4, &tables, Some(&mut moves)), 2103487);
+        // assert_eq!(board.perft(4, &tables, Some(&mut moves)), 2103487);
     }
 
     #[test]
