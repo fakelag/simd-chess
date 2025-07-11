@@ -445,6 +445,11 @@ impl Board {
     }
 
     pub fn make_move_slow(&mut self, mv: u16, tables: &Tables) -> bool {
+        // println!(
+        //     "Make: {}{}",
+        //     square_name((mv & 0x3F) as u8),
+        //     square_name(((mv >> 6) & 0x3F) as u8)
+        // );
         let from_sq = (mv & 0x3F) as u8;
         let from_bit: u64 = 1 << from_sq;
         let to_bit: u64 = 1 << ((mv >> 6) & 0x3F);
@@ -533,7 +538,7 @@ impl Board {
             //     to_bit.trailing_zeros(),
             //     from_bit.trailing_zeros()
             // );
-            self.board.bitboards[from_piece - 1] &= !to_bit;
+            self.board.bitboards[from_piece] &= !to_bit;
             self.board.bitboards[promotion_piece] |= to_bit;
         }
 
@@ -568,7 +573,12 @@ impl Board {
         true
     }
 
-    pub fn perft(&mut self, depth: u8, log: bool, tables: &Tables) -> u64 {
+    pub fn perft(
+        &mut self,
+        depth: u8,
+        tables: &Tables,
+        mut moves: Option<&mut Vec<(String, u64)>>,
+    ) -> u64 {
         if depth == 0 {
             return 1;
         }
@@ -584,16 +594,25 @@ impl Board {
             let board_copy = self.clone();
 
             if self.make_move_slow(mv, tables) && !self.in_check_slow(tables, !self.b_move) {
-                let nodes = self.perft(depth - 1, false, tables);
+                let nodes = self.perft(depth - 1, tables, None);
                 node_count += nodes;
 
-                if log {
-                    println!(
-                        "{}{}:{}",
-                        square_name((mv & 0x3F) as u8),
-                        square_name(((mv >> 6) & 0x3F) as u8),
-                        nodes
-                    );
+                if let Some(ref mut moves) = moves {
+                    moves.push((
+                        format!(
+                            "{}{}:{}",
+                            square_name((mv & 0x3F) as u8),
+                            square_name(((mv >> 6) & 0x3F) as u8),
+                            nodes
+                        ),
+                        nodes,
+                    ));
+                    // println!(
+                    //     "{}{}:{}",
+                    //     square_name((mv & 0x3F) as u8),
+                    //     square_name(((mv >> 6) & 0x3F) as u8),
+                    //     nodes
+                    // );
                 }
             }
             *self = board_copy;
@@ -812,9 +831,73 @@ impl Board {
 }
 
 mod tests {
+    const STOCKFISH_LOCATION: &str = "stockfish/stockfish.exe";
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
     use crate::constant::{create_move, square_index};
 
     use super::*;
+
+    fn run_stockfish_perft(depth: u8, fen: &'static str, moves: Vec<String>) -> Vec<(String, u64)> {
+        let input = vec![
+            format!("position fen {} moves {}", fen, moves.join(" ")),
+            format!("go perft {}", depth),
+            "quit".to_string(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+
+        let mut stockfish = Command::new(STOCKFISH_LOCATION)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("Failed to start Stockfish");
+
+        let mut stdin = stockfish.stdin.take().expect("Failed to open stdin");
+
+        std::thread::spawn(move || {
+            stdin
+                .write_all(input.join("\n").as_bytes())
+                .expect("Failed to write to stdin");
+        });
+
+        let output = stockfish.wait_with_output().expect("Failed to read stdout");
+
+        let output_string = String::from_utf8_lossy(&output.stdout).to_string();
+        let output_lines = output_string.split("\n").collect::<Vec<_>>();
+
+        let square_results = output_lines
+            .iter()
+            .filter_map(|&line| {
+                if line.starts_with("Stockfish") {
+                    return None;
+                }
+                if line.starts_with("info") {
+                    return None;
+                }
+                if !line.contains(": ") {
+                    return None;
+                }
+                if line.starts_with("Nodes searched") {
+                    return None;
+                }
+
+                let parts: Vec<&str> = line.split(": ").collect();
+                if parts.len() != 2 {
+                    return None;
+                }
+
+                let square = parts[0].trim();
+                let count = parts[1].trim().parse::<u64>().ok()?;
+
+                Some((square.to_string(), count))
+            })
+            .collect::<Vec<_>>();
+
+        square_results
+    }
 
     #[test]
     fn test_load_fen_start() {
@@ -959,7 +1042,7 @@ mod tests {
 
         let tables = Tables::new();
 
-        assert_eq!(board.perft(4, false, &tables), 197281);
+        assert_eq!(board.perft(4, &tables, None), 197281);
         // assert_eq!(board.perft(5, &tables), 4865609);
         // assert_eq!(board.perft(6, &tables), 119060324);
     }
@@ -972,16 +1055,72 @@ mod tests {
 
         let tables = Tables::new();
 
-        assert!(square_index("a2") == 8);
+        // assert!(square_index("a2") == 8);
 
         // assert!(board.make_move_slow(create_move("a2a3"), &tables));
         // assert!(board.make_move_slow(create_move("h3g2"), &tables));
         // assert!(board.make_move_slow(create_move("b2b3"), &tables));
 
-        assert_eq!(board.perft(1, false, &tables), 48);
-        assert_eq!(board.perft(2, false, &tables), 2039);
-        assert_eq!(board.perft(3, false, &tables), 97862);
-        assert_eq!(board.perft(4, false, &tables), 4085603);
-        // assert_eq!(board.perft(6, false, &tables), 8031647685);
+        // assert_eq!(board.perft(1, false, &tables), 48);
+        // assert_eq!(board.perft(2, false, &tables), 2039);
+        // assert_eq!(board.perft(3, false, &tables), 97862);
+        // assert_eq!(board.perft(4, false, &tables), 4085603);
+        assert_eq!(board.perft(5, &tables, None), 193690690);
+    }
+
+    #[test]
+    fn test_perft_8_2p5_3p4_KP5r_1R3p1k_8_4P1P1_8() {
+        let mut board = Board::new();
+        let fen = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1";
+        assert!(board.load_fen(fen).is_ok());
+
+        let tables = Tables::new();
+
+        assert_eq!(board.perft(6, &tables, None), 11030083);
+    }
+
+    #[test]
+    fn test_perft_r3k2r_Pppp1ppp_1b3nbN_nP6_BBP1P3_q4N2_Pp1P2PP_R2Q1RK1() {
+        let mut board = Board::new();
+        let fen = "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
+        assert!(board.load_fen(fen).is_ok());
+
+        let tables = Tables::new();
+
+        assert_eq!(board.perft(6, &tables, None), 706045033);
+
+        let mirrored = "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1";
+        assert!(board.load_fen(mirrored).is_ok());
+
+        assert_eq!(board.perft(6, &tables, None), 706045033);
+    }
+
+    #[test]
+    fn test_perft_rnbq1k1r_pp1Pbppp_2p5_8_2B5_8_PPP1NnPP_RNBQK2R() {
+        // XXX
+        let mut board = Board::new();
+        let fen = "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8";
+        assert!(board.load_fen(fen).is_ok());
+
+        let tables = Tables::new();
+
+        let mut moves = Vec::new();
+
+        let perft_result = board.perft(4, &tables, Some(&mut moves));
+
+        // if perft_result !=
+
+        assert_eq!(board.perft(4, &tables, Some(&mut moves)), 2103487);
+    }
+
+    #[test]
+    fn test_perft_r4rk1_1pp1qppp_p1np1n2_2b1p1B1_2B1P1b1_P1NP1N2_1PP1QPPP_R4RK1() {
+        let mut board = Board::new();
+        let fen = "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10";
+        assert!(board.load_fen(fen).is_ok());
+
+        let tables = Tables::new();
+
+        assert_eq!(board.perft(5, &tables, None), 164075551);
     }
 }
