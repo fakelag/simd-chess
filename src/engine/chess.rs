@@ -53,7 +53,7 @@ impl Board {
         Self {
             board: Bitboards { bitboards: [0; 12] },
             b_move: false,
-            castles: 0b1111,
+            castles: 0b0000,
             en_passant: None,
             half_moves: 0,
             full_moves: 1,
