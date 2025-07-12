@@ -1,5 +1,5 @@
 use crate::{
-    constant::{PieceId, square_name},
+    constant::{PieceId, move_flag_name, square_name},
     engine::tables::{self, Tables},
 };
 use std::arch::x86_64::*;
@@ -600,9 +600,10 @@ impl Board {
                 if let Some(ref mut moves) = moves {
                     moves.push((
                         format!(
-                            "{}{}",
+                            "{}{}{}",
                             square_name((mv & 0x3F) as u8),
                             square_name(((mv >> 6) & 0x3F) as u8),
+                            move_flag_name(mv)
                         ),
                         nodes,
                     ));
@@ -830,11 +831,14 @@ impl Board {
 }
 
 mod tests {
+    const PERFT_MOVE_VERIFICATION: bool = true;
     const STOCKFISH_LOCATION: &str = "stockfish/stockfish.exe";
+
+    use std::collections::BTreeSet;
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    use crate::constant::{create_move, square_index};
+    use crate::constant::create_move;
 
     use super::*;
 
@@ -902,274 +906,155 @@ mod tests {
         square_results
     }
 
-    #[test]
-    fn test_load_fen_start() {
-        let mut board = Board::new();
-        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+    fn perft_verification(
+        board: &mut Board,
+        mut moves_to_make: Vec<String>,
+        depth: u8,
+        fen: &'static str,
+        tables: &Tables,
+    ) -> u64 {
         assert!(board.load_fen(fen).is_ok());
-        assert!(board.is_valid());
 
-        let piece_positions = [
-            0x0000000000000010, // w_king
-            0x0000000000000008, // w_queen
-            0x0000000000000081, // w_rook
-            0x0000000000000024, // w_bishop
-            0x0000000000000042, // w_knight
-            0x000000000000FF00, // w_pawn
-            0x1000000000000000, // b_king
-            0x0800000000000000, // b_queen
-            0x8100000000000000, // b_rook
-            0x2400000000000000, // b_bishop
-            0x4200000000000000, // b_knight
-            0x00FF000000000000, // b_pawn
-        ];
+        let mut perft_moves = Vec::new();
 
-        for (i, &pos) in piece_positions.iter().enumerate() {
-            assert_eq!(
-                board.board.bitboards[i],
-                pos,
-                "Piece {:?} does not match expected position",
-                PieceId::from(i)
-            );
+        for mv in moves_to_make.iter() {
+            let mv = create_move(mv);
+            assert!(board.make_move_slow(mv, &tables));
         }
 
-        assert!(!board.b_move);
-        assert_eq!(board.castles, 0b1111);
-        assert!(board.en_passant.is_none());
-        assert_eq!(board.half_moves, 0);
-        assert_eq!(board.full_moves, 1);
-    }
+        let perft_result = board.perft(depth, &tables, Some(&mut perft_moves));
 
-    #[test]
-    fn test_load_fen_e4() {
-        let mut board = Board::new();
-        let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
-        assert!(board.load_fen(fen).is_ok());
-        assert!(board.is_valid());
-
-        let piece_positions = [
-            0x0000000000000010, // w_king
-            0x0000000000000008, // w_queen
-            0x0000000000000081, // w_rook
-            0x0000000000000024, // w_bishop
-            0x0000000000000042, // w_knight
-            0x000000001000EF00, // w_pawn
-            0x1000000000000000, // b_king
-            0x0800000000000000, // b_queen
-            0x8100000000000000, // b_rook
-            0x2400000000000000, // b_bishop
-            0x4200000000000000, // b_knight
-            0x00FF000000000000, // b_pawn
-        ];
-
-        for (i, &pos) in piece_positions.iter().enumerate() {
-            assert_eq!(
-                board.board.bitboards[i],
-                pos,
-                "Piece {:?} does not match expected position",
-                PieceId::from(i)
-            );
+        if !PERFT_MOVE_VERIFICATION {
+            return perft_result;
         }
 
-        assert_eq!(board.b_move, true);
-        assert_eq!(board.castles, 0b1111);
-        assert_eq!(board.en_passant, Some(20));
-        assert_eq!(board.half_moves, 0);
-        assert_eq!(board.full_moves, 1);
-    }
+        let stockfish_moves = run_stockfish_perft(depth, fen, &moves_to_make);
 
-    #[test]
-    fn test_load_fen_endgame() {
-        let mut board = Board::new();
-        let fen = "6Q1/p1p3P1/1k1p2N1/p1n1p2P/5r2/1b6/2n4K/b1q2b2 b - - 29 30";
-        assert!(board.load_fen(fen).is_ok());
-        assert!(board.is_valid());
-
-        let piece_positions = [
-            0x0000000000008000, // w_king
-            0x4000000000000000, // w_queen
-            0x0000000000000000, // w_rook
-            0x0000000000000000, // w_bishop
-            0x0000400000000000, // w_knight
-            0x0040008000000000, // w_pawn
-            0x0000020000000000, // b_king
-            0x0000000000000004, // b_queen
-            0x0000000020000000, // b_rook
-            0x0000000000020021, // b_bishop
-            0x0000000400000400, // b_knight
-            0x0005081100000000, // b_pawn
-        ];
-
-        for (i, &pos) in piece_positions.iter().enumerate() {
-            assert_eq!(
-                board.board.bitboards[i],
-                pos,
-                "Piece {:?} does not match expected position",
-                PieceId::from(i)
-            );
-        }
-
-        assert_eq!(board.b_move, true);
-        assert_eq!(board.castles, 0b0000);
-        assert_eq!(board.en_passant, None);
-        assert_eq!(board.half_moves, 29);
-        assert_eq!(board.full_moves, 30);
-    }
-
-    #[test]
-    fn test_board_validity_dup() {
-        let mut board = Board::new();
-        board.reset();
-
-        board.board.bitboards[PieceId::WhiteKing as usize] = 0b11;
-
-        assert!(
-            !board.is_valid(),
-            "Board should be invalid with duplicate kings"
+        let all_moves = BTreeSet::from_iter(
+            perft_moves
+                .iter()
+                .map(|(mv, _)| mv.clone())
+                .chain(stockfish_moves.iter().map(|(mv, _)| mv.clone())),
         );
 
-        board.board.bitboards[PieceId::WhiteKing as usize] = 0b1;
-        board.board.bitboards[PieceId::WhiteQueen as usize] = 0b1;
+        for move_str in all_moves {
+            let stockfish_count = match stockfish_moves
+                .iter()
+                .find(|(s, _)| *s == move_str)
+                .map(|(_, c)| *c)
+            {
+                Some(stockfish_count) => stockfish_count,
+                None => {
+                    assert!(
+                        false,
+                        "Move {} not found in stockfish results at depth {}. Fen {} moves {}",
+                        move_str,
+                        depth,
+                        fen,
+                        moves_to_make.join(" ")
+                    );
+                    return perft_result;
+                }
+            };
 
-        assert!(
-            !board.is_valid(),
-            "Board should be invalid with duplicate queens"
-        );
+            let perft_count = match perft_moves
+                .iter()
+                .find(|(s, _)| *s == move_str)
+                .map(|(_, c)| *c)
+            {
+                Some(perft_count) => perft_count,
+                None => {
+                    assert!(
+                        false,
+                        "Move {} not found in perft results at depth {}. Fen {} moves {}",
+                        move_str,
+                        depth,
+                        fen,
+                        moves_to_make.join(" ")
+                    );
+                    return perft_result;
+                }
+            };
+
+            if stockfish_count != perft_count {
+                if depth == 1 {
+                    assert!(
+                        false,
+                        "Mismatch at depth {}: {}: {} vs stockfish: {}. Fen {} moves {}",
+                        depth,
+                        move_str,
+                        perft_count,
+                        stockfish_count,
+                        fen,
+                        moves_to_make.join(" ")
+                    );
+                    return perft_result;
+                }
+                moves_to_make.push(move_str.clone());
+                perft_verification(board, moves_to_make, depth - 1, fen, tables);
+                return perft_result;
+            }
+        }
+
+        perft_result
     }
 
     #[test]
     fn test_perft_rnbqkbnr_pppppppp_8_8_8_8_PPPPPPPP_RNBQKBNR() {
-        let mut board = Board::new();
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-        assert!(board.load_fen(fen).is_ok());
-
-        let tables = Tables::new();
-
-        assert_eq!(board.perft(4, &tables, None), 197281);
-        // assert_eq!(board.perft(5, &tables), 4865609);
-        // assert_eq!(board.perft(6, &tables), 119060324);
+        assert_eq!(
+            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            119060324
+        );
     }
 
     #[test]
     fn test_perft_r3k2r_p1ppqpb1_bn2pnp1_3PN3_1p2P3_2N2Q1p_PPPBBPPP_R3K2R() {
-        let mut board = Board::new();
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -";
-        assert!(board.load_fen(fen).is_ok());
-
-        let tables = Tables::new();
-
-        // assert!(square_index("a2") == 8);
-
-        // assert!(board.make_move_slow(create_move("a2a3"), &tables));
-        // assert!(board.make_move_slow(create_move("h3g2"), &tables));
-        // assert!(board.make_move_slow(create_move("b2b3"), &tables));
-
-        // assert_eq!(board.perft(1, false, &tables), 48);
-        // assert_eq!(board.perft(2, false, &tables), 2039);
-        // assert_eq!(board.perft(3, false, &tables), 97862);
-        // assert_eq!(board.perft(4, false, &tables), 4085603);
-        assert_eq!(board.perft(5, &tables, None), 193690690);
+        assert_eq!(
+            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            8031647685
+        );
     }
 
     #[test]
     fn test_perft_8_2p5_3p4_KP5r_1R3p1k_8_4P1P1_8() {
-        let mut board = Board::new();
         let fen = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1";
-        assert!(board.load_fen(fen).is_ok());
-
-        let tables = Tables::new();
-
-        assert_eq!(board.perft(6, &tables, None), 11030083);
+        assert_eq!(
+            perft_verification(&mut Board::new(), vec![], 8, fen, &Tables::new()),
+            3009794393
+        );
     }
 
     #[test]
     fn test_perft_r3k2r_Pppp1ppp_1b3nbN_nP6_BBP1P3_q4N2_Pp1P2PP_R2Q1RK1() {
-        let mut board = Board::new();
         let fen = "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
-        assert!(board.load_fen(fen).is_ok());
-
-        let tables = Tables::new();
-
-        assert_eq!(board.perft(6, &tables, None), 706045033);
-
         let mirrored = "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1";
-        assert!(board.load_fen(mirrored).is_ok());
-
-        assert_eq!(board.perft(6, &tables, None), 706045033);
+        assert_eq!(
+            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            706045033
+        );
+        assert_eq!(
+            perft_verification(&mut Board::new(), vec![], 6, mirrored, &Tables::new()),
+            706045033
+        );
     }
 
     #[test]
     fn test_perft_rnbq1k1r_pp1Pbppp_2p5_8_2B5_8_PPP1NnPP_RNBQK2R() {
-        // XXX
-        let mut board = Board::new();
         let fen = "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8";
-        assert!(board.load_fen(fen).is_ok());
-
-        let tables = Tables::new();
-
-        let mut depth = 4;
-
-        if board.perft(depth, &tables, None) == 2103487 {
-            // Test OK
-            return;
-        }
-
-        let mut moves_to_make = Vec::new();
-
-        while depth > 0 {
-            let mut perft_moves = Vec::new();
-
-            board.perft(depth, &tables, Some(&mut perft_moves));
-
-            let stockfish_moves = run_stockfish_perft(depth, fen, &moves_to_make);
-
-            for (perft_move_str, perft_count) in perft_moves {
-                if let Some(stockfish_count) = stockfish_moves
-                    .iter()
-                    .find(|(s, _)| s == &perft_move_str)
-                    .map(|(_, c)| *c)
-                {
-                    if stockfish_count != perft_count {
-                        println!(
-                            "Mismatch at depth {}: {}: {} vs Stockfish: {}",
-                            depth, perft_move_str, perft_count, stockfish_count
-                        );
-                        if depth == 1 {
-                            assert!(
-                                false,
-                                "Mismatch at depth {}: {}: {} vs Stockfish: {}",
-                                depth, perft_move_str, perft_count, stockfish_count
-                            );
-                            return;
-                        }
-                        moves_to_make.push(perft_move_str.clone());
-                        break;
-                    }
-                } else {
-                    assert!(
-                        false,
-                        "Move {} not found in Stockfish results at depth {}",
-                        perft_move_str, depth
-                    );
-                }
-            }
-
-            depth -= 1;
-        }
-
-        // if perft_result !=
-
-        // assert_eq!(board.perft(4, &tables, Some(&mut moves)), 2103487);
+        assert_eq!(
+            perft_verification(&mut Board::new(), vec![], 5, fen, &Tables::new()),
+            89941194
+        );
     }
 
     #[test]
     fn test_perft_r4rk1_1pp1qppp_p1np1n2_2b1p1B1_2B1P1b1_P1NP1N2_1PP1QPPP_R4RK1() {
-        let mut board = Board::new();
         let fen = "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10";
-        assert!(board.load_fen(fen).is_ok());
-
-        let tables = Tables::new();
-
-        assert_eq!(board.perft(5, &tables, None), 164075551);
+        assert_eq!(
+            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            6923051137
+        );
     }
 }

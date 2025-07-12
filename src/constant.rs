@@ -1,3 +1,7 @@
+use core::panic;
+
+use crate::engine::chess::{self};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     White,
@@ -101,5 +105,28 @@ pub fn square_index(name: &str) -> u8 {
 pub fn create_move(move_str: &str) -> u16 {
     let from = square_index(&move_str[0..2]);
     let to = square_index(&move_str[2..4]);
-    (from as u16) | ((to as u16) << 6)
+
+    let flag_bits = if move_str.len() > 4 {
+        match &move_str[4..] {
+            "b" => chess::MV_FLAGS_PR_BISHOP,
+            "n" => chess::MV_FLAGS_PR_KNIGHT,
+            "r" => chess::MV_FLAGS_PR_ROOK,
+            "q" => chess::MV_FLAGS_PR_QUEEN,
+            _ => panic!("Invalid move flag in move string: {}", move_str),
+        }
+    } else {
+        0
+    };
+
+    (from as u16) | ((to as u16) << 6) | flag_bits
+}
+
+pub fn move_flag_name(mv: u16) -> &'static str {
+    match mv & chess::MV_FLAGS {
+        chess::MV_FLAGS_PR_BISHOP => "b",
+        chess::MV_FLAGS_PR_KNIGHT => "n",
+        chess::MV_FLAGS_PR_ROOK => "r",
+        chess::MV_FLAGS_PR_QUEEN => "q",
+        _ => "",
+    }
 }
