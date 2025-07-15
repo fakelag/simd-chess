@@ -120,20 +120,6 @@ impl SquareUi {
         self.sq_min = [x, y];
         self.sq_max = [x + square_wh[0], y + square_wh[1]];
 
-        if self.sq_piece.is_some() {
-            if self.is_hovering && ui.is_mouse_clicked(imgui::MouseButton::Left) {
-                if let Some(from_square) = sq_from {
-                    if *from_square == self.sq_bit_index {
-                        *sq_from = None;
-                    } else {
-                        *sq_from = Some(self.sq_bit_index);
-                    }
-                } else {
-                    *sq_from = Some(self.sq_bit_index);
-                }
-            }
-        }
-
         if let Some(sq_from) = sq_from {
             if self.sq_bit_index == *sq_from {
                 self.is_moving = true;
@@ -151,6 +137,20 @@ impl SquareUi {
                     || ui.is_mouse_released(imgui::MouseButton::Left))
             {
                 return true;
+            }
+        }
+
+        if self.sq_piece.is_some() {
+            if self.is_hovering && ui.is_mouse_clicked(imgui::MouseButton::Left) {
+                if let Some(from_square) = sq_from {
+                    if *from_square == self.sq_bit_index {
+                        *sq_from = None;
+                    } else {
+                        *sq_from = Some(self.sq_bit_index);
+                    }
+                } else {
+                    *sq_from = Some(self.sq_bit_index);
+                }
             }
         }
 
