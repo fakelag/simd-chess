@@ -43,7 +43,7 @@ pub struct Board {
     pub board: Bitboards,
     pub b_move: bool,
     pub castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
-    pub en_passant: Option<u8>,
+    pub en_passant: Option<u8>, // @perf - Encode as 64u8
     pub half_moves: u32,
     pub full_moves: u32,
 }
@@ -73,7 +73,7 @@ impl Board {
             .iter()
             .fold(0, |acc, &bb| acc | bb);
 
-        let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+        let full_board = friendly_board | opponent_board;
 
         move_cursor += self.gen_pawn_moves(
             &mut move_list[move_cursor..],
@@ -152,7 +152,8 @@ impl Board {
             return true;
         }
 
-        // @todo - King might not be able to attack all squares if pinned
+        // @todo - King might not be able to attack all squares if pinned -
+        // but this does not matter for castling check
         let king_attack_mask = Tables::LT_KING_MOVE_MASKS[sq_index as usize];
         if self.board.bitboards[PieceId::WhiteKing as usize + 6 * !b_move as usize]
             & king_attack_mask
@@ -523,8 +524,8 @@ impl Board {
             _ => {}
         }
 
-        if mv & MV_FLAG_PROMOTION != 0 {
-            let promotion_piece = match mv & MV_FLAGS {
+        if move_flags & MV_FLAG_PROMOTION != 0 {
+            let promotion_piece = match move_flags {
                 MV_FLAGS_PR_KNIGHT => PieceId::WhiteKnight as usize + 6 * self.b_move as usize,
                 MV_FLAGS_PR_BISHOP => PieceId::WhiteBishop as usize + 6 * self.b_move as usize,
                 MV_FLAGS_PR_ROOK => PieceId::WhiteRook as usize + 6 * self.b_move as usize,
@@ -542,6 +543,7 @@ impl Board {
             self.board.bitboards[promotion_piece] |= to_bit;
         }
 
+        // @perf - Castling rights could be encoded into a table to avoid branches
         if to_piece != 0 {
             if (to_piece - 1) == PieceId::WhiteRook as usize + 6 * !self.b_move as usize {
                 match to_bit.trailing_zeros() {
@@ -549,7 +551,6 @@ impl Board {
                     7 => self.castles &= !0b1000,
                     56 => self.castles &= !0b0001,
                     63 => self.castles &= !0b0010,
-
                     _ => {}
                 }
             }
@@ -832,7 +833,7 @@ impl Board {
 
 mod tests {
     const PERFT_MOVE_VERIFICATION: bool = true;
-    const STOCKFISH_LOCATION: &str = "stockfish/stockfish.exe";
+    const STOCKFISH_LOCATION: &str = "bin/stockfish.exe";
 
     use std::collections::BTreeSet;
     use std::io::Write;
