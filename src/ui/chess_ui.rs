@@ -5,6 +5,19 @@ use crate::{
     window,
 };
 
+use std::io::{BufRead, BufReader, Write};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpponentState {
+    Idle,
+    Thinking,
+}
+
+pub struct OpponentProcess {
+    pub process: std::process::Child,
+    pub state: OpponentState,
+}
+
 pub struct ChessUi {
     board: chess::Board,
     fen_input: String,
@@ -12,6 +25,8 @@ pub struct ChessUi {
     ask_promotion: Option<(u8, u8)>,
     tables: Tables,
     squares: Vec<SquareUi>,
+
+    opponent_engine: Option<OpponentProcess>,
 }
 
 impl ChessUi {
@@ -28,11 +43,118 @@ impl ChessUi {
 
         Self {
             board,
+            squares,
             fen_input: String::from(fen),
             from_square: None,
             ask_promotion: None,
             tables: Tables::new(),
-            squares,
+            opponent_engine: None,
+        }
+    }
+
+    pub fn spawn_opponent_process(&mut self) {
+        let mut child_process = std::process::Command::new("target/debug/chess.exe")
+            .arg("uci")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to start opponent chess process");
+
+        child_process
+            .stdin
+            .as_mut()
+            .expect("Failed to open opponent stdin")
+            .write_all("uci\n".as_bytes())
+            .expect("Failed to write to opponent stdin");
+
+        let stdout = child_process
+            .stdout
+            .as_mut()
+            .expect("Failed to open opponent stdout");
+
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if line == "uciok" {
+                        println!("Opponent is ready");
+                        break;
+                    } else {
+                        println!("Ignored line: {}", line);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading from opponent stdout: {}", e);
+                    break;
+                }
+            }
+        }
+
+        self.opponent_engine = Some(OpponentProcess {
+            process: child_process,
+            state: OpponentState::Idle,
+        });
+    }
+
+    pub fn opponent_nextmove(&mut self) {
+        let opponent = match &mut self.opponent_engine {
+            Some(process) => process,
+            None => {
+                eprintln!("No opponent process running");
+                return;
+            }
+        };
+
+        if opponent.state != OpponentState::Idle {
+            eprintln!("Opponent is already thinking");
+            return;
+        }
+
+        opponent
+            .process
+            .stdin
+            .as_mut()
+            .expect("Failed to open opponent stdin")
+            .write_all("position startpos\ngo depth 5\n".as_bytes())
+            .expect("Failed to write to opponent stdin");
+
+        opponent.state = OpponentState::Thinking;
+    }
+
+    pub fn opponent_query(&mut self) {
+        let opponent = match &mut self.opponent_engine {
+            Some(process) => process,
+            None => {
+                eprintln!("No opponent process running");
+                return;
+            }
+        };
+
+        if opponent.state != OpponentState::Thinking {
+            panic!("Opponent is not thinking");
+        }
+
+        let stdout = opponent
+            .process
+            .stdout
+            .as_mut()
+            .expect("Failed to open opponent stdout");
+
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if line.starts_with("bestmove") {
+                        println!("Opponent move: {}", line);
+                        opponent.state = OpponentState::Idle;
+                        break;
+                    } else {
+                        println!("Unexpected line: {}", line);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading from opponent stdout: {}", e);
+                    break;
+                }
+            }
         }
     }
 
@@ -256,6 +378,27 @@ impl ChessUi {
                                 square_name(to_sq as u8),
                                 flag
                             ));
+                        }
+                    }
+
+                    ui.separator();
+
+                    match &mut self.opponent_engine {
+                        Some(opponent) => {
+                            if opponent.state == OpponentState::Thinking {
+                                ui.text("Opponent is thinking...");
+                                self.opponent_query();
+                            } else {
+                                if ui.button("Next move") {
+                                    self.opponent_nextmove();
+                                }
+                            }
+                        }
+                        None => {
+                            ui.text("No opponent process running");
+                            if ui.button("Spawn opponent") {
+                                self.spawn_opponent_process();
+                            }
                         }
                     }
 
