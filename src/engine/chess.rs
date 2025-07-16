@@ -1,6 +1,6 @@
 use crate::{
-    constant::{PieceId, move_flag_name, square_name},
-    engine::tables::{self, Tables},
+    constant::{self, PieceId},
+    engine::tables::Tables,
 };
 use std::arch::x86_64::*;
 
@@ -599,15 +599,7 @@ impl Board {
                 node_count += nodes;
 
                 if let Some(ref mut moves) = moves {
-                    moves.push((
-                        format!(
-                            "{}{}{}",
-                            square_name((mv & 0x3F) as u8),
-                            square_name(((mv >> 6) & 0x3F) as u8),
-                            move_flag_name(mv)
-                        ),
-                        nodes,
-                    ));
+                    moves.push((constant::move_string(mv), nodes));
                     // println!(
                     //     "{}{}:{}",
                     //     square_name((mv & 0x3F) as u8),

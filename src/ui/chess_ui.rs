@@ -1,39 +1,25 @@
 use crate::{
     constant::{PieceId, square_name},
-    engine::{tables::Tables, *},
+    engine::*,
+    matchmaking::Matchmaking,
     ui::square_ui::SquareUi,
+    uicomponents::text_input::ImguiTextInput,
     window,
 };
 
-use std::io::{BufRead, BufReader, Write};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpponentState {
-    Idle,
-    Thinking,
-}
-
-pub struct OpponentProcess {
-    pub process: std::process::Child,
-    pub state: OpponentState,
-}
-
 pub struct ChessUi {
-    board: chess::Board,
-    fen_input: String,
     from_square: Option<u8>,
     ask_promotion: Option<(u8, u8)>,
-    tables: Tables,
+    matchmaking: Matchmaking,
     squares: Vec<SquareUi>,
 
-    opponent_engine: Option<OpponentProcess>,
+    input_fen: ImguiTextInput,
+    input_white_engine: ImguiTextInput,
+    input_black_engine: ImguiTextInput,
 }
 
 impl ChessUi {
-    pub fn new(fen: &str) -> Self {
-        let mut board = chess::Board::new();
-        board.load_fen(fen).unwrap();
-
+    pub fn new(fen: &'static str) -> Self {
         let mut squares = Vec::with_capacity(64);
         for rank in (0..8).rev() {
             for file in 0..8 {
@@ -41,124 +27,31 @@ impl ChessUi {
             }
         }
 
+        let matchmaking = Matchmaking::new(fen).unwrap();
+
         Self {
-            board,
+            matchmaking,
             squares,
-            fen_input: String::from(fen),
             from_square: None,
             ask_promotion: None,
-            tables: Tables::new(),
-            opponent_engine: None,
-        }
-    }
-
-    pub fn spawn_opponent_process(&mut self) {
-        let mut child_process = std::process::Command::new("target/debug/chess.exe")
-            .arg("uci")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("Failed to start opponent chess process");
-
-        child_process
-            .stdin
-            .as_mut()
-            .expect("Failed to open opponent stdin")
-            .write_all("uci\n".as_bytes())
-            .expect("Failed to write to opponent stdin");
-
-        let stdout = child_process
-            .stdout
-            .as_mut()
-            .expect("Failed to open opponent stdout");
-
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    if line == "uciok" {
-                        println!("Opponent is ready");
-                        break;
-                    } else {
-                        println!("Ignored line: {}", line);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error reading from opponent stdout: {}", e);
-                    break;
-                }
-            }
-        }
-
-        self.opponent_engine = Some(OpponentProcess {
-            process: child_process,
-            state: OpponentState::Idle,
-        });
-    }
-
-    pub fn opponent_nextmove(&mut self) {
-        let opponent = match &mut self.opponent_engine {
-            Some(process) => process,
-            None => {
-                eprintln!("No opponent process running");
-                return;
-            }
-        };
-
-        if opponent.state != OpponentState::Idle {
-            eprintln!("Opponent is already thinking");
-            return;
-        }
-
-        opponent
-            .process
-            .stdin
-            .as_mut()
-            .expect("Failed to open opponent stdin")
-            .write_all("position startpos\ngo depth 5\n".as_bytes())
-            .expect("Failed to write to opponent stdin");
-
-        opponent.state = OpponentState::Thinking;
-    }
-
-    pub fn opponent_query(&mut self) {
-        let opponent = match &mut self.opponent_engine {
-            Some(process) => process,
-            None => {
-                eprintln!("No opponent process running");
-                return;
-            }
-        };
-
-        if opponent.state != OpponentState::Thinking {
-            panic!("Opponent is not thinking");
-        }
-
-        let stdout = opponent
-            .process
-            .stdout
-            .as_mut()
-            .expect("Failed to open opponent stdout");
-
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    if line.starts_with("bestmove") {
-                        println!("Opponent move: {}", line);
-                        opponent.state = OpponentState::Idle;
-                        break;
-                    } else {
-                        println!("Unexpected line: {}", line);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error reading from opponent stdout: {}", e);
-                    break;
-                }
-            }
+            input_fen: ImguiTextInput::new(
+                imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
+                None,
+            ),
+            input_white_engine: ImguiTextInput::new(
+                imgui::InputTextFlags::AUTO_SELECT_ALL,
+                Some("chess.exe"),
+            ),
+            input_black_engine: ImguiTextInput::new(
+                imgui::InputTextFlags::AUTO_SELECT_ALL,
+                Some("chess.exe"),
+            ),
         }
     }
 
     pub fn draw(&mut self, ctx: window::DrawCtx) {
+        self.matchmaking.uci_query();
+
         let ui = ctx.ui;
 
         let [display_w, display_h] = ui.io().display_size;
@@ -181,7 +74,10 @@ impl ChessUi {
                 let mut square_wh = [0.0; 2];
 
                 let mut moves = [0u16; 256];
-                let move_count = self.board.gen_moves_slow(&self.tables, &mut moves);
+                let move_count = self
+                    .matchmaking
+                    .board
+                    .gen_moves_slow(&self.matchmaking.tables, &mut moves);
 
                 ui.child_window("board_container")
                     .size([size_w * board_size, -1.0])
@@ -222,7 +118,7 @@ impl ChessUi {
                                             square.reset_moving();
                                         } else if square.update(
                                             ui,
-                                            &mut self.board,
+                                            &mut self.matchmaking.board,
                                             &mut self.from_square,
                                         ) {
                                             for mv_index in 0..move_count {
@@ -249,7 +145,10 @@ impl ChessUi {
                                                     break;
                                                 }
 
-                                                self.board.make_move_slow(curmove, &self.tables);
+                                                self.matchmaking.board.make_move_slow(
+                                                    curmove,
+                                                    &self.matchmaking.tables,
+                                                );
                                                 self.from_square = None;
                                             }
                                         }
@@ -274,15 +173,15 @@ impl ChessUi {
                                             }
                                         }
 
-                                        // if self.board.is_square_attacked(
+                                        // if self.matchmaking.board.is_square_attacked(
                                         //     square.sq_bit_index,
-                                        //     self.board.b_move,
+                                        //     self.matchmaking.board.b_move,
                                         //     &self.tables,
                                         // ) {
                                         //     square.draw_move_indicator(ui);
                                         // }
 
-                                        // if let Some(ep_square) = self.board.en_passant {
+                                        // if let Some(ep_square) = self.matchmaking.board.en_passant {
                                         //     if square.sq_bit_index == ep_square {
                                         //         square.draw_move_indicator(ui);
                                         //     }
@@ -300,23 +199,14 @@ impl ChessUi {
                                 }
                             });
 
-                        let [width_avail, _] = ui.content_region_avail();
-
-                        let width_var = ui.push_item_width(width_avail);
-                        if ui
-                            .input_text("##fen_inp", &mut self.fen_input)
-                            .auto_select_all(true)
-                            .enter_returns_true(true)
-                            .build()
-                        {
-                            if let Err(err) = self.board.load_fen(&self.fen_input) {
-                                eprintln!("Failed to load FEN: {}", err);
-                            } else {
-                                println!("FEN loaded: {}", self.fen_input);
-                                self.fen_input.clear();
+                            if let Some(fen) = self.input_fen
+                                .draw(None, ui, "fen_inp") {
+                                    if let Err(err) = self.matchmaking.load_fen(&fen) {
+                                        eprintln!("Failed to load FEN: {}", err);
+                                    } else {
+                                        self.input_fen.buf.clear();
+                                    }
                             }
-                        }
-                        width_var.end();
                     });
 
                 var_window_padding.pop();
@@ -329,36 +219,36 @@ impl ChessUi {
                             ui.text(stringify!($name));
                             ui.text(format!(
                                 "{:032b}",
-                                self.board.board.bitboards[PieceId::$name as usize] >> 32
+                                self.matchmaking.board.board.bitboards[PieceId::$name as usize] >> 32
                             ));
                             ui.text(format!(
                                 "{:032b}",
-                                self.board.board.bitboards[PieceId::$name as usize] & 0xFFFFFFFF
+                                self.matchmaking.board.board.bitboards[PieceId::$name as usize] & 0xFFFFFFFF
                             ));
-                            // ui.text(format!("{:016X}", self.board.pieces[PieceId::$name as usize]));
+                            // ui.text(format!("{:016X}", self.matchmaking.board.pieces[PieceId::$name as usize]));
                         };
                     }
 
-                    ui.text(format!("is_valid: {}", self.board.is_valid()));
+                    ui.text(format!("is_valid: {}", self.matchmaking.board.is_valid()));
                     ui.text(format!(
                         "ep_square: {:?}",
-                        self.board.en_passant.and_then(|sq| Some(square_name(sq)))
+                        self.matchmaking.board.en_passant.and_then(|sq| Some(square_name(sq)))
                     ));
                     ui.text(format!(
                         "b_move: {}",
-                        if self.board.b_move { "black" } else { "white" }
+                        if self.matchmaking.board.b_move { "black" } else { "white" }
                     ));
 
-                    ui.text(format!("Castles: {:04b}", self.board.castles));
+                    ui.text(format!("Castles: {:04b}", self.matchmaking.board.castles));
 
                     ui.text(format!(
                         "half_moves: {}, full_moves: {}",
-                        self.board.half_moves, self.board.full_moves
+                        self.matchmaking.board.half_moves, self.matchmaking.board.full_moves
                     ));
 
                     ui.text(format!(
                         "In check: {}",
-                        self.board.in_check_slow(&self.tables, self.board.b_move)
+                        self.matchmaking.board.in_check_slow(&self.matchmaking.tables, self.matchmaking.board.b_move)
                     ));
 
                     ui.text("Castle moves:");
@@ -383,24 +273,43 @@ impl ChessUi {
 
                     ui.separator();
 
-                    match &mut self.opponent_engine {
-                        Some(opponent) => {
-                            if opponent.state == OpponentState::Thinking {
-                                ui.text("Opponent is thinking...");
-                                self.opponent_query();
-                            } else {
-                                if ui.button("Next move") {
-                                    self.opponent_nextmove();
-                                }
-                            }
-                        }
-                        None => {
-                            ui.text("No opponent process running");
-                            if ui.button("Spawn opponent") {
-                                self.spawn_opponent_process();
-                            }
+                    self.input_white_engine.draw(Some("White Engine"), ui, "w_engine_inp");
+                    self.input_black_engine.draw(Some("Black Engine"), ui, "b_engine_inp");
+
+                    if ui.button("Spawn Engines") {
+                        if let Err(err) = self.matchmaking.respawn_engines(
+                            &self.input_white_engine.buf,
+                            &self.input_black_engine.buf,
+                        ) {
+                            eprintln!("Failed to spawn engines: {}", err);
+                        } else {
+                            self.input_white_engine.buf.clear();
+                            self.input_black_engine.buf.clear();
                         }
                     }
+
+                    if ui.button("Next Move") {
+                        self.matchmaking.uci_nextmove();
+                    }
+
+                    // match &mut self.opponent_engine {
+                    //     Some(opponent) => {
+                    //         if opponent.state == OpponentState::Thinking {
+                    //             ui.text("Opponent is thinking...");
+                    //             self.opponent_query();
+                    //         } else {
+                    //             if ui.button("Next move") {
+                    //                 self.opponent_nextmove();
+                    //             }
+                    //         }
+                    //     }
+                    //     None => {
+                    //         ui.text("No opponent process running");
+                    //         if ui.button("Spawn opponent") {
+                    //             self.spawn_opponent_process();
+                    //         }
+                    //     }
+                    // }
 
                     // display_bitboard!(WhiteKing);
                     // display_bitboard!(WhiteQueen);
@@ -445,7 +354,7 @@ impl ChessUi {
                     .enumerate()
                     .for_each(|(i, flag)| {
                         let texture_id = ctx.textures
-                            [i + PieceId::WhiteQueen as usize + self.board.b_move as usize * 6];
+                            [i + PieceId::WhiteQueen as usize + self.matchmaking.board.b_move as usize * 6];
 
                         let [option_x, option_y] =
                             [selector_x + square_wh[0] * i as f32, selector_y];
@@ -473,9 +382,9 @@ impl ChessUi {
                                 [option_x + square_wh[0], option_y + square_wh[1]],
                             )
                         {
-                            self.board.make_move_slow(
+                            self.matchmaking.board.make_move_slow(
                                 (from_sq as u16) | ((to_sq as u16) << 6) | *flag,
-                                &self.tables,
+                                &self.matchmaking.tables,
                             );
                             self.ask_promotion = None;
                             self.from_square = None;

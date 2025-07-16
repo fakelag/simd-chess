@@ -130,3 +130,12 @@ pub fn move_flag_name(mv: u16) -> &'static str {
         _ => "",
     }
 }
+
+pub fn move_string(mv: u16) -> String {
+    format!(
+        "{}{}{}",
+        square_name((mv & 0x3F) as u8),
+        square_name(((mv >> 6) & 0x3F) as u8),
+        move_flag_name(mv)
+    )
+}

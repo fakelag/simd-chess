@@ -8,7 +8,9 @@ use crate::{
 mod clipb;
 mod constant;
 mod engine;
+mod matchmaking;
 mod ui;
+mod uicomponents;
 mod window;
 
 fn chess_ui() -> anyhow::Result<()> {
@@ -68,7 +70,7 @@ fn chess_uci() -> anyhow::Result<()> {
                 };
 
                 if let Some("moves") = input.next() {
-                    for mv_str in input {
+                    while let Some(mv_str) = input.next() {
                         let mv = constant::create_move(mv_str);
 
                         if !board.make_move_slow(mv, &tables) {
@@ -77,7 +79,7 @@ fn chess_uci() -> anyhow::Result<()> {
                     }
                 }
             }
-            Some("go") => loop {
+            Some("go") => {
                 let command_str = match input.next() {
                     Some(cmd) => cmd,
                     None => break,
@@ -92,11 +94,19 @@ fn chess_uci() -> anyhow::Result<()> {
 
                         // @todo - return bestmove
 
-                        println!("bestmove e2e4");
+                        let mut move_list = [0u16; 256];
+                        let move_count = board.gen_moves_slow(&tables, &mut move_list);
+
+                        if move_count == 0 {
+                            println!("bestmove 0000");
+                        } else {
+                            let best_move = move_list[0];
+                            println!("bestmove {}", constant::move_string(best_move));
+                        }
                     }
                     _ => return Err(anyhow::anyhow!("Unknown command in go: {}", command_str)),
                 }
-            },
+            }
             Some("stop") => return Err(anyhow::anyhow!("Stop command received")),
             Some("quit") => {
                 return Ok(());
@@ -110,7 +120,7 @@ fn chess_uci() -> anyhow::Result<()> {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).expect("no pattern given");
+    let mode = std::env::args().nth(1).unwrap_or("gui".to_string());
 
     let result = match mode.as_str() {
         "gui" => chess_ui(),
@@ -120,6 +130,6 @@ fn main() {
 
     match result {
         Ok(_) => println!("Exited successfully"),
-        Err(e) => eprintln!("Error: {}", e),
+        Err(e) => println!("Error: {}", e),
     };
 }
