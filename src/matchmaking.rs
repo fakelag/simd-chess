@@ -86,7 +86,7 @@ impl Matchmaking {
 
     pub fn make_move_with_validation(&mut self, mv: u16) -> anyhow::Result<()> {
         let mv_string = constant::move_string(mv);
-        let is_legal_move = self.get_legal_moves().contains(&mv);
+        let is_legal_move = self.legal_moves.contains(&mv);
 
         if !is_legal_move {
             return Err(anyhow::anyhow!("Move {} is not a legal move", mv_string));
@@ -149,9 +149,9 @@ impl Matchmaking {
             .process
             .stdin
             .as_mut()
-            .expect("Failed to open opponent stdin")
+            .expect("Failed to open engine stdin")
             .write_all(position_string.as_bytes())
-            .expect("Failed to write to opponent stdin");
+            .expect("Failed to write to engine stdin");
 
         engine.state = EngineState::Thinking;
     }
@@ -204,20 +204,31 @@ impl Matchmaking {
         for line in BufReader::new(stdout).lines() {
             match line {
                 Ok(line) => {
-                    if let Some(bestmove) = line.strip_prefix("bestmove ") {
-                        println!("Bestmove: {}", bestmove);
+                    let mut parts = line.split_whitespace();
 
-                        engine.state = EngineState::Idle;
-
-                        let mv = constant::create_move(bestmove);
-
-                        if let Err(err) = self.make_move_with_validation(mv) {
-                            panic!("Invalid move from engine: {}: {}", bestmove, err);
-                        }
-                        return true;
-                    } else {
+                    if parts.next() != Some("bestmove") {
                         println!("Unexpected line from engine process: {}", line);
+                        continue;
                     }
+
+                    let bestmove = match parts.next() {
+                        Some(mv) => mv,
+                        None => {
+                            eprintln!("No bestmove found in engine output: {}", line);
+                            continue;
+                        }
+                    };
+
+                    println!("Bestmove: \"{}\"", bestmove);
+
+                    engine.state = EngineState::Idle;
+
+                    let mv = constant::fix_move(&self.board, constant::create_move(bestmove));
+
+                    if let Err(err) = self.make_move_with_validation(mv) {
+                        panic!("Invalid move from engine: {}: {}", bestmove, err);
+                    }
+                    return true;
                 }
                 Err(e) => {
                     eprintln!("Error reading from engine stdout: {}", e);
@@ -230,13 +241,20 @@ impl Matchmaking {
     }
 
     fn spawn_engine(&self, engine_path: &str) -> anyhow::Result<EngineProcess> {
-        let mut child_process = std::process::Command::new(format!("bin/{}", engine_path))
-            .arg("uci")
+        let mut command = std::process::Command::new(format!("bin/{}", engine_path));
+
+        command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        if !engine_path.starts_with("stockfish") {
+            command.arg("uci");
+        }
+
+        let mut child_process = command
             .spawn()
-            .expect("Failed to start opponent chess process");
+            .expect("Failed to start engine chess process");
 
         child_process
             .stdin

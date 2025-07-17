@@ -86,7 +86,7 @@ fn chess_uci() -> anyhow::Result<()> {
 
                 if let Some("moves") = moves_it.next() {
                     while let Some(mv_str) = moves_it.next() {
-                        let mv = constant::create_move(mv_str);
+                        let mv = constant::fix_move(&board, constant::create_move(mv_str));
 
                         if !board.make_move_slow(mv, &tables) {
                             return Err(anyhow::anyhow!("Invalid move: {}", mv_str));

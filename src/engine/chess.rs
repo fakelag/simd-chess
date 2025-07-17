@@ -391,14 +391,14 @@ impl Board {
         }
 
         // Castles
-        if self.castles & (0b10 << (!b_move as u8 * 2)) != 0 {
+        if self.is_kingside_castle_allowed(b_move) {
             // King side castle
             if (full_board & (0b11 << (src_sq + 1))) == 0 {
                 move_list[move_cursor] = ((src_sq + 2) << 6) | src_sq | MV_FLAGS_CASTLE_KING;
                 move_cursor += 1;
             }
         }
-        if self.castles & (0b1 << (!b_move as u8 * 2)) != 0 {
+        if self.is_queenside_castle_allowed(b_move) {
             // Queen side castle
             if (full_board & (0b111 << (src_sq - 3))) == 0 {
                 move_list[move_cursor] = ((src_sq - 2) << 6) | src_sq | MV_FLAGS_CASTLE_QUEEN;
@@ -823,6 +823,16 @@ impl Board {
 
         true
     }
+
+    #[inline(always)]
+    fn is_kingside_castle_allowed(&self, b_move: bool) -> bool {
+        self.castles & (0b10 << (!b_move as u8 * 2)) != 0
+    }
+
+    #[inline(always)]
+    fn is_queenside_castle_allowed(&self, b_move: bool) -> bool {
+        self.castles & (0b1 << (!b_move as u8 * 2)) != 0
+    }
 }
 
 mod tests {
@@ -913,7 +923,7 @@ mod tests {
         let mut perft_moves = Vec::new();
 
         for mv in moves_to_make.iter() {
-            let mv = create_move(mv);
+            let mv = constant::fix_move(board, constant::create_move(mv));
             assert!(board.make_move_slow(mv, &tables));
         }
 
