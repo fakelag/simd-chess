@@ -614,7 +614,7 @@ impl Board {
         node_count
     }
 
-    pub fn load_fen(&mut self, fen: &str) -> Result<(), String> {
+    pub fn load_fen(&mut self, fen: &str) -> Result<usize, String> {
         self.reset();
 
         #[derive(Debug)]
@@ -630,8 +630,10 @@ impl Board {
         let mut rank = 7;
         let mut file = 0;
         let mut state = FenState::Placement;
+        let mut fen_length = 0;
 
         for c in fen.chars() {
+            fen_length += 1;
             match state {
                 FenState::Placement => {
                     let pos = (rank * 8) + file;
@@ -788,7 +790,7 @@ impl Board {
             }
         }
 
-        Ok(())
+        Ok(fen_length)
     }
 
     pub fn reset(&mut self) {

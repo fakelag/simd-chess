@@ -50,27 +50,42 @@ fn chess_uci() -> anyhow::Result<()> {
             }
             Some("isready") => println!("readyok"),
             Some("position") => {
-                let fen = match input.next() {
-                    Some("startpos") => "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                    Some("fen") => match input.next() {
-                        Some(fen) => fen,
-                        None => return Err(anyhow::anyhow!("No FEN provided in position command")),
-                    },
-                    val => {
+                let moves_it = if let Some(position_string) = input.next() {
+                    match position_string {
+                        "startpos" => {
+                            board.load_fen(constant::FEN_STARTPOS).unwrap();
+                            Some(input)
+                        }
+                        "fen" => {
+                            let fen_start_index = position_string.as_ptr() as usize
+                                - buffer.as_ptr() as usize
+                                + position_string.len()
+                                + 1;
+
+                            let fen_length = match board.load_fen(&buffer[fen_start_index..]) {
+                                Ok(fen_length) => fen_length,
+                                Err(e) => return Err(anyhow::anyhow!("Failed to load FEN: {}", e)),
+                            };
+
+                            Some(buffer[fen_start_index + fen_length..].split_whitespace())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                let mut moves_it = match moves_it {
+                    Some(it) => it,
+                    None => {
                         return Err(anyhow::anyhow!(
-                            "Expected 'startpos' or 'fen' in position command, got: {}",
-                            val.unwrap_or("<None>")
+                            "Expected 'startpos' or 'fen' in position command"
                         ));
                     }
                 };
 
-                match board.load_fen(fen) {
-                    Ok(_) => {}
-                    Err(e) => return Err(anyhow::anyhow!("Failed to load position: {}", e)),
-                };
-
-                if let Some("moves") = input.next() {
-                    while let Some(mv_str) = input.next() {
+                if let Some("moves") = moves_it.next() {
+                    while let Some(mv_str) = moves_it.next() {
                         let mv = constant::create_move(mv_str);
 
                         if !board.make_move_slow(mv, &tables) {

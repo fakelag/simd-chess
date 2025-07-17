@@ -2,6 +2,8 @@ use core::panic;
 
 use crate::engine::chess::{self};
 
+pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     White,
