@@ -31,11 +31,11 @@ fn chess_uci() -> anyhow::Result<()> {
     let mut board = chess::Board::new();
     let tables = tables::Tables::new();
 
-    loop {
+    'next_cmd: loop {
         let mut buffer = String::new();
         std::io::stdin().read_line(&mut buffer)?;
 
-        let mut input = buffer.split_whitespace(); // .collect::<Vec<&str>>().join(" ");
+        let mut input = buffer.split_whitespace();
 
         match input.next() {
             Some("uci") => {
@@ -112,12 +112,20 @@ fn chess_uci() -> anyhow::Result<()> {
                         let mut move_list = [0u16; 256];
                         let move_count = board.gen_moves_slow(&tables, &mut move_list);
 
-                        if move_count == 0 {
-                            println!("bestmove 0000");
-                        } else {
-                            let best_move = move_list[0];
-                            println!("bestmove {}", constant::move_string(best_move));
+                        for i in 0..move_count {
+                            let mv = move_list[i];
+
+                            let mut board_copy = board.clone();
+
+                            if board_copy.make_move_slow(mv, &tables)
+                                && !board_copy.in_check_slow(&tables, !board_copy.b_move)
+                            {
+                                println!("bestmove {}", constant::move_string(mv));
+                                continue 'next_cmd;
+                            }
                         }
+
+                        println!("bestmove 0000");
                     }
                     _ => return Err(anyhow::anyhow!("Unknown command in go: {}", command_str)),
                 }
