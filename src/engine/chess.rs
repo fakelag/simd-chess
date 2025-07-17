@@ -843,8 +843,6 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    use crate::constant::create_move;
-
     use super::*;
 
     fn run_stockfish_perft(
@@ -1002,6 +1000,47 @@ mod tests {
         }
 
         perft_result
+    }
+
+    #[test]
+    fn test_fixmove() {
+        let mut board = Board::new();
+        let tables = Tables::new();
+        [
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+            "4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1",
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+        ]
+        .iter()
+        .for_each(|&fen| {
+            assert!(board.load_fen(fen).is_ok());
+
+            let mut move_list = [0u16; 256];
+            let move_count = board.gen_moves_slow(&tables, &mut move_list);
+
+            for i in 0..move_count {
+                let mv = move_list[i];
+
+                let mut board_copy = board.clone();
+
+                let is_legal_move = board_copy.make_move_slow(mv, &tables)
+                    && !board_copy.in_check_slow(&tables, !board_copy.b_move);
+
+                if !is_legal_move {
+                    continue;
+                }
+
+                let move_string = constant::move_string(mv);
+                let recreated_move =
+                    constant::fix_move(&board, constant::create_move(move_string.as_str()));
+
+                assert_eq!(
+                    recreated_move, mv,
+                    "Fix move failed for move {}. Fen: {} Expected: {:016b}, got: {:016b}",
+                    move_string, fen, mv, recreated_move
+                );
+            }
+        });
     }
 
     #[test]
