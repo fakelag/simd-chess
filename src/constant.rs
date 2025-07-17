@@ -123,6 +123,44 @@ pub fn create_move(move_str: &str) -> u16 {
     (from as u16) | ((to as u16) << 6) | flag_bits
 }
 
+// Sets move flags based on board state that can't be derived from move string
+// double pawn push, en passant, castling
+pub fn fix_move(board: &chess::Board, mv: u16) -> u16 {
+    let mut mv = mv;
+
+    let from_sq = (mv & 0x3F) as u8;
+    let to_sq = ((mv >> 6) & 0x3F) as u8;
+
+    let from_rank = from_sq / 8;
+    let to_rank = to_sq / 8;
+
+    let from_piece = board.piece_at_slow(1 << from_sq) - 1;
+
+    mv |= match (PieceId::from(from_piece), from_rank, to_rank) {
+        (PieceId::WhitePawn, 1, 3) => chess::MV_FLAG_DPP,
+        (PieceId::BlackPawn, 6, 4) => chess::MV_FLAG_DPP,
+        _ => 0,
+    };
+
+    if let Some(ep_sq) = board.en_passant {
+        let side_pawn_piece = PieceId::WhitePawn as usize + board.b_move as usize * 6;
+
+        if to_sq == ep_sq && from_piece == side_pawn_piece {
+            mv |= chess::MV_FLAG_EPCAP;
+        }
+    }
+
+    mv |= match (PieceId::from(from_piece), from_sq, to_sq) {
+        (PieceId::WhiteKing, 4, 6) => chess::MV_FLAGS_CASTLE_KING,
+        (PieceId::WhiteKing, 4, 2) => chess::MV_FLAGS_CASTLE_QUEEN,
+        (PieceId::BlackKing, 60, 62) => chess::MV_FLAGS_CASTLE_KING,
+        (PieceId::BlackKing, 60, 58) => chess::MV_FLAGS_CASTLE_QUEEN,
+        _ => 0,
+    };
+
+    mv
+}
+
 pub fn move_flag_name(mv: u16) -> &'static str {
     match mv & chess::MV_FLAGS {
         chess::MV_FLAGS_PR_BISHOP => "b",
