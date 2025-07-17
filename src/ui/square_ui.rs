@@ -94,7 +94,7 @@ impl SquareUi {
     pub fn update(
         &mut self,
         ui: &imgui::Ui,
-        board: &mut chess::Board,
+        board: &chess::Board,
         sq_from: &mut Option<u8>,
     ) -> bool {
         self.reset_moving();

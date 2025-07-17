@@ -21,9 +21,11 @@ pub struct Matchmaking {
     pub fen: String,
     pub board: chess::Board,
     pub tables: tables::Tables,
+    pub legal_moves: Vec<u16>,
     moves: Vec<String>,
     engine_black: Option<EngineProcess>,
     engine_white: Option<EngineProcess>,
+    is_startpos: bool,
 }
 
 impl Matchmaking {
@@ -34,14 +36,20 @@ impl Matchmaking {
             .load_fen(fen)
             .map_err(|e| anyhow::anyhow!("Failed to load FEN '{}': {}", fen, e))?;
 
-        Ok(Self {
+        let mut mm = Self {
             fen: fen.to_string(),
+            is_startpos: fen == constant::FEN_STARTPOS,
             board,
             tables: tables::Tables::new(),
             moves: Vec::new(),
+            legal_moves: Vec::new(),
             engine_black: None,
             engine_white: None,
-        })
+        };
+
+        mm.legal_moves = mm.get_legal_moves();
+
+        Ok(mm)
     }
 
     pub fn load_fen(&mut self, fen: &str) -> anyhow::Result<()> {
@@ -49,6 +57,51 @@ impl Matchmaking {
             .load_fen(fen)
             .map_err(|e| anyhow::anyhow!("Failed to load FEN '{}': {}", fen, e))?;
         self.fen = fen.to_string();
+        self.is_startpos = fen == constant::FEN_STARTPOS;
+        self.legal_moves = self.get_legal_moves();
+        self.moves.clear();
+        Ok(())
+    }
+
+    pub fn get_legal_moves(&self) -> Vec<u16> {
+        let mut legal_moves = Vec::new();
+
+        let mut move_list = [0u16; 256];
+        let move_count = self.board.gen_moves_slow(&self.tables, &mut move_list);
+
+        for i in 0..move_count {
+            let mv = move_list[i];
+
+            let mut board_copy = self.board.clone();
+
+            if board_copy.make_move_slow(mv, &self.tables)
+                && !board_copy.in_check_slow(&self.tables, !board_copy.b_move)
+            {
+                legal_moves.push(mv);
+            }
+        }
+
+        legal_moves
+    }
+
+    pub fn make_move_with_validation(&mut self, mv: u16) -> anyhow::Result<()> {
+        let mv_string = constant::move_string(mv);
+        let is_legal_move = self.get_legal_moves().contains(&mv);
+
+        if !is_legal_move {
+            return Err(anyhow::anyhow!("Move {} is not a legal move", mv_string));
+        }
+
+        if !self.board.make_move_slow(mv, &self.tables) {
+            panic!("Failed to make move {}: Invalid move", mv_string);
+        }
+
+        if self.board.in_check_slow(&self.tables, !self.board.b_move) {
+            panic!("Move {} is not a legal move", mv_string);
+        }
+
+        self.moves.push(mv_string);
+        self.legal_moves = self.get_legal_moves();
         Ok(())
     }
 
@@ -79,10 +132,18 @@ impl Matchmaking {
             panic!("Engine is already thinking");
         }
 
-        let position_string = format!(
-            "position startpos moves {}\ngo depth 5\n",
-            self.moves.join(" ")
-        );
+        let position_string = if self.is_startpos {
+            format!(
+                "position startpos moves {}\ngo depth 5\n",
+                self.moves.join(" ")
+            )
+        } else {
+            format!(
+                "position fen {} moves {}\ngo depth 5\n",
+                self.fen,
+                self.moves.join(" ")
+            )
+        };
 
         engine
             .process
@@ -146,15 +207,13 @@ impl Matchmaking {
                     if let Some(bestmove) = line.strip_prefix("bestmove ") {
                         println!("Bestmove: {}", bestmove);
 
+                        engine.state = EngineState::Idle;
+
                         let mv = constant::create_move(bestmove);
 
-                        if !self.board.make_move_slow(mv, &self.tables) {
-                            panic!("Invalid move from engine: {}", bestmove);
+                        if let Err(err) = self.make_move_with_validation(mv) {
+                            panic!("Invalid move from engine: {}: {}", bestmove, err);
                         }
-
-                        self.moves.push(bestmove.to_string());
-
-                        engine.state = EngineState::Idle;
                         return true;
                     } else {
                         println!("Unexpected line from engine process: {}", line);
