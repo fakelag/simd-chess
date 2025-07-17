@@ -225,25 +225,6 @@ impl ChessUi {
                             .in_check_slow(&self.matchmaking.tables, self.matchmaking.board.b_move)
                     ));
 
-                    ui.text("Castle moves:");
-                    for mv_index in 0..self.matchmaking.legal_moves.len() {
-                        let curmove = self.matchmaking.legal_moves[mv_index];
-                        let from_sq = curmove & 0x3F;
-                        let to_sq = (curmove >> 6) & 0x3F;
-                        let flag = curmove & chess::MV_FLAGS;
-
-                        if flag == chess::MV_FLAGS_CASTLE_KING
-                            || flag == chess::MV_FLAGS_CASTLE_QUEEN
-                        {
-                            ui.text(format!(
-                                "{} -> {}, flag: {:04b}",
-                                square_name(from_sq as u8),
-                                square_name(to_sq as u8),
-                                flag
-                            ));
-                        }
-                    }
-
                     ui.separator();
 
                     self.input_white_engine
@@ -253,8 +234,8 @@ impl ChessUi {
 
                     if ui.button("Spawn Engines") {
                         if let Err(err) = self.matchmaking.respawn_engines(
-                            &self.input_white_engine.buf,
                             &self.input_black_engine.buf,
+                            &self.input_white_engine.buf,
                         ) {
                             eprintln!("Failed to spawn engines: {}", err);
                         } else {
