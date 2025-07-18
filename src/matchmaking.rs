@@ -47,7 +47,7 @@ impl Matchmaking {
             engine_white: None,
         };
 
-        mm.legal_moves = mm.get_legal_moves();
+        mm.update_legal_moves();
 
         Ok(mm)
     }
@@ -58,13 +58,13 @@ impl Matchmaking {
             .map_err(|e| anyhow::anyhow!("Failed to load FEN '{}': {}", fen, e))?;
         self.fen = fen.to_string();
         self.is_startpos = fen == constant::FEN_STARTPOS;
-        self.legal_moves = self.get_legal_moves();
         self.moves.clear();
+        self.update_legal_moves();
         Ok(())
     }
 
-    pub fn get_legal_moves(&self) -> Vec<u16> {
-        let mut legal_moves = Vec::new();
+    pub fn update_legal_moves(&mut self) {
+        self.legal_moves.clear();
 
         let mut move_list = [0u16; 256];
         let move_count = self.board.gen_moves_slow(&self.tables, &mut move_list);
@@ -77,11 +77,9 @@ impl Matchmaking {
             if board_copy.make_move_slow(mv, &self.tables)
                 && !board_copy.in_check_slow(&self.tables, !board_copy.b_move)
             {
-                legal_moves.push(mv);
+                self.legal_moves.push(mv);
             }
         }
-
-        legal_moves
     }
 
     pub fn make_move_with_validation(&mut self, mv: u16) -> anyhow::Result<()> {
@@ -93,15 +91,24 @@ impl Matchmaking {
         }
 
         if !self.board.make_move_slow(mv, &self.tables) {
+            // Should not happen unless legal_moves is out of sync
             panic!("Failed to make move {}: Invalid move", mv_string);
         }
 
-        if self.board.in_check_slow(&self.tables, !self.board.b_move) {
-            panic!("Move {} is not a legal move", mv_string);
+        self.moves.push(mv_string);
+        self.update_legal_moves();
+
+        // Check win/draw conditions
+        if self.legal_moves.is_empty() {
+            if self.board.in_check_slow(&self.tables, self.board.b_move) {
+                eprintln!("Checkmate!");
+            } else {
+                eprintln!("Stalemate!");
+            }
+        } else if self.board.half_moves >= 100 {
+            eprintln!("Draw by fifty-move rule!");
         }
 
-        self.moves.push(mv_string);
-        self.legal_moves = self.get_legal_moves();
         Ok(())
     }
 
@@ -219,8 +226,6 @@ impl Matchmaking {
                         }
                     };
 
-                    println!("Bestmove: \"{}\"", bestmove);
-
                     engine.state = EngineState::Idle;
 
                     let mv = constant::fix_move(&self.board, constant::create_move(bestmove));
@@ -241,18 +246,10 @@ impl Matchmaking {
     }
 
     fn spawn_engine(&self, engine_path: &str) -> anyhow::Result<EngineProcess> {
-        let mut command = std::process::Command::new(format!("bin/{}", engine_path));
-
-        command
+        let mut child_process = std::process::Command::new(format!("bin/{}", engine_path))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        if !engine_path.starts_with("stockfish") {
-            command.arg("uci");
-        }
-
-        let mut child_process = command
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("Failed to start engine chess process");
 

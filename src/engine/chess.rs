@@ -550,6 +550,16 @@ impl Board {
             }
         }
 
+        self.half_moves += 1;
+        self.full_moves += self.b_move as u32;
+
+        let is_capture = to_piece != 0 || move_flags & MV_FLAG_EPCAP != 0;
+        let is_pawn_move = from_piece == (PieceId::WhitePawn as usize + 6 * self.b_move as usize);
+
+        if is_capture || is_pawn_move {
+            self.half_moves = 0;
+        }
+
         self.b_move = !self.b_move;
 
         // debug_assert!(self.is_valid(), "Board is invalid after move");
@@ -990,6 +1000,7 @@ mod tests {
         let tables = Tables::new();
         [
             "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w - - 0 1",
             "4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1",
             "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
         ]
