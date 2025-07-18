@@ -446,11 +446,6 @@ impl Board {
     }
 
     pub fn make_move_slow(&mut self, mv: u16, tables: &Tables) -> bool {
-        // println!(
-        //     "Make: {}{}",
-        //     square_name((mv & 0x3F) as u8),
-        //     square_name(((mv >> 6) & 0x3F) as u8)
-        // );
         let from_sq = (mv & 0x3F) as u8;
         let from_bit: u64 = 1 << from_sq;
         let to_bit: u64 = 1 << ((mv >> 6) & 0x3F);
@@ -492,12 +487,6 @@ impl Board {
         let from_piece = self.piece_at_slow(from_bit) - 1;
         let to_piece = self.piece_at_slow(to_bit);
 
-        // println!(
-        //     "From piece: {:?}, To piece: {:?}",
-        //     PieceId::from(from_piece),
-        //     to_piece
-        // );
-
         if to_piece != 0 {
             self.board.bitboards[to_piece - 1] &= !to_bit;
         }
@@ -532,13 +521,6 @@ impl Board {
                 MV_FLAGS_PR_QUEEN => PieceId::WhiteQueen as usize + 6 * self.b_move as usize,
                 _ => unreachable!(),
             };
-            // println!(
-            //     "Promoting from {:?} to {:?}. to_bit: {}, from_bit: {}",
-            //     PieceId::from(from_piece - 1),
-            //     PieceId::from(promotion_piece),
-            //     to_bit.trailing_zeros(),
-            //     from_bit.trailing_zeros()
-            // );
             self.board.bitboards[from_piece] &= !to_bit;
             self.board.bitboards[promotion_piece] |= to_bit;
         }

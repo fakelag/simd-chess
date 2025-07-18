@@ -143,7 +143,7 @@ fn chess_uci() -> anyhow::Result<()> {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or("gui".to_string());
+    let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
 
     let result = match mode.as_str() {
         "gui" => chess_ui(),

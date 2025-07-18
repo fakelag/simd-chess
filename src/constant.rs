@@ -105,6 +105,12 @@ pub fn square_index(name: &str) -> u8 {
 }
 
 pub fn create_move(move_str: &str) -> u16 {
+    assert!(
+        move_str.len() >= 4 && move_str.len() <= 5,
+        "Invalid move string length: {}",
+        move_str
+    );
+
     let from = square_index(&move_str[0..2]);
     let to = square_index(&move_str[2..4]);
 
