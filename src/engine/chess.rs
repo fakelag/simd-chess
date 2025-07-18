@@ -32,6 +32,13 @@ macro_rules! pop_ls1b {
     }};
 }
 
+pub enum GameState {
+    Ongoing,
+    Checkmate(constant::Side),
+    Stalemate,
+    DrawByFiftyMoveRule,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Bitboards {
@@ -39,7 +46,7 @@ pub struct Bitboards {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Board {
+pub struct ChessGame {
     pub board: Bitboards,
     pub b_move: bool,
     pub castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
@@ -48,7 +55,7 @@ pub struct Board {
     pub full_moves: u32,
 }
 
-impl Board {
+impl ChessGame {
     pub fn new() -> Self {
         Self {
             board: Bitboards { bitboards: [0; 12] },
@@ -789,6 +796,26 @@ impl Board {
         *self = Self::new();
     }
 
+    #[inline(always)]
+    pub fn check_game_state(
+        &self,
+        tables: &Tables,
+        side_to_move_no_legal_moves: bool,
+        b_move: bool,
+    ) -> GameState {
+        if side_to_move_no_legal_moves {
+            if self.in_check_slow(tables, b_move) {
+                GameState::Checkmate(constant::Side::from(!b_move))
+            } else {
+                GameState::Stalemate
+            }
+        } else if self.half_moves >= 100 {
+            GameState::DrawByFiftyMoveRule
+        } else {
+            GameState::Ongoing
+        }
+    }
+
     pub fn is_valid(&self) -> bool {
         if self.board.bitboards[PieceId::WhiteKing as usize].count_ones() != 1
             || self.board.bitboards[PieceId::BlackKing as usize].count_ones() != 1
@@ -902,7 +929,7 @@ mod tests {
     }
 
     fn perft_verification(
-        board: &mut Board,
+        board: &mut ChessGame,
         mut moves_to_make: Vec<String>,
         depth: u8,
         fen: &'static str,
@@ -996,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_fixmove() {
-        let mut board = Board::new();
+        let mut board = ChessGame::new();
         let tables = Tables::new();
         [
             "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
@@ -1040,7 +1067,7 @@ mod tests {
     fn test_perft_rnbqkbnr_pppppppp_8_8_8_8_PPPPPPPP_RNBQKBNR() {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             119060324
         );
     }
@@ -1049,7 +1076,7 @@ mod tests {
     fn test_perft_r3k2r_p1ppqpb1_bn2pnp1_3PN3_1p2P3_2N2Q1p_PPPBBPPP_R3K2R() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             8031647685
         );
     }
@@ -1058,7 +1085,7 @@ mod tests {
     fn test_perft_8_2p5_3p4_KP5r_1R3p1k_8_4P1P1_8() {
         let fen = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 8, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 8, fen, &Tables::new()),
             3009794393
         );
     }
@@ -1068,11 +1095,11 @@ mod tests {
         let fen = "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
         let mirrored = "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             706045033
         );
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 6, mirrored, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 6, mirrored, &Tables::new()),
             706045033
         );
     }
@@ -1081,7 +1108,7 @@ mod tests {
     fn test_perft_rnbq1k1r_pp1Pbppp_2p5_8_2B5_8_PPP1NnPP_RNBQK2R() {
         let fen = "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 5, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 5, fen, &Tables::new()),
             89941194
         );
     }
@@ -1090,7 +1117,7 @@ mod tests {
     fn test_perft_r4rk1_1pp1qppp_p1np1n2_2b1p1B1_2B1P1b1_P1NP1N2_1PP1QPPP_R4RK1() {
         let fen = "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             6923051137
         );
     }
@@ -1099,7 +1126,7 @@ mod tests {
     fn test_perft_8_PPP4k_8_8_8_8_4Kppp_8() {
         let fen = "8/PPP4k/8/8/8/8/4Kppp/8 w - -";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             34336777
         );
     }
@@ -1108,7 +1135,7 @@ mod tests {
     fn test_perft_n1n5_PPPk4_8_8_8_8_4Kppp_5N1N() {
         let fen = "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1";
         assert_eq!(
-            perft_verification(&mut Board::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             71179139
         );
     }
@@ -1136,7 +1163,7 @@ mod tests {
         .iter()
         .for_each(|(fen, depth, expected)| {
             assert_eq!(
-                perft_verification(&mut Board::new(), vec![], *depth, fen, &Tables::new()),
+                perft_verification(&mut ChessGame::new(), vec![], *depth, fen, &Tables::new()),
                 *expected
             );
         });

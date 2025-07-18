@@ -11,6 +11,12 @@ pub enum Side {
     SideMax,
 }
 
+impl From<bool> for Side {
+    fn from(value: bool) -> Self {
+        if value { Side::Black } else { Side::White }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceId {
     WhiteKing,
@@ -131,7 +137,7 @@ pub fn create_move(move_str: &str) -> u16 {
 
 // Sets move flags based on board state that can't be derived from move string
 // double pawn push, en passant, castling
-pub fn fix_move(board: &chess::Board, mv: u16) -> u16 {
+pub fn fix_move(board: &chess::ChessGame, mv: u16) -> u16 {
     let mut mv = mv;
 
     let from_sq = (mv & 0x3F) as u8;

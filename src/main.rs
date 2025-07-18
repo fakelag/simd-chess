@@ -28,7 +28,7 @@ fn chess_ui() -> anyhow::Result<()> {
 
 fn chess_uci() -> anyhow::Result<()> {
     let mut debug = false;
-    let mut board = chess::Board::new();
+    let mut board = chess::ChessGame::new();
     let tables = tables::Tables::new();
 
     'next_cmd: loop {

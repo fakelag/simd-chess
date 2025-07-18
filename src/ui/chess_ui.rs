@@ -1,7 +1,7 @@
 use crate::{
     constant::{self, PieceId, square_name},
     engine::*,
-    matchmaking::Matchmaking,
+    matchmaking::{self, Matchmaking},
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
     window,
@@ -16,6 +16,32 @@ pub struct ChessUi {
     input_fen: ImguiTextInput,
     input_white_engine: ImguiTextInput,
     input_black_engine: ImguiTextInput,
+    input_num_games: ImguiTextInput,
+}
+
+fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
+    let stats = matchmaking.versus_stats();
+    let white_engine = matchmaking
+        .get_engine_for_side(constant::Side::White)
+        .unwrap();
+    let black_engine = matchmaking
+        .get_engine_for_side(constant::Side::Black)
+        .unwrap();
+
+    ui.text(format!(
+        "Matches: {}\n{} {} wins\n{} {} wins\nDraws: {}",
+        stats.draws + stats.engine1_wins + stats.engine2_wins,
+        stats.engine1_name,
+        stats.engine1_wins,
+        stats.engine2_name,
+        stats.engine2_wins,
+        stats.draws
+    ));
+
+    ui.text(format!(
+        "White Engine: {}\nBlack Engine: {}",
+        white_engine.path, black_engine.path
+    ));
 }
 
 impl ChessUi {
@@ -46,11 +72,15 @@ impl ChessUi {
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
                 Some("chess.exe"),
             ),
+            input_num_games: ImguiTextInput::new(
+                imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::CHARS_DECIMAL,
+                Some("100"),
+            ),
         }
     }
 
     pub fn draw(&mut self, ctx: window::DrawCtx) {
-        self.matchmaking.uci_query();
+        self.matchmaking.poll();
 
         let ui = ctx.ui;
 
@@ -227,25 +257,55 @@ impl ChessUi {
 
                     ui.separator();
 
-                    self.input_white_engine
-                        .draw(Some("White Engine"), ui, "w_engine_inp");
-                    self.input_black_engine
-                        .draw(Some("Black Engine"), ui, "b_engine_inp");
+                    match self.matchmaking.versus_state {
+                        matchmaking::VersusState::Idle => {
+                            self.input_white_engine
+                                .draw(Some("White Engine"), ui, "w_engine_inp");
+                            self.input_black_engine
+                                .draw(Some("Black Engine"), ui, "b_engine_inp");
+                            self.input_num_games
+                                .draw(Some("Number of games"), ui, "num_games_inp");
 
-                    if ui.button("Spawn Engines") {
-                        if let Err(err) = self.matchmaking.respawn_engines(
-                            &self.input_black_engine.buf,
-                            &self.input_white_engine.buf,
-                        ) {
-                            eprintln!("Failed to spawn engines: {}", err);
-                        } else {
-                            self.input_white_engine.buf.clear();
-                            self.input_black_engine.buf.clear();
+                            if ui.button("Start new Versus") {
+                                if let Err(err) = self.matchmaking.versus_start(
+                                    &self.input_white_engine.buf,
+                                    &self.input_black_engine.buf,
+                                    self.input_num_games.buf.parse().unwrap_or(1),
+                                ) {
+                                    eprintln!("Failed to spawn engines: {}", err);
+                                }
+                            }
                         }
-                    }
+                        matchmaking::VersusState::InProgress => {
+                            ui.text("Versus match in progress");
+                            draw_versus_stats(&ui, &self.matchmaking);
 
-                    if ui.button("Next Move") {
-                        self.matchmaking.uci_nextmove();
+                            if ui.button("Pause Versus") {
+                                self.matchmaking.versus_pause();
+                            }
+                            if ui.button("End Versus") {
+                                self.matchmaking.versus_reset();
+                            }
+                        }
+                        matchmaking::VersusState::Paused => {
+                            ui.text("Versus match paused");
+                            draw_versus_stats(&ui, &self.matchmaking);
+
+                            if ui.button("Resume Versus") {
+                                self.matchmaking.versus_resume();
+                            }
+                            if ui.button("End Versus") {
+                                self.matchmaking.versus_reset();
+                            }
+                        }
+                        matchmaking::VersusState::Done => {
+                            ui.text("Versus match done");
+                            draw_versus_stats(&ui, &self.matchmaking);
+                            if ui.button("Reset Versus") {
+                                self.matchmaking.versus_reset();
+                            }
+                        }
+                        _ => {}
                     }
                 });
 
