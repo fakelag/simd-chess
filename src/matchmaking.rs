@@ -51,6 +51,7 @@ pub struct Matchmaking {
     engines: [Option<EngineProcess>; 2],
     engine_white: usize,
     is_startpos: bool,
+    engine_command_buf: String,
 
     pub versus_state: VersusState,
     pub versus_matches: usize,
@@ -77,6 +78,7 @@ impl Matchmaking {
             legal_moves: Vec::new(),
             engines: [None, None],
             engine_white: 0,
+            engine_command_buf: String::new(),
 
             versus_state: VersusState::Idle,
             versus_matches: 0,
@@ -381,25 +383,26 @@ impl Matchmaking {
             panic!("Engine is already thinking");
         }
 
-        let mut engine_command_string = String::new();
+        self.engine_command_buf.clear();
 
         if self.is_startpos {
-            engine_command_string.push_str("position startpos");
+            self.engine_command_buf.push_str("position startpos");
         } else {
-            engine_command_string.push_str(&format!("position fen {}", self.fen));
+            self.engine_command_buf
+                .push_str(&format!("position fen {}", self.fen));
         }
 
         if !self.moves.is_empty() {
-            engine_command_string.push_str(" moves");
+            self.engine_command_buf.push_str(" moves");
         }
 
         for mv_string in &self.moves {
-            engine_command_string.push_str(&format!(" {}", mv_string));
+            self.engine_command_buf.push_str(&format!(" {}", mv_string));
         }
 
-        engine_command_string.push_str("\n");
+        self.engine_command_buf.push_str("\n");
 
-        engine_command_string.push_str(
+        self.engine_command_buf.push_str(
             format!(
                 "go depth 5 wtime {} btime {}\n",
                 self.versus_wtime_ms, self.versus_btime_ms
@@ -415,7 +418,7 @@ impl Matchmaking {
             .stdin
             .as_mut()
             .expect("Failed to open engine stdin")
-            .write_all(engine_command_string.as_bytes())
+            .write_all(self.engine_command_buf.as_bytes())
             .expect("Failed to write to engine stdin");
 
         engine.state = EngineState::Thinking;
