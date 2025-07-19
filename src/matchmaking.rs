@@ -262,7 +262,9 @@ impl Matchmaking {
     }
 
     pub fn versus_step(&mut self) {
-        self.versus_check_game_over();
+        if self.versus_check_game_over() {
+            return;
+        }
 
         if self.versus_matches > 0 {
             self.uci_nextmove();
