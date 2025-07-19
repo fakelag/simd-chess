@@ -17,6 +17,7 @@ pub struct ChessUi {
     input_white_engine: ImguiTextInput,
     input_black_engine: ImguiTextInput,
     input_num_games: ImguiTextInput,
+    input_start_paused: bool,
 }
 
 fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
@@ -76,6 +77,7 @@ impl ChessUi {
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::CHARS_DECIMAL,
                 Some("100"),
             ),
+            input_start_paused: false,
         }
     }
 
@@ -131,6 +133,17 @@ impl ChessUi {
                                 //         None
                                 //     }
                                 // });
+
+                                if let Some(from_sq) = self.from_square {
+                                    if !self
+                                        .matchmaking
+                                        .legal_moves
+                                        .iter()
+                                        .any(|&mv| mv & 0x3F == from_sq as u16)
+                                    {
+                                        self.from_square = None;
+                                    }
+                                }
 
                                 board_cursor_xy = ui.cursor_screen_pos();
 
@@ -266,11 +279,14 @@ impl ChessUi {
                             self.input_num_games
                                 .draw(Some("Number of games"), ui, "num_games_inp");
 
+                            ui.checkbox("Start paused", &mut self.input_start_paused);
+
                             if ui.button("Start new Versus") {
                                 if let Err(err) = self.matchmaking.versus_start(
                                     &self.input_white_engine.buf,
                                     &self.input_black_engine.buf,
                                     self.input_num_games.buf.parse().unwrap_or(1),
+                                    self.input_start_paused,
                                 ) {
                                     eprintln!("Failed to spawn engines: {}", err);
                                 }
@@ -294,6 +310,9 @@ impl ChessUi {
                             if ui.button("Resume Versus") {
                                 self.matchmaking.versus_resume();
                             }
+                            if ui.button("Next Move") {
+                                self.matchmaking.versus_step();
+                            }
                             if ui.button("End Versus") {
                                 self.matchmaking.versus_reset();
                             }
@@ -306,6 +325,39 @@ impl ChessUi {
                             }
                         }
                         _ => {}
+                    }
+
+                    ui.separator();
+
+                    match self.matchmaking.board.check_game_state(
+                        &self.matchmaking.tables,
+                        self.matchmaking.legal_moves.is_empty(),
+                        self.matchmaking.board.b_move,
+                    ) {
+                        chess::GameState::Checkmate(side) => {
+                            let engine_name = self
+                                .matchmaking
+                                .get_engine_for_side(side)
+                                .and_then(|e| Some(e.path.clone()))
+                                .unwrap_or_else(|| "none".to_string());
+
+                            ui.text(format!(
+                                "Result: {} ({}) wins by checkmate",
+                                if side == constant::Side::White {
+                                    "White"
+                                } else {
+                                    "Black"
+                                },
+                                engine_name
+                            ));
+                        }
+                        chess::GameState::Stalemate => {
+                            ui.text("Result: Stalemate");
+                        }
+                        chess::GameState::DrawByFiftyMoveRule => {
+                            ui.text("Result: Draw by fifty-move rule");
+                        }
+                        chess::GameState::Ongoing => {}
                     }
                 });
 
@@ -364,10 +416,17 @@ impl ChessUi {
                                 [option_x + square_wh[0], option_y + square_wh[1]],
                             )
                         {
-                            self.matchmaking.board.make_move_slow(
+                            if let Err(err) = self.matchmaking.make_move_with_validation(
                                 (from_sq as u16) | ((to_sq as u16) << 6) | *flag,
-                                &self.matchmaking.tables,
-                            );
+                            ) {
+                                panic!(
+                                    "Invalid promotion move: {}: {}",
+                                    constant::move_string(
+                                        (from_sq as u16) | ((to_sq as u16) << 6) | *flag
+                                    ),
+                                    err
+                                );
+                            }
                             self.ask_promotion = None;
                             self.from_square = None;
                         }

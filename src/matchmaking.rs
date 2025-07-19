@@ -150,7 +150,18 @@ impl Matchmaking {
             VersusState::InProgress => {}
         }
 
-        // Check win/draw conditions
+        if !self.versus_check_game_over() {
+            // Advance game loop
+            self.uci_nextmove();
+            return;
+        }
+
+        if self.versus_matches > 0 {
+            self.uci_nextmove();
+        }
+    }
+
+    fn versus_check_game_over(&mut self) -> bool {
         match self.board.check_game_state(
             &self.tables,
             self.legal_moves.is_empty(),
@@ -167,9 +178,7 @@ impl Matchmaking {
                 self.versus_draws += 1;
             }
             chess::GameState::Ongoing => {
-                // Advance game loop
-                self.uci_nextmove();
-                return;
+                return false;
             }
         }
 
@@ -188,7 +197,7 @@ impl Matchmaking {
                 engine2.path,
                 self.versus_draws
             );
-            return;
+            return true;
         }
 
         // Reset board and swap sides
@@ -203,8 +212,7 @@ impl Matchmaking {
         }),);
 
         self.engine_white = (self.engine_white + 1) % 2;
-
-        self.uci_nextmove();
+        return true;
     }
 
     pub fn versus_start(
@@ -212,6 +220,7 @@ impl Matchmaking {
         engine_white: &str,
         engine_black: &str,
         num_matches: usize,
+        start_paused: bool,
     ) -> anyhow::Result<()> {
         if self.versus_state != VersusState::Idle {
             panic!("Cannot start versus mode when already in progress");
@@ -223,10 +232,14 @@ impl Matchmaking {
         self.engines[1] = Some(self.spawn_engine(engine_black)?);
         self.engine_white = 0;
 
-        self.versus_state = VersusState::InProgress;
         self.versus_matches = num_matches;
 
-        self.uci_nextmove();
+        if start_paused {
+            self.versus_state = VersusState::Paused;
+        } else {
+            self.versus_state = VersusState::InProgress;
+            self.uci_nextmove();
+        }
 
         Ok(())
     }
@@ -246,6 +259,14 @@ impl Matchmaking {
 
         self.versus_state = VersusState::InProgress;
         self.uci_nextmove();
+    }
+
+    pub fn versus_step(&mut self) {
+        self.versus_check_game_over();
+
+        if self.versus_matches > 0 {
+            self.uci_nextmove();
+        }
     }
 
     pub fn versus_reset(&mut self) {
