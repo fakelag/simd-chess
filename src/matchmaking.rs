@@ -19,10 +19,12 @@ pub enum VersusState {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnginePollResult {
     MoveMade,
     EngineCrash,
     NoAction,
+    OutOfTime,
 }
 
 pub struct VersusStats {
@@ -50,10 +52,12 @@ pub struct Matchmaking {
     engine_white: usize,
     is_startpos: bool,
 
-    // Tournament
     pub versus_state: VersusState,
     pub versus_matches: usize,
     pub versus_draws: usize,
+    pub versus_btime_ms: usize,
+    pub versus_wtime_ms: usize,
+    pub versus_move_start_time: Option<std::time::Instant>,
 }
 
 impl Matchmaking {
@@ -77,6 +81,9 @@ impl Matchmaking {
             versus_state: VersusState::Idle,
             versus_matches: 0,
             versus_draws: 0,
+            versus_btime_ms: 0,
+            versus_wtime_ms: 0,
+            versus_move_start_time: None,
         };
 
         mm.update_legal_moves();
@@ -114,8 +121,15 @@ impl Matchmaking {
         }
     }
 
-    pub fn make_move_with_validation(&mut self, mv: u16) -> anyhow::Result<()> {
+    pub fn make_move_with_validation(&mut self, mv: u16) -> anyhow::Result<bool> {
         let mv_string = constant::move_string(mv);
+
+        if self.update_timers() {
+            // Force game over due to out of time
+            self.versus_check_game_over();
+            return Ok(false);
+        }
+
         let is_legal_move = self.legal_moves.contains(&mv);
 
         if !is_legal_move {
@@ -130,16 +144,19 @@ impl Matchmaking {
         self.moves.push(mv_string);
         self.update_legal_moves();
 
-        Ok(())
+        Ok(true)
     }
 
     pub fn poll(&mut self) {
         // Poll thinking engine (if any)
-        match self.uci_poll() {
-            EnginePollResult::MoveMade => {}
+        let poll_result = self.uci_poll();
+
+        match poll_result {
+            EnginePollResult::MoveMade | EnginePollResult::OutOfTime => {}
             EnginePollResult::EngineCrash => {
                 eprintln!("Engine process has crashed, pausing versus mode");
                 self.versus_state = VersusState::Paused;
+                self.versus_move_start_time = None;
                 return;
             }
             EnginePollResult::NoAction => return,
@@ -150,7 +167,7 @@ impl Matchmaking {
             VersusState::InProgress => {}
         }
 
-        if !self.versus_check_game_over() {
+        if poll_result != EnginePollResult::OutOfTime && !self.versus_check_game_over() {
             // Advance game loop
             self.uci_nextmove();
             return;
@@ -162,27 +179,35 @@ impl Matchmaking {
     }
 
     fn versus_check_game_over(&mut self) -> bool {
-        match self.board.check_game_state(
-            &self.tables,
-            self.legal_moves.is_empty(),
-            self.board.b_move,
-        ) {
-            chess::GameState::Checkmate(side) => {
-                let engine = self.get_engine_for_side_mut(side).unwrap();
-                engine.versus_wins += 1;
-            }
-            chess::GameState::Stalemate => {
-                self.versus_draws += 1;
-            }
-            chess::GameState::DrawByFiftyMoveRule => {
-                self.versus_draws += 1;
-            }
-            chess::GameState::Ongoing => {
-                return false;
+        if self.check_timer() {
+            let engine = self
+                .get_engine_for_side_mut(constant::Side::from(!self.board.b_move))
+                .unwrap();
+            engine.versus_wins += 1;
+        } else {
+            match self.board.check_game_state(
+                &self.tables,
+                self.legal_moves.is_empty(),
+                self.board.b_move,
+            ) {
+                chess::GameState::Checkmate(side) => {
+                    let engine = self.get_engine_for_side_mut(side).unwrap();
+                    engine.versus_wins += 1;
+                }
+                chess::GameState::Stalemate => {
+                    self.versus_draws += 1;
+                }
+                chess::GameState::DrawByFiftyMoveRule => {
+                    self.versus_draws += 1;
+                }
+                chess::GameState::Ongoing => {
+                    return false;
+                }
             }
         }
 
         self.versus_matches -= 1;
+        self.reset_timers();
 
         if self.versus_matches == 0 {
             self.versus_state = VersusState::Done;
@@ -250,6 +275,7 @@ impl Matchmaking {
         }
 
         self.versus_state = VersusState::Paused;
+        self.versus_move_start_time = None;
     }
 
     pub fn versus_resume(&mut self) {
@@ -278,6 +304,7 @@ impl Matchmaking {
         self.engines[0] = None;
         self.engines[1] = None;
         self.engine_white = 0;
+        self.reset_timers();
 
         let fen_copy = self.fen.clone();
         self.load_fen(&fen_copy)
@@ -311,7 +338,40 @@ impl Matchmaking {
         }
     }
 
-    pub fn uci_nextmove(&mut self) {
+    fn check_timer(&mut self) -> bool {
+        let side_timer = if self.board.b_move {
+            self.versus_btime_ms
+        } else {
+            self.versus_wtime_ms
+        };
+
+        let elapsed_ms = if let Some(start_time) = &mut self.versus_move_start_time {
+            start_time.elapsed().as_millis() as usize
+        } else {
+            0
+        };
+
+        side_timer.saturating_sub(elapsed_ms) == 0
+    }
+
+    fn update_timers(&mut self) -> bool {
+        let side_timer = if self.board.b_move {
+            &mut self.versus_btime_ms
+        } else {
+            &mut self.versus_wtime_ms
+        };
+
+        if let Some(start_time) = &mut self.versus_move_start_time {
+            let elapsed_ms = start_time.elapsed().as_millis();
+            *side_timer = side_timer.saturating_sub(elapsed_ms as usize);
+        }
+
+        self.versus_move_start_time = None;
+
+        *side_timer == 0
+    }
+
+    fn uci_nextmove(&mut self) {
         let engine_index = self.engine_index(constant::Side::from(self.board.b_move));
         let engine = self.engines[engine_index]
             .as_mut()
@@ -321,25 +381,41 @@ impl Matchmaking {
             panic!("Engine is already thinking");
         }
 
-        let position_string = if self.is_startpos {
-            format!(
-                "position startpos moves {}\ngo depth 5\n",
-                self.moves.join(" ")
-            )
+        let mut engine_command_string = String::new();
+
+        if self.is_startpos {
+            engine_command_string.push_str("position startpos");
         } else {
+            engine_command_string.push_str(&format!("position fen {}", self.fen));
+        }
+
+        if !self.moves.is_empty() {
+            engine_command_string.push_str(" moves");
+        }
+
+        for mv_string in &self.moves {
+            engine_command_string.push_str(&format!(" {}", mv_string));
+        }
+
+        engine_command_string.push_str("\n");
+
+        engine_command_string.push_str(
             format!(
-                "position fen {} moves {}\ngo depth 5\n",
-                self.fen,
-                self.moves.join(" ")
+                "go depth 5 wtime {} btime {}\n",
+                self.versus_wtime_ms, self.versus_btime_ms
             )
-        };
+            .as_str(),
+        );
+
+        // Start move timer
+        self.versus_move_start_time = Some(std::time::Instant::now());
 
         engine
             .process
             .stdin
             .as_mut()
             .expect("Failed to open engine stdin")
-            .write_all(position_string.as_bytes())
+            .write_all(engine_command_string.as_bytes())
             .expect("Failed to write to engine stdin");
 
         engine.state = EngineState::Thinking;
@@ -408,10 +484,13 @@ impl Matchmaking {
 
                     let mv = constant::fix_move(&self.board, constant::create_move(bestmove));
 
-                    if let Err(err) = self.make_move_with_validation(mv) {
-                        panic!("Invalid move from engine: {}: {}", bestmove, err);
+                    match self.make_move_with_validation(mv) {
+                        Ok(true) => return EnginePollResult::MoveMade,
+                        Ok(false) => return EnginePollResult::OutOfTime,
+                        Err(e) => {
+                            panic!("Failed to make move {}: {}", bestmove, e);
+                        }
                     }
-                    return EnginePollResult::MoveMade;
                 }
                 Err(e) => {
                     eprintln!("Error reading from engine stdout: {}", e);
@@ -421,6 +500,12 @@ impl Matchmaking {
         }
 
         EnginePollResult::NoAction
+    }
+
+    fn reset_timers(&mut self) {
+        self.versus_wtime_ms = 10 * 60 * 1000;
+        self.versus_btime_ms = 10 * 60 * 1000;
+        self.versus_move_start_time = None;
     }
 
     fn kill_engines(&mut self) {

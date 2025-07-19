@@ -29,14 +29,34 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
         .get_engine_for_side(constant::Side::Black)
         .unwrap();
 
+    let move_start_elapsed_ms = if let Some(move_start_time) = matchmaking.versus_move_start_time {
+        move_start_time.elapsed().as_millis() as usize
+    } else {
+        0
+    };
+
+    let black_ms = matchmaking
+        .versus_btime_ms
+        .saturating_sub(move_start_elapsed_ms * matchmaking.board.b_move as usize);
+
+    let white_ms = matchmaking
+        .versus_wtime_ms
+        .saturating_sub(move_start_elapsed_ms * !matchmaking.board.b_move as usize);
+
     ui.text(format!(
-        "Matches: {}\n{} {} wins\n{} {} wins\nDraws: {}",
+        "Matches: {}\n{} {} wins\n{} {} wins\nDraws: {}\nwtime: {}:{}.{}\nbtime: {}:{}.{}",
         stats.draws + stats.engine1_wins + stats.engine2_wins,
         stats.engine1_name,
         stats.engine1_wins,
         stats.engine2_name,
         stats.engine2_wins,
-        stats.draws
+        stats.draws,
+        white_ms / 60000,
+        (white_ms / 1000) % 60,
+        white_ms % 1000,
+        black_ms / 60000,
+        (black_ms / 1000) % 60,
+        black_ms % 1000,
     ));
 
     ui.text(format!(
