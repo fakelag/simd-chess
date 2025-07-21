@@ -404,7 +404,7 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str(
             format!(
-                "go depth 5 wtime {} btime {}\n",
+                "go depth 4 wtime {} btime {}\n",
                 self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),
@@ -471,7 +471,7 @@ impl Matchmaking {
                     let mut parts = line.split_whitespace();
 
                     if parts.next() != Some("bestmove") {
-                        // println!("Unexpected line from engine process: {}", line);
+                        println!("Engine stdout: {}", line);
                         continue;
                     }
 

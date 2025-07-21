@@ -116,6 +116,7 @@ pub fn create_move(move_str: &str) -> u16 {
         "Invalid move string length: {}",
         move_str
     );
+    debug_assert!(move_str != "0000", "Null move: {}", move_str);
 
     let from = square_index(&move_str[0..2]);
     let to = square_index(&move_str[2..4]);
