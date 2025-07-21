@@ -1,7 +1,7 @@
 use crate::{
     constant::{self, PieceId, square_name},
     engine::*,
-    matchmaking::{self, Matchmaking},
+    matchmaking::matchmaking::{Matchmaking, VersusState},
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
     window,
@@ -291,7 +291,7 @@ impl ChessUi {
                     ui.separator();
 
                     match self.matchmaking.versus_state {
-                        matchmaking::VersusState::Idle => {
+                        VersusState::Idle => {
                             self.input_white_engine
                                 .draw(Some("White Engine"), ui, "w_engine_inp");
                             self.input_black_engine
@@ -312,7 +312,7 @@ impl ChessUi {
                                 }
                             }
                         }
-                        matchmaking::VersusState::InProgress => {
+                        VersusState::InProgress => {
                             ui.text("Versus match in progress");
                             draw_versus_stats(&ui, &self.matchmaking);
 
@@ -323,7 +323,7 @@ impl ChessUi {
                                 self.matchmaking.versus_reset();
                             }
                         }
-                        matchmaking::VersusState::Paused => {
+                        VersusState::Paused => {
                             ui.text("Versus match paused");
                             draw_versus_stats(&ui, &self.matchmaking);
 
@@ -337,12 +337,20 @@ impl ChessUi {
                                 self.matchmaking.versus_reset();
                             }
                         }
-                        matchmaking::VersusState::Done => {
+                        VersusState::Done => {
                             ui.text("Versus match done");
                             draw_versus_stats(&ui, &self.matchmaking);
                             if ui.button("Reset Versus") {
                                 self.matchmaking.versus_reset();
                             }
+                        }
+                        VersusState::NextMatch(ended_at) => {
+                            draw_versus_stats(&ui, &self.matchmaking);
+                            ui.separator();
+                            ui.text(format!(
+                                "Next match starting in {} seconds",
+                                10u64.saturating_sub(ended_at.elapsed().as_secs())
+                            ));
                         }
                         _ => {}
                     }
@@ -361,7 +369,7 @@ impl ChessUi {
                                 .and_then(|e| Some(e.path.clone()))
                                 .unwrap_or_else(|| "none".to_string());
 
-                            ui.text(format!(
+                            ui.text_wrapped(format!(
                                 "Result: {} ({}) wins by checkmate",
                                 if side == constant::Side::White {
                                     "White"
@@ -372,10 +380,10 @@ impl ChessUi {
                             ));
                         }
                         chess::GameState::Stalemate => {
-                            ui.text("Result: Stalemate");
+                            ui.text_wrapped("Result: Stalemate");
                         }
                         chess::GameState::DrawByFiftyMoveRule => {
-                            ui.text("Result: Draw by fifty-move rule");
+                            ui.text_wrapped("Result: Draw by fifty-move rule");
                         }
                         chess::GameState::Ongoing => {}
                     }

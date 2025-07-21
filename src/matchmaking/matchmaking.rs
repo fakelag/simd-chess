@@ -1,21 +1,15 @@
-use std::io::{BufRead, BufReader, Write};
-
 use crate::{
     constant,
     engine::{chess, tables},
+    matchmaking::process::{EngineProcess, EngineState},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineState {
-    Idle,
-    Thinking,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersusState {
     Idle,
     InProgress,
     Paused,
+    NextMatch(std::time::Instant),
     Done,
 }
 
@@ -33,13 +27,6 @@ pub struct VersusStats {
     pub engine1_wins: usize,
     pub engine2_wins: usize,
     pub draws: usize,
-}
-
-pub struct EngineProcess {
-    pub process: std::process::Child,
-    pub state: EngineState,
-    pub path: String,
-    pub versus_wins: usize,
 }
 
 pub struct Matchmaking {
@@ -150,6 +137,30 @@ impl Matchmaking {
     }
 
     pub fn poll(&mut self) {
+        match self.versus_state {
+            VersusState::NextMatch(start_time) => {
+                if start_time.elapsed().as_secs() >= 10 {
+                    println!("Next match starting...");
+                    // Reset board and swap sides
+                    let fen_copy = self.fen.clone();
+                    self.load_fen(&fen_copy)
+                        .expect("Failed to reset board after match end");
+                    self.engine_white = (self.engine_white + 1) % 2;
+                    self.versus_state = VersusState::InProgress;
+
+                    if self.versus_matches > 0 {
+                        self.uci_nextmove();
+                    } else {
+                        eprintln!("No matches left, ending versus mode");
+                        self.versus_state = VersusState::Done;
+                    }
+                }
+
+                return;
+            }
+            _ => {}
+        }
+
         // Poll thinking engine (if any)
         let poll_result = self.uci_poll();
 
@@ -157,15 +168,17 @@ impl Matchmaking {
             EnginePollResult::MoveMade | EnginePollResult::OutOfTime => {}
             EnginePollResult::EngineCrash => {
                 eprintln!("Engine process has crashed, pausing versus mode");
-                self.versus_state = VersusState::Paused;
-                self.versus_move_start_time = None;
+                self.versus_pause();
                 return;
             }
             EnginePollResult::NoAction => return,
         }
 
         match self.versus_state {
-            VersusState::Idle | VersusState::Paused | VersusState::Done => return,
+            VersusState::Idle
+            | VersusState::Paused
+            | VersusState::Done
+            | VersusState::NextMatch(_) => return,
             VersusState::InProgress => {}
         }
 
@@ -173,10 +186,6 @@ impl Matchmaking {
             // Advance game loop
             self.uci_nextmove();
             return;
-        }
-
-        if self.versus_matches > 0 {
-            self.uci_nextmove();
         }
     }
 
@@ -227,18 +236,7 @@ impl Matchmaking {
             return true;
         }
 
-        // Reset board and swap sides
-        let fen_copy = self.fen.clone();
-        self.load_fen(&fen_copy)
-            .expect("Failed to reset board after match end");
-
-        debug_assert!(self.engines.iter().all(|e| {
-            e.as_ref()
-                .and_then(|e| Some(e.state == EngineState::Idle))
-                .unwrap_or(false)
-        }),);
-
-        self.engine_white = (self.engine_white + 1) % 2;
+        self.versus_state = VersusState::NextMatch(std::time::Instant::now());
         return true;
     }
 
@@ -255,8 +253,8 @@ impl Matchmaking {
 
         self.versus_reset();
 
-        self.engines[0] = Some(self.spawn_engine(engine_white)?);
-        self.engines[1] = Some(self.spawn_engine(engine_black)?);
+        self.engines[0] = Some(EngineProcess::new(engine_white)?);
+        self.engines[1] = Some(EngineProcess::new(engine_black)?);
         self.engine_white = 0;
 
         self.versus_matches = num_matches;
@@ -271,18 +269,41 @@ impl Matchmaking {
         Ok(())
     }
 
+    pub fn redeploy_engines(&mut self) -> anyhow::Result<()> {
+        for engine in &mut self.engines {
+            if let Some(engine_process) = engine {
+                engine_process.redeploy()?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn versus_pause(&mut self) {
         if self.versus_state != VersusState::InProgress {
             panic!("Cannot pause versus mode when not in progress");
         }
 
+        self.redeploy_engines()
+            .expect("Failed to redeploy engines during pause");
+
+        if self.update_timers() {
+            self.versus_check_game_over();
+        }
+
         self.versus_state = VersusState::Paused;
-        self.versus_move_start_time = None;
     }
 
     pub fn versus_resume(&mut self) {
         if self.versus_state != VersusState::Paused {
             panic!("Cannot resume versus mode when not paused");
+        }
+
+        self.redeploy_engines()
+            .expect("Failed to redeploy engines during pause");
+
+        if self.update_timers() {
+            self.versus_check_game_over();
         }
 
         self.versus_state = VersusState::InProgress;
@@ -375,12 +396,13 @@ impl Matchmaking {
 
     fn uci_nextmove(&mut self) {
         let engine_index = self.engine_index(constant::Side::from(self.board.b_move));
+
         let engine = self.engines[engine_index]
             .as_mut()
             .expect("Engine not initialized");
 
-        if engine.state != EngineState::Idle {
-            panic!("Engine is already thinking");
+        while engine.get_state() != EngineState::ReadyOk {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         self.engine_command_buf.clear();
@@ -404,7 +426,7 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str(
             format!(
-                "go depth 4 wtime {} btime {}\n",
+                "go depth 5 wtime {} btime {}\n",
                 self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),
@@ -414,14 +436,8 @@ impl Matchmaking {
         self.versus_move_start_time = Some(std::time::Instant::now());
 
         engine
-            .process
-            .stdin
-            .as_mut()
-            .expect("Failed to open engine stdin")
-            .write_all(self.engine_command_buf.as_bytes())
-            .expect("Failed to write to engine stdin");
-
-        engine.state = EngineState::Thinking;
+            .send_position_and_go(&self.engine_command_buf)
+            .expect("Failed to send position and go command to engine");
     }
 
     fn uci_poll(&mut self) -> EnginePollResult {
@@ -432,138 +448,26 @@ impl Matchmaking {
             None => return EnginePollResult::NoAction,
         };
 
-        if engine.state != EngineState::Thinking {
-            return EnginePollResult::NoAction;
-        }
-
-        if let Ok(exit_code) = engine.process.try_wait() {
-            if let Some(code) = exit_code {
-                eprintln!("Engine process has exited unexpectedly with code: {}", code);
-
-                for line in BufReader::new(
-                    engine
-                        .process
-                        .stderr
-                        .as_mut()
-                        .expect("Failed to open engine stderr"),
-                )
-                .lines()
-                {
-                    println!("Engine stderr: {}", line.unwrap());
-                }
-
-                engine.state = EngineState::Idle;
-                return EnginePollResult::EngineCrash;
-            }
+        let bestmove = if let Some(bestmove) = engine.take_bestmove() {
+            bestmove
         } else {
             return EnginePollResult::NoAction;
-        }
+        };
 
-        let stdout = engine
-            .process
-            .stdout
-            .as_mut()
-            .expect("Failed to open engine stdout");
+        let mv = constant::fix_move(&self.board, constant::create_move(&bestmove));
 
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    let mut parts = line.split_whitespace();
-
-                    if parts.next() != Some("bestmove") {
-                        println!("Engine stdout: {}", line);
-                        continue;
-                    }
-
-                    let bestmove = match parts.next() {
-                        Some(mv) => mv,
-                        None => {
-                            eprintln!("No bestmove found in engine output: {}", line);
-                            continue;
-                        }
-                    };
-
-                    engine.state = EngineState::Idle;
-
-                    let mv = constant::fix_move(&self.board, constant::create_move(bestmove));
-
-                    match self.make_move_with_validation(mv) {
-                        Ok(true) => return EnginePollResult::MoveMade,
-                        Ok(false) => return EnginePollResult::OutOfTime,
-                        Err(e) => {
-                            panic!("Failed to make move {}: {}", bestmove, e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error reading from engine stdout: {}", e);
-                    break;
-                }
+        match self.make_move_with_validation(mv) {
+            Ok(true) => return EnginePollResult::MoveMade,
+            Ok(false) => return EnginePollResult::OutOfTime,
+            Err(e) => {
+                panic!("Failed to make move {}: {}", bestmove, e);
             }
         }
-
-        EnginePollResult::NoAction
     }
 
     fn reset_timers(&mut self) {
         self.versus_wtime_ms = 10 * 60 * 1000;
         self.versus_btime_ms = 10 * 60 * 1000;
         self.versus_move_start_time = None;
-    }
-
-    fn kill_engines(&mut self) {
-        for engine in self.engines.iter_mut().filter_map(|e| e.as_mut()) {
-            if engine.process.kill().is_err() {
-                eprintln!("Failed to kill engine process");
-            }
-            engine.state = EngineState::Idle;
-        }
-
-        self.engines = [None, None];
-    }
-
-    fn spawn_engine(&self, engine_path: &str) -> anyhow::Result<EngineProcess> {
-        let mut child_process = std::process::Command::new(format!("bin/{}", engine_path))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("Failed to start engine chess process");
-
-        child_process
-            .stdin
-            .as_mut()
-            .expect("Failed to open engine stdin")
-            .write_all("uci\n".as_bytes())
-            .expect("Failed to write to engine stdin");
-
-        'outer: loop {
-            let stdout = child_process
-                .stdout
-                .as_mut()
-                .expect("Failed to open engine stdout");
-
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(line) => {
-                        if line == "uciok" {
-                            break 'outer;
-                        } else {
-                            println!("Ignored line: {}", line);
-                        }
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!("Error reading from engine stdout: {}", e));
-                    }
-                }
-            }
-        }
-
-        Ok(EngineProcess {
-            process: child_process,
-            state: EngineState::Idle,
-            path: engine_path.to_string(),
-            versus_wins: 0,
-        })
     }
 }
