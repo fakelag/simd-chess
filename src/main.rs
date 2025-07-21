@@ -106,7 +106,7 @@ fn chess_uci() -> anyhow::Result<()> {
                         let mut move_list = [0u16; 256];
                         let move_count = board.gen_moves_slow(&tables, &mut move_list);
 
-                        let mut best_score = i32::MIN;
+                        let mut best_score = -i32::MAX;
                         let mut best_move = 0;
 
                         for i in 0..move_count {

@@ -33,7 +33,8 @@ impl<'a> Search<'a> {
         let mut move_list = [0u16; 256];
         let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
 
-        let mut best_score = i32::MIN;
+        let mut best_score = -i32::MAX;
+        let mut has_legal_moves = false;
 
         for i in 0..move_count {
             let mv = move_list[i];
@@ -48,15 +49,24 @@ impl<'a> Search<'a> {
                 continue;
             }
 
+            has_legal_moves = true;
+
             self.moves.push(constant::move_string(mv));
             let score = -self.search(depth - 1);
             self.moves.pop();
 
-            if score > best_score {
-                best_score = score;
-            }
+            best_score = best_score.max(score);
 
             *self.chess = board_copy;
+        }
+
+        if !has_legal_moves {
+            if self.chess.in_check_slow(self.tables, self.chess.b_move) {
+                return -i32::MAX;
+            }
+
+            // Stalemate
+            return 0;
         }
 
         best_score
@@ -85,51 +95,6 @@ impl<'a> Search<'a> {
             + (w_b - b_b) * WEIGHT_BISHOP
             + (w_n - b_n) * WEIGHT_KNIGHT
             + (w_p - b_p) * WEIGHT_PAWN;
-
-        // let black_check = self.chess.in_check_slow(self.tables, true);
-        // let white_check = self.chess.in_check_slow(self.tables, false);
-
-        // let check_bonus = match (black_check, white_check) {
-        //     (true, false) => {
-        //         println!("Black in checkmate: {:?}", self.moves);
-        //         WEIGHT_KING
-        //     }
-        //     (false, true) => {
-        //         println!("White in checkmate: {:?}", self.moves);
-        //         -WEIGHT_KING
-        //     }
-        //     _ => 0,
-        // };
-
-        let side_to_move = self.chess.b_move;
-        if self.chess.in_check_slow(self.tables, side_to_move) {
-            let mut move_list = [0u16; 256];
-            let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
-            let mut has_valid_moves = false;
-
-            for i in 0..move_count {
-                let mv = move_list[i];
-
-                let mut board_copy = self.chess.clone();
-
-                let is_valid_move = board_copy.make_move_slow(mv, self.tables)
-                    && !board_copy.in_check_slow(self.tables, side_to_move);
-
-                if is_valid_move {
-                    has_valid_moves = true;
-                    break;
-                }
-            }
-
-            if !has_valid_moves {
-                // println!(
-                //     "{} in checkmate: {:?}",
-                //     if side_to_move { "Black" } else { "White" },
-                //     self.moves
-                // );
-                return -WEIGHT_KING;
-            }
-        }
 
         let final_score = material_score;
 
