@@ -1,7 +1,11 @@
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::{
-    engine::{chess, search, tables},
+    engine::{
+        chess,
+        search::{self, search_params},
+        tables,
+    },
     ui::chess_ui::ChessUi,
 };
 
@@ -95,27 +99,20 @@ fn chess_uci() -> anyhow::Result<()> {
                 }
             }
             Some("go") => {
-                let command_str = match input.next() {
-                    Some(cmd) => cmd,
-                    None => break,
-                };
-                match command_str {
-                    "depth" => {
-                        let depth = input.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(1);
+                let search_params = search_params::SearchParams::from_iter(input);
+                let mut v1_negamax =
+                    search::v1_negamax::Search::new(search_params, &mut board, &tables);
 
-                        let best_move = search::Search::new(&mut board, &tables).search(depth);
+                let best_move = v1_negamax.search();
 
-                        println!(
-                            "bestmove {}",
-                            if best_move != 0 {
-                                constant::move_string(best_move)
-                            } else {
-                                "0000".to_string()
-                            }
-                        );
+                println!(
+                    "bestmove {}",
+                    if best_move != 0 {
+                        constant::move_string(best_move)
+                    } else {
+                        "0000".to_string()
                     }
-                    _ => return Err(anyhow::anyhow!("Unknown command in go: {}", command_str)),
-                }
+                );
             }
             Some("stop") => return Err(anyhow::anyhow!("Stop command received")),
             Some("quit") => {

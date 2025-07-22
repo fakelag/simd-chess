@@ -1,6 +1,6 @@
 use crate::{
     constant,
-    engine::{chess, tables},
+    engine::{chess, search::search_params::SearchParams, tables},
 };
 
 const WEIGHT_KING: i32 = 10000;
@@ -11,21 +11,27 @@ const WEIGHT_KNIGHT: i32 = 350;
 const WEIGHT_PAWN: i32 = 100;
 
 pub struct Search<'a> {
-    pub chess: &'a mut chess::ChessGame,
-    pub tables: &'a tables::Tables,
-    pub moves: Vec<String>,
+    params: SearchParams,
+    chess: &'a mut chess::ChessGame,
+    tables: &'a tables::Tables,
+    moves: Vec<String>,
 }
 
 impl<'a> Search<'a> {
-    pub fn new(chess: &'a mut chess::ChessGame, tables: &'a tables::Tables) -> Self {
+    pub fn new(
+        params: SearchParams,
+        chess: &'a mut chess::ChessGame,
+        tables: &'a tables::Tables,
+    ) -> Self {
         Search {
+            params,
             chess,
             tables,
             moves: Vec::new(),
         }
     }
 
-    pub fn search(&mut self, depth: u8) -> u16 {
+    pub fn search(&mut self) -> u16 {
         let mut move_list = [0u16; 256];
         let move_count = self.chess.gen_moves_slow(&self.tables, &mut move_list);
 
@@ -45,7 +51,7 @@ impl<'a> Search<'a> {
                 continue;
             }
 
-            let score = -self.negamax(depth - 1);
+            let score = -self.negamax(self.params.depth.unwrap() - 1);
 
             if score > best_score {
                 best_score = score;
