@@ -766,6 +766,7 @@ impl ChessGame {
                         state = FenState::MovesHalf;
                         continue;
                     }
+                    '\n' => break,
                     _ => return Err(format!("Invalid en passant character '{}'", c)),
                 },
                 FenState::MovesHalf => match c {
@@ -1074,7 +1075,7 @@ mod tests {
 
     #[test]
     fn test_perft_r3k2r_p1ppqpb1_bn2pnp1_3PN3_1p2P3_2N2Q1p_PPPBBPPP_R3K2R() {
-        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -";
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
         assert_eq!(
             perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             8031647685

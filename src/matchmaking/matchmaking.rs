@@ -426,7 +426,7 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str(
             format!(
-                "go depth 4 wtime {} btime {}\n",
+                "go depth 5 wtime {} btime {}\n",
                 self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),
