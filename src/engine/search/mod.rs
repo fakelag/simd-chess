@@ -8,7 +8,9 @@ pub trait Search<'a> {
     ) -> Self;
     fn search(&mut self) -> u16;
     fn num_nodes_searched(&self) -> u64;
+    fn search_score(&self) -> i32;
 }
 
 pub mod search_params;
 pub mod v1_negamax;
+pub mod v2_alphabeta;

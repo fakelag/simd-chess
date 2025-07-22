@@ -98,8 +98,12 @@ fn chess_uci() -> anyhow::Result<()> {
             }
             Some("go") => {
                 let search_params = search_params::SearchParams::from_iter(input);
+
+                // let mut search_engine =
+                //     search::v1_negamax::Negamax::new(search_params, &mut board, &tables);
+
                 let mut search_engine =
-                    search::v1_negamax::Negamax::new(search_params, &mut board, &tables);
+                    search::v2_alphabeta::Alphabeta::new(search_params, &mut board, &tables);
 
                 let start_time = std::time::Instant::now();
 
@@ -108,10 +112,12 @@ fn chess_uci() -> anyhow::Result<()> {
                 if debug {
                     let elapsed = start_time.elapsed();
                     println!(
-                        "info searched {} nodes in {} with score {}",
+                        "info searched {} nodes in {} with bestmove {} ({:016b}) score {}",
                         search_engine.num_nodes_searched(),
                         util::time_format(elapsed.as_millis() as u64),
-                        best_move
+                        util::move_string(best_move),
+                        best_move,
+                        search_engine.search_score()
                     );
                 }
 

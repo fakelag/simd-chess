@@ -7,6 +7,7 @@ use crate::{
     util,
 };
 
+const SCORE_SENTINEL: i32 = i32::MAX - 1;
 const WEIGHT_KING: i32 = 10000;
 const WEIGHT_QUEEN: i32 = 1000;
 const WEIGHT_ROOK: i32 = 525;
@@ -14,7 +15,7 @@ const WEIGHT_BISHOP: i32 = 350;
 const WEIGHT_KNIGHT: i32 = 350;
 const WEIGHT_PAWN: i32 = 100;
 
-pub struct Negamax<'a> {
+pub struct Alphabeta<'a> {
     params: SearchParams,
     chess: &'a mut chess::ChessGame,
     tables: &'a tables::Tables,
@@ -22,13 +23,13 @@ pub struct Negamax<'a> {
     score: i32,
 }
 
-impl<'a> Search<'a> for Negamax<'a> {
+impl<'a> Search<'a> for Alphabeta<'a> {
     fn new(
         params: SearchParams,
         chess: &'a mut chess::ChessGame,
         tables: &'a tables::Tables,
-    ) -> Negamax<'a> {
-        Negamax {
+    ) -> Alphabeta<'a> {
+        Alphabeta {
             params,
             chess,
             tables,
@@ -57,12 +58,13 @@ impl<'a> Search<'a> for Negamax<'a> {
                 continue;
             }
 
-            let score = -self.negamax(
-                self.params
-                    .depth
-                    .expect("Expected \"depth\" command for negamax")
-                    - 1,
-            );
+            let depth = self
+                .params
+                .depth
+                .expect("Expected \"depth\" command for alphabeta")
+                - 1;
+
+            let score = -self.alphabeta(-i32::MAX, i32::MAX, depth);
 
             if score > best_score {
                 best_score = score;
@@ -85,12 +87,44 @@ impl<'a> Search<'a> for Negamax<'a> {
     }
 }
 
-impl<'a> Negamax<'a> {
-    fn negamax(&mut self, depth: u8) -> i32 {
+impl<'a> Alphabeta<'a> {
+    // Alpha-Beta pruning cuts off branches of the search tree where the opponent could play a move on
+    // their current turn that will result in a worse outcome for engine's side than what a previously
+    // explored branch will lead to. This will only cut off branches that are worse than a previously
+    // found move, since an opponent playing optimally will choose a move leading to a better outcome for them than
+    // what we have already found on another branch, with respect to our evaluation function.
+    //
+    // In the example below, white should NOT play move #2 because it contains a move for black that will lead to a worse
+    // outcome (W50) than an already found move #1 (W100). The search will continue from move #3 without spending time on
+    // exploring sub-branches of #2.
+    //
+    //
+    // Branch#1:                α = -∞
+    // Swap + negate            β = +∞           #1               /------\     #3
+    //  α and β:            /-------------------------------------| W100 |-----------...
+    //      α = -β (-∞)     |                  Branch#2:          \------/
+    //      β = -α (+∞)     |                  α=100 (100 > -∞)      |
+    //                      |                                        |
+    //                      |                  Swap + negate         | #2
+    //                      |                   α and β:             |
+    // No branches can be   |                       α = -β (-∞)      |
+    // pruned because β=+∞  \/                      β = -α (-100)    \/
+    //                   /-------\                                /------\
+    //       /-----------| B-100 |----------\          /----------| B-50 |
+    //       |           \-------/          |          |          \------/
+    //       |              |               |          |              X <- Beta prune due to -50 >= β (-50 >= -100).
+    //       |              |               |          |                   β tells that a better move for white was already
+    //       \/             \/              \/         \/                 found from an earlier branch (#1).
+    //    /------\       /------\       /------\      /------\            Continue search from #3.
+    //    | W500 |       | W200 |       | W100 |      | W50  |
+    //    \------/       \------/       \------/      \------/
+    fn alphabeta(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
         if depth == 0 {
             self.nodes += 1;
             return self.evaluate();
         }
+
+        let mut alpha = alpha;
 
         let mut move_list = [0u16; 256];
         let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
@@ -113,16 +147,27 @@ impl<'a> Negamax<'a> {
 
             has_legal_moves = true;
 
-            let score = -self.negamax(depth - 1);
+            let score = -self.alphabeta(-beta, -alpha, depth - 1);
 
-            best_score = best_score.max(score);
+            if score > best_score {
+                best_score = score;
+
+                if best_score > alpha {
+                    alpha = best_score;
+                }
+            }
+
+            if best_score >= beta {
+                // Board state will be restored by the caller
+                return best_score;
+            }
 
             *self.chess = board_copy;
         }
 
         if !has_legal_moves {
             if self.chess.in_check_slow(self.tables, self.chess.b_move) {
-                return -i32::MAX;
+                return -SCORE_SENTINEL;
             }
 
             // Stalemate
