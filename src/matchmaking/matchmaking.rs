@@ -4,6 +4,8 @@ use crate::{
     util,
 };
 
+pub const NEXT_MATCH_DELAY_SECONDS: u64 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersusState {
     Idle,
@@ -16,7 +18,6 @@ pub enum VersusState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnginePollResult {
     MoveMade,
-    EngineCrash,
     NoAction,
     OutOfTime,
 }
@@ -139,8 +140,9 @@ impl Matchmaking {
     pub fn poll(&mut self) {
         match self.versus_state {
             VersusState::NextMatch(start_time) => {
-                if start_time.elapsed().as_secs() >= 10 {
+                if start_time.elapsed().as_secs() >= NEXT_MATCH_DELAY_SECONDS {
                     println!("Next match starting...");
+
                     // Reset board and swap sides
                     let fen_copy = self.fen.clone();
                     self.load_fen(&fen_copy)
@@ -149,6 +151,7 @@ impl Matchmaking {
                     self.versus_state = VersusState::InProgress;
 
                     if self.versus_matches > 0 {
+                        self.on_new_match();
                         self.uci_nextmove();
                     } else {
                         eprintln!("No matches left, ending versus mode");
@@ -166,11 +169,6 @@ impl Matchmaking {
 
         match poll_result {
             EnginePollResult::MoveMade | EnginePollResult::OutOfTime => {}
-            EnginePollResult::EngineCrash => {
-                eprintln!("Engine process has crashed, pausing versus mode");
-                self.versus_pause();
-                return;
-            }
             EnginePollResult::NoAction => return,
         }
 
@@ -258,6 +256,8 @@ impl Matchmaking {
         self.engine_white = 0;
 
         self.versus_matches = num_matches;
+
+        self.on_new_match();
 
         if start_paused {
             self.versus_state = VersusState::Paused;
@@ -361,6 +361,37 @@ impl Matchmaking {
         }
     }
 
+    fn on_new_match(&mut self) {
+        let play_random_moves = true;
+        if play_random_moves {
+            use rand::Rng;
+            let mut rng = rand::rng();
+
+            rng.reseed().unwrap();
+
+            let num_moves = rng.random_range(1..=6);
+
+            for _ in 0..num_moves {
+                let random_move = self.legal_moves[rng.random_range(0..self.legal_moves.len())];
+                self.make_move_with_validation(random_move).unwrap();
+            }
+
+            println!(
+                "Played {} random moves: {}",
+                num_moves,
+                self.moves.join(" ")
+            );
+
+            // ["b1c3", "b8a6", "a2a3", "a6c5", "g1f3"]
+            //     .iter()
+            //     .for_each(|mv| {
+            //         let mv = util::fix_move(&self.board, util::create_move(mv));
+            //         self.make_move_with_validation(mv)
+            //             .expect("Failed to make move");
+            //     });
+        }
+    }
+
     fn check_timer(&mut self) -> bool {
         let side_timer = if self.board.b_move {
             self.versus_btime_ms
@@ -426,7 +457,7 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str(
             format!(
-                "go depth 5 wtime {} btime {}\n",
+                "go depth 4 wtime {} btime {}\n",
                 self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),

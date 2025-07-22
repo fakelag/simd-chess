@@ -7,6 +7,7 @@ use crate::{
     util,
 };
 
+const SCORE_SENTINEL: i32 = i32::MAX - 1;
 const WEIGHT_KING: i32 = 10000;
 const WEIGHT_QUEEN: i32 = 1000;
 const WEIGHT_ROOK: i32 = 525;
@@ -122,7 +123,7 @@ impl<'a> Negamax<'a> {
 
         if !has_legal_moves {
             if self.chess.in_check_slow(self.tables, self.chess.b_move) {
-                return -i32::MAX;
+                return -SCORE_SENTINEL;
             }
 
             // Stalemate

@@ -1,6 +1,6 @@
 use crate::{
     engine::*,
-    matchmaking::matchmaking::{Matchmaking, VersusState},
+    matchmaking::matchmaking::{Matchmaking, NEXT_MATCH_DELAY_SECONDS, VersusState},
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
     util::{self, PieceId, square_name},
@@ -341,7 +341,8 @@ impl ChessUi {
                             ui.separator();
                             ui.text(format!(
                                 "Next match starting in {} seconds",
-                                10u64.saturating_sub(ended_at.elapsed().as_secs())
+                                NEXT_MATCH_DELAY_SECONDS
+                                    .saturating_sub(ended_at.elapsed().as_secs())
                             ));
                         }
                     }
