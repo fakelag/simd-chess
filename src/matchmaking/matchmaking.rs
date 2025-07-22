@@ -362,7 +362,8 @@ impl Matchmaking {
     }
 
     fn on_new_match(&mut self) {
-        let play_random_moves = true;
+        let play_random_moves = false;
+
         if play_random_moves {
             use rand::Rng;
             let mut rng = rand::rng();
@@ -381,14 +382,6 @@ impl Matchmaking {
                 num_moves,
                 self.moves.join(" ")
             );
-
-            // ["b1c3", "b8a6", "a2a3", "a6c5", "g1f3"]
-            //     .iter()
-            //     .for_each(|mv| {
-            //         let mv = util::fix_move(&self.board, util::create_move(mv));
-            //         self.make_move_with_validation(mv)
-            //             .expect("Failed to make move");
-            //     });
         }
     }
 
