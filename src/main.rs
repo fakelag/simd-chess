@@ -103,32 +103,7 @@ fn chess_uci() -> anyhow::Result<()> {
                     "depth" => {
                         let depth = input.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(1);
 
-                        let mut move_list = [0u16; 256];
-                        let move_count = board.gen_moves_slow(&tables, &mut move_list);
-
-                        let mut best_score = -i32::MAX;
-                        let mut best_move = 0;
-
-                        for i in 0..move_count {
-                            let mv = move_list[i];
-
-                            let mut board_copy = board.clone();
-
-                            let is_legal_move = board_copy.make_move_slow(mv, &tables)
-                                && !board_copy.in_check_slow(&tables, !board_copy.b_move);
-
-                            if !is_legal_move {
-                                continue;
-                            }
-
-                            let score =
-                                -search::Search::new(&mut board_copy, &tables).search(depth - 1);
-
-                            if score > best_score {
-                                best_score = score;
-                                best_move = mv;
-                            }
-                        }
+                        let best_move = search::Search::new(&mut board, &tables).search(depth);
 
                         println!(
                             "bestmove {}",
