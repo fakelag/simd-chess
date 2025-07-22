@@ -14,11 +14,7 @@ use winit::{
     window::Window,
 };
 
-use crate::{
-    clipb,
-    constant::PICE_IMAGES,
-    ui::{self, chess_ui::ChessUi},
-};
+use crate::{clipb, ui::chess_ui::ChessUi, util::PICE_IMAGES};
 
 struct ImguiState {
     context: imgui::Context,

@@ -1,4 +1,4 @@
-use crate::constant::Side;
+use crate::util::Side;
 use std::arch::x86_64::*;
 
 enum File {

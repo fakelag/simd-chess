@@ -1,6 +1,6 @@
 use crate::{
-    constant::{PieceId, hex_to_f4_color, square_name},
     engine::chess,
+    util::{PieceId, hex_to_f4_color, square_name},
 };
 
 const CLR_DARK_SQUARE: [f32; 4] = hex_to_f4_color(0xce8747, 1.0);

@@ -32,7 +32,7 @@ impl EngineInternal {
         match (self.state, parts.next()) {
             (EngineState::CheckUci, Some("uciok")) => {
                 self.state = EngineState::WaitReadyOk;
-                self.write_stdin("isready\n")?;
+                self.write_stdin("debug on\nisready\n")?;
             }
             (EngineState::WaitReadyOk, Some("readyok")) => {
                 self.state = EngineState::ReadyOk;

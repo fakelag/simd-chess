@@ -192,3 +192,7 @@ pub fn move_string(mv: u16) -> String {
         move_flag_name(mv)
     )
 }
+
+pub fn time_format(ms: u64) -> String {
+    format!("{}:{:02}.{:03}", ms / 60000, (ms / 1000) % 60, ms % 1000,)
+}

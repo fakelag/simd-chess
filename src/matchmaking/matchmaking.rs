@@ -1,7 +1,7 @@
 use crate::{
-    constant,
     engine::{chess, tables},
     matchmaking::process::{EngineProcess, EngineState},
+    util,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,7 @@ impl Matchmaking {
 
         let mut mm = Self {
             fen: fen.to_string(),
-            is_startpos: fen == constant::FEN_STARTPOS,
+            is_startpos: fen == util::FEN_STARTPOS,
             board,
             tables: tables::Tables::new(),
             moves: Vec::new(),
@@ -85,7 +85,7 @@ impl Matchmaking {
             .load_fen(fen)
             .map_err(|e| anyhow::anyhow!("Failed to load FEN '{}': {}", fen, e))?;
         self.fen = fen.to_string();
-        self.is_startpos = fen == constant::FEN_STARTPOS;
+        self.is_startpos = fen == util::FEN_STARTPOS;
         self.moves.clear();
         self.update_legal_moves();
         Ok(())
@@ -111,7 +111,7 @@ impl Matchmaking {
     }
 
     pub fn make_move_with_validation(&mut self, mv: u16) -> anyhow::Result<bool> {
-        let mv_string = constant::move_string(mv);
+        let mv_string = util::move_string(mv);
 
         if self.update_timers() {
             // Force game over due to out of time
@@ -192,7 +192,7 @@ impl Matchmaking {
     fn versus_check_game_over(&mut self) -> bool {
         if self.check_timer() {
             let engine = self
-                .get_engine_for_side_mut(constant::Side::from(!self.board.b_move))
+                .get_engine_for_side_mut(util::Side::from(!self.board.b_move))
                 .unwrap();
             engine.versus_wins += 1;
         } else {
@@ -334,16 +334,16 @@ impl Matchmaking {
             .expect("Failed to reset board after match end");
     }
 
-    pub fn engine_index(&self, side: constant::Side) -> usize {
+    pub fn engine_index(&self, side: util::Side) -> usize {
         self.engine_white ^ side as usize
     }
 
-    pub fn get_engine_for_side(&self, side: constant::Side) -> Option<&EngineProcess> {
+    pub fn get_engine_for_side(&self, side: util::Side) -> Option<&EngineProcess> {
         let engine_white_index = self.engine_index(side);
         self.engines[engine_white_index].as_ref()
     }
 
-    pub fn get_engine_for_side_mut(&mut self, side: constant::Side) -> Option<&mut EngineProcess> {
+    pub fn get_engine_for_side_mut(&mut self, side: util::Side) -> Option<&mut EngineProcess> {
         let engine_white_index = self.engine_index(side);
         self.engines[engine_white_index].as_mut()
     }
@@ -395,7 +395,7 @@ impl Matchmaking {
     }
 
     fn uci_nextmove(&mut self) {
-        let engine_index = self.engine_index(constant::Side::from(self.board.b_move));
+        let engine_index = self.engine_index(util::Side::from(self.board.b_move));
 
         let engine = self.engines[engine_index]
             .as_mut()
@@ -441,7 +441,7 @@ impl Matchmaking {
     }
 
     fn uci_poll(&mut self) -> EnginePollResult {
-        let engine_index = self.engine_index(constant::Side::from(self.board.b_move));
+        let engine_index = self.engine_index(util::Side::from(self.board.b_move));
 
         let engine = match self.engines[engine_index].as_mut() {
             Some(engine) => engine,
@@ -454,7 +454,7 @@ impl Matchmaking {
             return EnginePollResult::NoAction;
         };
 
-        let mv = constant::fix_move(&self.board, constant::create_move(&bestmove));
+        let mv = util::fix_move(&self.board, util::create_move(&bestmove));
 
         match self.make_move_with_validation(mv) {
             Ok(true) => return EnginePollResult::MoveMade,

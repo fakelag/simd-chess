@@ -1,6 +1,10 @@
 use crate::{
-    constant,
-    engine::{chess, search::search_params::SearchParams, tables},
+    engine::{
+        chess,
+        search::{Search, search_params::SearchParams},
+        tables,
+    },
+    util,
 };
 
 const WEIGHT_KING: i32 = 10000;
@@ -10,28 +14,28 @@ const WEIGHT_BISHOP: i32 = 350;
 const WEIGHT_KNIGHT: i32 = 350;
 const WEIGHT_PAWN: i32 = 100;
 
-pub struct Search<'a> {
+pub struct Negamax<'a> {
     params: SearchParams,
     chess: &'a mut chess::ChessGame,
     tables: &'a tables::Tables,
-    moves: Vec<String>,
+    nodes: u64,
 }
 
-impl<'a> Search<'a> {
-    pub fn new(
+impl<'a> Search<'a> for Negamax<'a> {
+    fn new(
         params: SearchParams,
         chess: &'a mut chess::ChessGame,
         tables: &'a tables::Tables,
-    ) -> Self {
-        Search {
+    ) -> Negamax<'a> {
+        Negamax {
             params,
             chess,
             tables,
-            moves: Vec::new(),
+            nodes: 0,
         }
     }
 
-    pub fn search(&mut self) -> u16 {
+    fn search(&mut self) -> u16 {
         let mut move_list = [0u16; 256];
         let move_count = self.chess.gen_moves_slow(&self.tables, &mut move_list);
 
@@ -51,7 +55,12 @@ impl<'a> Search<'a> {
                 continue;
             }
 
-            let score = -self.negamax(self.params.depth.unwrap() - 1);
+            let score = -self.negamax(
+                self.params
+                    .depth
+                    .expect("Expected \"depth\" command for negamax")
+                    - 1,
+            );
 
             if score > best_score {
                 best_score = score;
@@ -64,8 +73,15 @@ impl<'a> Search<'a> {
         best_move
     }
 
+    fn num_nodes_searched(&self) -> u64 {
+        self.nodes
+    }
+}
+
+impl<'a> Negamax<'a> {
     fn negamax(&mut self, depth: u8) -> i32 {
         if depth == 0 {
+            self.nodes += 1;
             return self.evaluate();
         }
 
@@ -90,9 +106,7 @@ impl<'a> Search<'a> {
 
             has_legal_moves = true;
 
-            self.moves.push(constant::move_string(mv));
             let score = -self.negamax(depth - 1);
-            self.moves.pop();
 
             best_score = best_score.max(score);
 
@@ -114,17 +128,17 @@ impl<'a> Search<'a> {
     fn evaluate(&self) -> i32 {
         let boards = &self.chess.board.bitboards;
 
-        let w_q = boards[constant::PieceId::WhiteQueen as usize].count_ones() as i32;
-        let w_r = boards[constant::PieceId::WhiteRook as usize].count_ones() as i32;
-        let w_b = boards[constant::PieceId::WhiteBishop as usize].count_ones() as i32;
-        let w_n = boards[constant::PieceId::WhiteKnight as usize].count_ones() as i32;
-        let w_p = boards[constant::PieceId::WhitePawn as usize].count_ones() as i32;
+        let w_q = boards[util::PieceId::WhiteQueen as usize].count_ones() as i32;
+        let w_r = boards[util::PieceId::WhiteRook as usize].count_ones() as i32;
+        let w_b = boards[util::PieceId::WhiteBishop as usize].count_ones() as i32;
+        let w_n = boards[util::PieceId::WhiteKnight as usize].count_ones() as i32;
+        let w_p = boards[util::PieceId::WhitePawn as usize].count_ones() as i32;
 
-        let b_q = boards[constant::PieceId::BlackQueen as usize].count_ones() as i32;
-        let b_r = boards[constant::PieceId::BlackRook as usize].count_ones() as i32;
-        let b_b = boards[constant::PieceId::BlackBishop as usize].count_ones() as i32;
-        let b_n = boards[constant::PieceId::BlackKnight as usize].count_ones() as i32;
-        let b_p = boards[constant::PieceId::BlackPawn as usize].count_ones() as i32;
+        let b_q = boards[util::PieceId::BlackQueen as usize].count_ones() as i32;
+        let b_r = boards[util::PieceId::BlackRook as usize].count_ones() as i32;
+        let b_b = boards[util::PieceId::BlackBishop as usize].count_ones() as i32;
+        let b_n = boards[util::PieceId::BlackKnight as usize].count_ones() as i32;
+        let b_p = boards[util::PieceId::BlackPawn as usize].count_ones() as i32;
 
         let material_score = (w_q - b_q) * WEIGHT_QUEEN
             + (w_r - b_r) * WEIGHT_ROOK

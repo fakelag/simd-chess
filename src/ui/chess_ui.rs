@@ -1,9 +1,9 @@
 use crate::{
-    constant::{self, PieceId, square_name},
     engine::*,
     matchmaking::matchmaking::{Matchmaking, VersusState},
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
+    util::{self, PieceId, square_name},
     window,
 };
 
@@ -22,12 +22,8 @@ pub struct ChessUi {
 
 fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
     let stats = matchmaking.versus_stats();
-    let white_engine = matchmaking
-        .get_engine_for_side(constant::Side::White)
-        .unwrap();
-    let black_engine = matchmaking
-        .get_engine_for_side(constant::Side::Black)
-        .unwrap();
+    let white_engine = matchmaking.get_engine_for_side(util::Side::White).unwrap();
+    let black_engine = matchmaking.get_engine_for_side(util::Side::Black).unwrap();
 
     let move_start_elapsed_ms = if let Some(move_start_time) = matchmaking.versus_move_start_time {
         move_start_time.elapsed().as_millis() as usize
@@ -44,19 +40,15 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
         .saturating_sub(move_start_elapsed_ms * !matchmaking.board.b_move as usize);
 
     ui.text(format!(
-        "Matches: {}\n{} {} wins\n{} {} wins\nDraws: {}\nwtime: {}:{}.{}\nbtime: {}:{}.{}",
+        "Matches: {}\n{} {} wins\n{} {} wins\nDraws: {}\nwtime: {}\nbtime: {}",
         stats.draws + stats.engine1_wins + stats.engine2_wins,
         stats.engine1_name,
         stats.engine1_wins,
         stats.engine2_name,
         stats.engine2_wins,
         stats.draws,
-        white_ms / 60000,
-        (white_ms / 1000) % 60,
-        white_ms % 1000,
-        black_ms / 60000,
-        (black_ms / 1000) % 60,
-        black_ms % 1000,
+        util::time_format(white_ms as u64),
+        util::time_format(black_ms as u64),
     ));
 
     ui.text(format!(
@@ -209,7 +201,7 @@ impl ChessUi {
                                                 {
                                                     panic!(
                                                         "Invalid move: {}: {}",
-                                                        constant::move_string(curmove),
+                                                        util::move_string(curmove),
                                                         err
                                                     );
                                                 }
@@ -352,7 +344,6 @@ impl ChessUi {
                                 10u64.saturating_sub(ended_at.elapsed().as_secs())
                             ));
                         }
-                        _ => {}
                     }
 
                     ui.separator();
@@ -371,7 +362,7 @@ impl ChessUi {
 
                             ui.text_wrapped(format!(
                                 "Result: {} ({}) wins by checkmate",
-                                if side == constant::Side::White {
+                                if side == util::Side::White {
                                     "White"
                                 } else {
                                     "Black"
@@ -449,7 +440,7 @@ impl ChessUi {
                             ) {
                                 panic!(
                                     "Invalid promotion move: {}: {}",
-                                    constant::move_string(
+                                    util::move_string(
                                         (from_sq as u16) | ((to_sq as u16) << 6) | *flag
                                     ),
                                     err

@@ -1,6 +1,6 @@
 use crate::{
-    constant::{self, PieceId},
     engine::tables::Tables,
+    util::{self, PieceId},
 };
 use std::arch::x86_64::*;
 
@@ -34,7 +34,7 @@ macro_rules! pop_ls1b {
 
 pub enum GameState {
     Ongoing,
-    Checkmate(constant::Side),
+    Checkmate(util::Side),
     Stalemate,
     DrawByFiftyMoveRule,
 }
@@ -598,7 +598,7 @@ impl ChessGame {
                 node_count += nodes;
 
                 if let Some(ref mut moves) = moves {
-                    moves.push((constant::move_string(mv), nodes));
+                    moves.push((util::move_string(mv), nodes));
                     // println!(
                     //     "{}{}:{}",
                     //     square_name((mv & 0x3F) as u8),
@@ -805,7 +805,7 @@ impl ChessGame {
     ) -> GameState {
         if side_to_move_no_legal_moves {
             if self.in_check_slow(tables, b_move) {
-                GameState::Checkmate(constant::Side::from(!b_move))
+                GameState::Checkmate(util::Side::from(!b_move))
             } else {
                 GameState::Stalemate
             }
@@ -940,7 +940,7 @@ mod tests {
         let mut perft_moves = Vec::new();
 
         for mv in moves_to_make.iter() {
-            let mv = constant::fix_move(board, constant::create_move(mv));
+            let mv = util::fix_move(board, util::create_move(mv));
             assert!(board.make_move_slow(mv, &tables));
         }
 
@@ -1050,9 +1050,9 @@ mod tests {
                     continue;
                 }
 
-                let move_string = constant::move_string(mv);
+                let move_string = util::move_string(mv);
                 let recreated_move =
-                    constant::fix_move(&board, constant::create_move(move_string.as_str()));
+                    util::fix_move(&board, util::create_move(move_string.as_str()));
 
                 assert_eq!(
                     recreated_move, mv,

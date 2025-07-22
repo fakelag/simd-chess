@@ -3,18 +3,18 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use crate::{
     engine::{
         chess,
-        search::{self, search_params},
+        search::{self, Search, search_params},
         tables,
     },
     ui::chess_ui::ChessUi,
 };
 
 mod clipb;
-mod constant;
 mod engine;
 mod matchmaking;
 mod ui;
 mod uicomponents;
+mod util;
 mod window;
 
 fn chess_ui() -> anyhow::Result<()> {
@@ -45,19 +45,17 @@ fn chess_uci() -> anyhow::Result<()> {
             Some("uci") => {
                 println!("id name chess\nuciok")
             }
-            Some("debug") => {
-                if let Some(arg) = input.next() {
-                    debug = arg == "on";
-                } else {
-                    println!("Usage: debug <on|off>");
-                }
-            }
+            Some("debug") => match input.next() {
+                Some("on") => debug = true,
+                Some("off") => debug = false,
+                _ => panic!("Expected 'on' or 'off' after debug command"),
+            },
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let moves_it = if let Some(position_string) = input.next() {
                     match position_string {
                         "startpos" => {
-                            board.load_fen(constant::FEN_STARTPOS).unwrap();
+                            board.load_fen(util::FEN_STARTPOS).unwrap();
                             Some(input)
                         }
                         "fen" => {
@@ -90,7 +88,7 @@ fn chess_uci() -> anyhow::Result<()> {
 
                 if let Some("moves") = moves_it.next() {
                     while let Some(mv_str) = moves_it.next() {
-                        let mv = constant::fix_move(&board, constant::create_move(mv_str));
+                        let mv = util::fix_move(&board, util::create_move(mv_str));
 
                         if !board.make_move_slow(mv, &tables) {
                             return Err(anyhow::anyhow!("Invalid move: {}", mv_str));
@@ -100,15 +98,27 @@ fn chess_uci() -> anyhow::Result<()> {
             }
             Some("go") => {
                 let search_params = search_params::SearchParams::from_iter(input);
-                let mut v1_negamax =
-                    search::v1_negamax::Search::new(search_params, &mut board, &tables);
+                let mut search_engine =
+                    search::v1_negamax::Negamax::new(search_params, &mut board, &tables);
 
-                let best_move = v1_negamax.search();
+                let start_time = std::time::Instant::now();
+
+                let best_move = search_engine.search();
+
+                if debug {
+                    let elapsed = start_time.elapsed();
+                    println!(
+                        "info searched {} nodes in {} with score {}",
+                        search_engine.num_nodes_searched(),
+                        util::time_format(elapsed.as_millis() as u64),
+                        best_move
+                    );
+                }
 
                 println!(
                     "bestmove {}",
                     if best_move != 0 {
-                        constant::move_string(best_move)
+                        util::move_string(best_move)
                     } else {
                         "0000".to_string()
                     }
