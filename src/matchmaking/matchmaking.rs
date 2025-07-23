@@ -1,7 +1,12 @@
+use std::io::BufRead;
+
 use crate::{
     engine::{chess, tables},
-    matchmaking::process::{EngineProcess, EngineState},
-    util,
+    matchmaking::{
+        pgn::parse_pgn,
+        process::{EngineProcess, EngineState},
+    },
+    util::{self},
 };
 
 pub const NEXT_MATCH_DELAY_SECONDS: u64 = 1;
@@ -47,6 +52,7 @@ pub struct Matchmaking {
     pub versus_btime_ms: usize,
     pub versus_wtime_ms: usize,
     pub versus_move_start_time: Option<std::time::Instant>,
+    pub versus_opening_book: bool,
 }
 
 impl Matchmaking {
@@ -74,6 +80,7 @@ impl Matchmaking {
             versus_btime_ms: 0,
             versus_wtime_ms: 0,
             versus_move_start_time: None,
+            versus_opening_book: false,
         };
 
         mm.update_legal_moves();
@@ -192,6 +199,7 @@ impl Matchmaking {
             let engine = self
                 .get_engine_for_side_mut(util::Side::from(!self.board.b_move))
                 .unwrap();
+            // @todo - Playing without engine
             engine.versus_wins += 1;
         } else {
             match self.board.check_game_state(
@@ -244,6 +252,7 @@ impl Matchmaking {
         engine_black: &str,
         num_matches: usize,
         start_paused: bool,
+        use_opening_book: bool,
     ) -> anyhow::Result<()> {
         if self.versus_state != VersusState::Idle {
             panic!("Cannot start versus mode when already in progress");
@@ -254,6 +263,7 @@ impl Matchmaking {
         self.engines[0] = Some(EngineProcess::new(engine_white)?);
         self.engines[1] = Some(EngineProcess::new(engine_black)?);
         self.engine_white = 0;
+        self.versus_opening_book = use_opening_book;
 
         self.versus_matches = num_matches;
 
@@ -327,6 +337,7 @@ impl Matchmaking {
         self.engines[0] = None;
         self.engines[1] = None;
         self.engine_white = 0;
+        self.versus_opening_book = false;
         self.reset_timers();
 
         let fen_copy = self.fen.clone();
@@ -362,26 +373,88 @@ impl Matchmaking {
     }
 
     fn on_new_match(&mut self) {
-        let play_random_moves = false;
+        if !self.versus_opening_book {
+            return;
+        }
 
-        if play_random_moves {
-            use rand::Rng;
-            let mut rng = rand::rng();
+        let opening_files = std::fs::read_dir("openings")
+            .expect("Failed to read openings directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.metadata().map_or(false, |meta| meta.is_file())
+                    && entry.path().extension().map_or(false, |ext| ext == "tsv")
+            })
+            .map(|entry| entry.path());
 
-            rng.reseed().unwrap();
+        for file_path in opening_files {
+            if let Ok(file) = std::fs::File::open(&file_path) {
+                let lines = std::io::BufReader::new(file).lines();
 
-            let num_moves = rng.random_range(1..=6);
+                for (line_num, line) in lines.enumerate() {
+                    if line_num == 0 {
+                        // Skip the header line
+                        continue;
+                    }
 
-            for _ in 0..num_moves {
-                let random_move = self.legal_moves[rng.random_range(0..self.legal_moves.len())];
-                self.make_move_with_validation(random_move).unwrap();
+                    let line = match line {
+                        Ok(line) => line,
+                        Err(e) => {
+                            eprintln!(
+                                "Failed to read opening line from file {:?}: {}",
+                                file_path, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    let mut opening_board = self.board.clone();
+
+                    let mut parts = line.split('\t');
+
+                    let _eco = parts.next().expect("Missing ECO code in opening line");
+                    let name = parts.next().expect("Missing opening name in opening line");
+                    let moves = match parse_pgn(&mut parts, &mut opening_board, &self.tables) {
+                        Ok(moves) => moves,
+                        Err(e) => {
+                            eprintln!(
+                                "Failed to parse opening \"{}\" line in file {:?}: {}",
+                                name, file_path, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    let mut is_checkmate = false;
+
+                    let mut move_list = [0u16; 256];
+                    if opening_board.in_check_slow(&self.tables, opening_board.b_move) {
+                        is_checkmate = (0..opening_board
+                            .gen_moves_slow(&self.tables, &mut move_list))
+                            .all(|mv_index| {
+                                let mv = move_list[mv_index];
+
+                                let mut board_copy = opening_board.clone();
+
+                                if !board_copy.make_move_slow(mv, &self.tables) {
+                                    return true;
+                                }
+
+                                if board_copy.in_check_slow(&self.tables, !board_copy.b_move) {
+                                    return true;
+                                }
+
+                                false
+                            });
+                    }
+
+                    if is_checkmate {
+                        // Skip checkmate openings
+                        continue;
+                    }
+                }
+            } else {
+                eprintln!("Failed to open opening file: {:?}", file_path);
             }
-
-            println!(
-                "Played {} random moves: {}",
-                num_moves,
-                self.moves.join(" ")
-            );
         }
     }
 

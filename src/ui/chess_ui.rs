@@ -79,11 +79,11 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("chess.exe"),
+                Some("ab.exe"),
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("chess.exe"),
+                Some("negamax.exe"),
             ),
             input_num_games: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::CHARS_DECIMAL,
@@ -299,6 +299,7 @@ impl ChessUi {
                                     &self.input_black_engine.buf,
                                     self.input_num_games.buf.parse().unwrap_or(1),
                                     self.input_start_paused,
+                                    true,
                                 ) {
                                     eprintln!("Failed to spawn engines: {}", err);
                                 }
