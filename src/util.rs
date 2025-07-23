@@ -6,8 +6,8 @@ pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQ
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
-    White,
-    Black,
+    White = 0,
+    Black = 1,
     SideMax,
 }
 
