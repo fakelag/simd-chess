@@ -1,5 +1,8 @@
 use std::io::BufRead;
 
+use rand::Rng;
+use rand::SeedableRng;
+
 use crate::{
     engine::{chess, tables},
     matchmaking::{
@@ -9,7 +12,13 @@ use crate::{
     util::{self},
 };
 
-pub const NEXT_MATCH_DELAY_SECONDS: u64 = 1;
+pub const NEXT_MATCH_DELAY_SECONDS: u64 = 10;
+
+#[derive(Debug, Clone)]
+pub struct OpeningMoves {
+    pub name: String,
+    pub moves: Vec<u16>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersusState {
@@ -46,8 +55,12 @@ pub struct Matchmaking {
     is_startpos: bool,
     engine_command_buf: String,
 
+    rng: rand::rngs::StdRng,
+    opening_list: Vec<OpeningMoves>,
+    pub versus_current_opening: Option<OpeningMoves>,
+
     pub versus_state: VersusState,
-    pub versus_matches: usize,
+    pub versus_matches_left: usize,
     pub versus_draws: usize,
     pub versus_btime_ms: usize,
     pub versus_wtime_ms: usize,
@@ -73,9 +86,13 @@ impl Matchmaking {
             engines: [None, None],
             engine_white: 0,
             engine_command_buf: String::new(),
+            opening_list: Vec::new(),
+            versus_current_opening: None,
+
+            rng: rand::rngs::StdRng::seed_from_u64(0xc0ffee),
 
             versus_state: VersusState::Idle,
-            versus_matches: 0,
+            versus_matches_left: 0,
             versus_draws: 0,
             versus_btime_ms: 0,
             versus_wtime_ms: 0,
@@ -84,6 +101,7 @@ impl Matchmaking {
         };
 
         mm.update_legal_moves();
+        mm.load_openings()?;
 
         Ok(mm)
     }
@@ -157,7 +175,7 @@ impl Matchmaking {
                     self.engine_white = (self.engine_white + 1) % 2;
                     self.versus_state = VersusState::InProgress;
 
-                    if self.versus_matches > 0 {
+                    if self.versus_matches_left > 0 {
                         self.on_new_match();
                         self.uci_nextmove();
                     } else {
@@ -223,10 +241,10 @@ impl Matchmaking {
             }
         }
 
-        self.versus_matches -= 1;
+        self.versus_matches_left -= 1;
         self.reset_timers();
 
-        if self.versus_matches == 0 {
+        if self.versus_matches_left == 0 {
             self.versus_state = VersusState::Done;
             let engine1 = self.engines[0].as_ref().unwrap();
             let engine2 = self.engines[1].as_ref().unwrap();
@@ -265,7 +283,7 @@ impl Matchmaking {
         self.engine_white = 0;
         self.versus_opening_book = use_opening_book;
 
-        self.versus_matches = num_matches;
+        self.versus_matches_left = num_matches;
 
         self.on_new_match();
 
@@ -325,14 +343,14 @@ impl Matchmaking {
             return;
         }
 
-        if self.versus_matches > 0 {
+        if self.versus_matches_left > 0 {
             self.uci_nextmove();
         }
     }
 
     pub fn versus_reset(&mut self) {
         self.versus_state = VersusState::Idle;
-        self.versus_matches = 0;
+        self.versus_matches_left = 0;
         self.versus_draws = 0;
         self.engines[0] = None;
         self.engines[1] = None;
@@ -372,10 +390,8 @@ impl Matchmaking {
         }
     }
 
-    fn on_new_match(&mut self) {
-        if !self.versus_opening_book {
-            return;
-        }
+    fn load_openings(&mut self) -> anyhow::Result<()> {
+        self.opening_list.clear();
 
         let opening_files = std::fs::read_dir("openings")
             .expect("Failed to read openings directory")
@@ -387,75 +403,118 @@ impl Matchmaking {
             .map(|entry| entry.path());
 
         for file_path in opening_files {
-            if let Ok(file) = std::fs::File::open(&file_path) {
-                let lines = std::io::BufReader::new(file).lines();
-
-                for (line_num, line) in lines.enumerate() {
-                    if line_num == 0 {
-                        // Skip the header line
-                        continue;
-                    }
-
-                    let line = match line {
-                        Ok(line) => line,
-                        Err(e) => {
-                            eprintln!(
-                                "Failed to read opening line from file {:?}: {}",
-                                file_path, e
-                            );
-                            continue;
-                        }
-                    };
-
-                    let mut opening_board = self.board.clone();
-
-                    let mut parts = line.split('\t');
-
-                    let _eco = parts.next().expect("Missing ECO code in opening line");
-                    let name = parts.next().expect("Missing opening name in opening line");
-                    let moves = match parse_pgn(&mut parts, &mut opening_board, &self.tables) {
-                        Ok(moves) => moves,
-                        Err(e) => {
-                            eprintln!(
-                                "Failed to parse opening \"{}\" line in file {:?}: {}",
-                                name, file_path, e
-                            );
-                            continue;
-                        }
-                    };
-
-                    let mut is_checkmate = false;
-
-                    let mut move_list = [0u16; 256];
-                    if opening_board.in_check_slow(&self.tables, opening_board.b_move) {
-                        is_checkmate = (0..opening_board
-                            .gen_moves_slow(&self.tables, &mut move_list))
-                            .all(|mv_index| {
-                                let mv = move_list[mv_index];
-
-                                let mut board_copy = opening_board.clone();
-
-                                if !board_copy.make_move_slow(mv, &self.tables) {
-                                    return true;
-                                }
-
-                                if board_copy.in_check_slow(&self.tables, !board_copy.b_move) {
-                                    return true;
-                                }
-
-                                false
-                            });
-                    }
-
-                    if is_checkmate {
-                        // Skip checkmate openings
-                        continue;
-                    }
+            let file = match std::fs::File::open(&file_path) {
+                Ok(file) => file,
+                Err(err) => {
+                    eprintln!("Failed to open file \"{:?}\": {}", file_path, err);
+                    continue;
                 }
-            } else {
-                eprintln!("Failed to open opening file: {:?}", file_path);
+            };
+
+            let lines = std::io::BufReader::new(file).lines();
+
+            for (line_num, line) in lines.enumerate() {
+                if line_num == 0 {
+                    // Skip the header line
+                    continue;
+                }
+
+                let line = match line {
+                    Ok(line) => line,
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to read opening line from file {:?}: {}",
+                            file_path, e
+                        );
+                        continue;
+                    }
+                };
+
+                let mut opening_board = self.board.clone();
+                let mut parts = line.split('\t');
+
+                let _eco = parts.next().expect("Missing ECO code in opening line");
+                let name = parts.next().expect("Missing opening name in opening line");
+                let moves = match parse_pgn(&mut parts, &mut opening_board, &self.tables) {
+                    Ok(moves) => moves,
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to parse opening \"{}\" line in file {:?}: {}",
+                            name, file_path, e
+                        );
+                        continue;
+                    }
+                };
+
+                if self.is_board_checkmated(&opening_board) {
+                    // Skip checkmate openings
+                    continue;
+                }
+
+                self.opening_list.push(OpeningMoves {
+                    name: name.to_string(),
+                    moves,
+                });
             }
         }
+
+        Ok(())
+    }
+
+    fn on_new_match(&mut self) {
+        if !self.versus_opening_book {
+            self.versus_current_opening = None;
+            return;
+        }
+
+        if self.opening_list.is_empty() {
+            panic!("No openings loaded, cannot start match with opening book");
+        }
+
+        if self.versus_current_opening.is_none() || self.versus_matches_left % 2 == 0 {
+            // Select a random opening after every team swap
+            let opening_index = self.rng.random_range(0..self.opening_list.len());
+            let opening = self.opening_list[opening_index].clone();
+            self.versus_current_opening = Some(opening);
+        }
+
+        let opening = self.versus_current_opening.as_ref().unwrap().clone();
+
+        for mv in &opening.moves {
+            if self.make_move_with_validation(*mv).is_err() {
+                panic!(
+                    "Failed to make move {} from opening book",
+                    util::move_string(*mv)
+                );
+            }
+        }
+    }
+
+    /// Returns true if side2move is checkmated
+    fn is_board_checkmated(&self, board: &chess::ChessGame) -> bool {
+        let mut is_checkmate = false;
+
+        let mut move_list = [0u16; 256];
+        if board.in_check_slow(&self.tables, board.b_move) {
+            is_checkmate =
+                (0..board.gen_moves_slow(&self.tables, &mut move_list)).all(|mv_index| {
+                    let mv = move_list[mv_index];
+
+                    let mut board_copy = board.clone();
+
+                    if !board_copy.make_move_slow(mv, &self.tables) {
+                        return true;
+                    }
+
+                    if board_copy.in_check_slow(&self.tables, !board_copy.b_move) {
+                        return true;
+                    }
+
+                    false
+                });
+        }
+
+        is_checkmate
     }
 
     fn check_timer(&mut self) -> bool {

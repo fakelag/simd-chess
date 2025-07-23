@@ -131,13 +131,6 @@ pub fn parse_pgn<'a>(
                             ));
                         }
 
-                        // if is_checkmate {
-                        //     return Err(anyhow::anyhow!(
-                        //         "Checkmate is not allowed in opening moves: {}",
-                        //         part
-                        //     ));
-                        // }
-
                         // Fix piece for side
                         piece = PieceId::from((piece as usize) + (side as usize * 6));
 

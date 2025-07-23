@@ -55,6 +55,16 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
         "White Engine: {}\nBlack Engine: {}",
         white_engine.path, black_engine.path
     ));
+
+    if let Some(opening) = &matchmaking.versus_current_opening {
+        ui.text_wrapped(format!(
+            "Opening ({}): {}",
+            opening.moves.len(),
+            opening.name
+        ));
+    } else {
+        ui.text_wrapped("No opening book used");
+    }
 }
 
 impl ChessUi {
