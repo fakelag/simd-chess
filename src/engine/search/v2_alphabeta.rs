@@ -1,13 +1,15 @@
+use crossbeam::channel;
+
 use crate::{
     engine::{
         chess,
-        search::{Search, search_params::SearchParams},
+        search::{AbortSignal, Search, search_params::SearchParams},
         tables,
     },
     util,
 };
 
-const SCORE_SENTINEL: i32 = i32::MAX - 1;
+const SCORE_INF: i32 = i32::MAX - 1;
 const WEIGHT_KING: i32 = 10000;
 const WEIGHT_QUEEN: i32 = 1000;
 const WEIGHT_ROOK: i32 = 525;
@@ -17,8 +19,10 @@ const WEIGHT_PAWN: i32 = 100;
 
 pub struct Alphabeta<'a> {
     params: SearchParams,
-    chess: &'a mut chess::ChessGame,
+    chess: chess::ChessGame,
     tables: &'a tables::Tables,
+    sig: &'a AbortSignal,
+    is_stopping: bool,
     nodes: u64,
     score: i32,
 }
@@ -26,15 +30,18 @@ pub struct Alphabeta<'a> {
 impl<'a> Search<'a> for Alphabeta<'a> {
     fn new(
         params: SearchParams,
-        chess: &'a mut chess::ChessGame,
+        chess: chess::ChessGame,
         tables: &'a tables::Tables,
+        sig: &'a AbortSignal,
     ) -> Alphabeta<'a> {
         Alphabeta {
-            params,
             chess,
+            params,
             tables,
             nodes: 0,
+            is_stopping: false,
             score: -i32::MAX,
+            sig,
         }
     }
 
@@ -54,7 +61,7 @@ impl<'a> Search<'a> for Alphabeta<'a> {
                 && !self.chess.in_check_slow(&self.tables, !self.chess.b_move);
 
             if !is_legal_move {
-                *self.chess = board_copy;
+                self.chess = board_copy;
                 continue;
             }
 
@@ -66,12 +73,16 @@ impl<'a> Search<'a> for Alphabeta<'a> {
 
             let score = -self.alphabeta(-i32::MAX, i32::MAX, depth);
 
+            self.chess = board_copy;
+
+            if self.is_stopping {
+                return 0; // Return 0 if search was stopped
+            }
+
             if score > best_score {
                 best_score = score;
                 best_move = mv;
             }
-
-            *self.chess = board_copy;
         }
 
         self.score = best_score;
@@ -119,9 +130,15 @@ impl<'a> Alphabeta<'a> {
     //    | W500 |       | W200 |       | W100 |      | W50  |
     //    \------/       \------/       \------/      \------/
     fn alphabeta(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
+        self.nodes += 1;
+
         if depth == 0 {
-            self.nodes += 1;
             return self.evaluate();
+        }
+
+        if self.nodes & 0xFFF == 0 && self.check_sigabort() {
+            self.is_stopping = true;
+            return 0;
         }
 
         let mut alpha = alpha;
@@ -141,13 +158,19 @@ impl<'a> Alphabeta<'a> {
                 && !self.chess.in_check_slow(self.tables, !self.chess.b_move);
 
             if !is_valid_move {
-                *self.chess = board_copy;
+                self.chess = board_copy;
                 continue;
             }
 
             has_legal_moves = true;
 
             let score = -self.alphabeta(-beta, -alpha, depth - 1);
+
+            self.chess = board_copy;
+
+            if self.is_stopping {
+                return 0;
+            }
 
             if score > best_score {
                 best_score = score;
@@ -158,16 +181,13 @@ impl<'a> Alphabeta<'a> {
             }
 
             if best_score >= beta {
-                // Board state will be restored by the caller
                 return best_score;
             }
-
-            *self.chess = board_copy;
         }
 
         if !has_legal_moves {
             if self.chess.in_check_slow(self.tables, self.chess.b_move) {
-                return -SCORE_SENTINEL;
+                return -SCORE_INF;
             }
 
             // Stalemate
@@ -201,5 +221,15 @@ impl<'a> Alphabeta<'a> {
         let final_score = material_score;
 
         final_score * if self.chess.b_move { -1 } else { 1 }
+    }
+
+    fn check_sigabort(&self) -> bool {
+        match self.sig.try_recv() {
+            Ok(_) => true,
+            Err(channel::TryRecvError::Empty) => false,
+            Err(channel::TryRecvError::Disconnected) => {
+                panic!("sigabort channel disconnected while searching")
+            }
+        }
     }
 }

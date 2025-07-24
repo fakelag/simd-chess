@@ -1,10 +1,15 @@
 use crate::engine::{chess, search::search_params::SearchParams, tables};
 
+pub struct SigAbort {}
+
+pub type AbortSignal = crossbeam::channel::Receiver<SigAbort>;
+
 pub trait Search<'a> {
     fn new(
         params: SearchParams,
-        chess: &'a mut chess::ChessGame,
+        chess: chess::ChessGame,
         tables: &'a tables::Tables,
+        sig: &'a AbortSignal,
     ) -> Self;
     fn search(&mut self) -> u16;
     fn num_nodes_searched(&self) -> u64;

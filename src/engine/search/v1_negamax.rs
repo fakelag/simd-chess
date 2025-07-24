@@ -1,13 +1,13 @@
 use crate::{
     engine::{
         chess,
-        search::{Search, search_params::SearchParams},
+        search::{AbortSignal, Search, search_params::SearchParams},
         tables,
     },
     util,
 };
 
-const SCORE_SENTINEL: i32 = i32::MAX - 1;
+const SCORE_INF: i32 = i32::MAX - 1;
 const WEIGHT_KING: i32 = 10000;
 const WEIGHT_QUEEN: i32 = 1000;
 const WEIGHT_ROOK: i32 = 525;
@@ -17,7 +17,7 @@ const WEIGHT_PAWN: i32 = 100;
 
 pub struct Negamax<'a> {
     params: SearchParams,
-    chess: &'a mut chess::ChessGame,
+    chess: chess::ChessGame,
     tables: &'a tables::Tables,
     nodes: u64,
     score: i32,
@@ -26,12 +26,13 @@ pub struct Negamax<'a> {
 impl<'a> Search<'a> for Negamax<'a> {
     fn new(
         params: SearchParams,
-        chess: &'a mut chess::ChessGame,
+        chess: chess::ChessGame,
         tables: &'a tables::Tables,
+        _sig: &AbortSignal,
     ) -> Negamax<'a> {
         Negamax {
-            params,
             chess,
+            params,
             tables,
             nodes: 0,
             score: -i32::MAX,
@@ -54,7 +55,7 @@ impl<'a> Search<'a> for Negamax<'a> {
                 && !self.chess.in_check_slow(&self.tables, !self.chess.b_move);
 
             if !is_legal_move {
-                *self.chess = board_copy;
+                self.chess = board_copy;
                 continue;
             }
 
@@ -70,7 +71,7 @@ impl<'a> Search<'a> for Negamax<'a> {
                 best_move = mv;
             }
 
-            *self.chess = board_copy;
+            self.chess = board_copy;
         }
 
         self.score = best_score;
@@ -108,7 +109,7 @@ impl<'a> Negamax<'a> {
                 && !self.chess.in_check_slow(self.tables, !self.chess.b_move);
 
             if !is_valid_move {
-                *self.chess = board_copy;
+                self.chess = board_copy;
                 continue;
             }
 
@@ -118,12 +119,12 @@ impl<'a> Negamax<'a> {
 
             best_score = best_score.max(score);
 
-            *self.chess = board_copy;
+            self.chess = board_copy;
         }
 
         if !has_legal_moves {
             if self.chess.in_check_slow(self.tables, self.chess.b_move) {
-                return -SCORE_SENTINEL;
+                return -SCORE_INF;
             }
 
             // Stalemate

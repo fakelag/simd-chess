@@ -1,9 +1,12 @@
+use std::thread::JoinHandle;
+
+use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::{
     engine::{
         chess,
-        search::{self, Search, search_params},
+        search::{self, AbortSignal, Search, SigAbort, search_params},
         tables,
     },
     ui::chess_ui::ChessUi,
@@ -16,6 +19,14 @@ mod ui;
 mod uicomponents;
 mod util;
 mod window;
+
+struct GoCommand {
+    start_time: std::time::Instant,
+    params: search_params::SearchParams,
+    chess: chess::ChessGame,
+    sig: AbortSignal,
+    debug: bool,
+}
 
 fn chess_ui() -> anyhow::Result<()> {
     let event_loop = EventLoop::new().unwrap();
@@ -30,10 +41,55 @@ fn chess_ui() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn chess_uci() -> anyhow::Result<()> {
+fn search_thread(rx_search: channel::Receiver<GoCommand>, tables: &tables::Tables) {
+    loop {
+        match rx_search.recv() {
+            Ok(go) => {
+                let mut search_engine =
+                    search::v2_alphabeta::Alphabeta::new(go.params, go.chess, tables, &go.sig);
+
+                let best_move = search_engine.search();
+
+                if go.debug {
+                    let elapsed = go.start_time.elapsed();
+                    println!(
+                        "info searched {} nodes in {} with bestmove {} ({:016b}) score {}",
+                        search_engine.num_nodes_searched(),
+                        util::time_format(elapsed.as_millis() as u64),
+                        util::move_string(best_move),
+                        best_move,
+                        search_engine.search_score()
+                    );
+                }
+
+                println!(
+                    "bestmove {}",
+                    if best_move != 0 {
+                        util::move_string(best_move)
+                    } else {
+                        "0000".to_string()
+                    }
+                );
+            }
+            Err(_) => {
+                println!("Search thread terminated");
+                break;
+            }
+        }
+    }
+}
+
+fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> anyhow::Result<()> {
     let mut debug = false;
     let mut board = chess::ChessGame::new();
-    let tables = tables::Tables::new();
+
+    struct GoContext {
+        tx_abort: channel::Sender<SigAbort>,
+        tx_stop: channel::Sender<SigAbort>,
+        timeout_handle: Option<JoinHandle<()>>,
+    }
+
+    let mut context: Option<GoContext> = None;
 
     'next_cmd: loop {
         let mut buffer = String::new();
@@ -50,6 +106,19 @@ fn chess_uci() -> anyhow::Result<()> {
                 Some("off") => debug = false,
                 _ => panic!("Expected 'on' or 'off' after debug command"),
             },
+            Some("stop") => {
+                if let Some(context) = context.take() {
+                    let _ = context.tx_abort.try_send(SigAbort {});
+
+                    if let Some(handle) = context.timeout_handle {
+                        // Exit timeout thread
+                        if !handle.is_finished() {
+                            context.tx_stop.try_send(SigAbort {}).unwrap();
+                            handle.join().unwrap();
+                        }
+                    }
+                }
+            }
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let moves_it = if let Some(position_string) = input.next() {
@@ -97,44 +166,49 @@ fn chess_uci() -> anyhow::Result<()> {
                 }
             }
             Some("go") => {
-                let search_params = search_params::SearchParams::from_iter(input);
-
-                // let mut search_engine =
-                //     search::v1_negamax::Negamax::new(search_params, &mut board, &tables);
-
-                let mut search_engine =
-                    search::v2_alphabeta::Alphabeta::new(search_params, &mut board, &tables);
-
                 let start_time = std::time::Instant::now();
 
-                let best_move = search_engine.search();
+                let (tx_abort, rx_abort) = channel::bounded(1);
+                let (tx_stop, rx_stop) = channel::bounded(1);
 
-                if debug {
-                    let elapsed = start_time.elapsed();
-                    println!(
-                        "info searched {} nodes in {} with bestmove {} ({:016b}) score {}",
-                        search_engine.num_nodes_searched(),
-                        util::time_format(elapsed.as_millis() as u64),
-                        util::move_string(best_move),
-                        best_move,
-                        search_engine.search_score()
-                    );
-                }
+                let mut new_context = GoContext {
+                    tx_abort,
+                    tx_stop,
+                    timeout_handle: None,
+                };
 
-                println!(
-                    "bestmove {}",
-                    if best_move != 0 {
-                        util::move_string(best_move)
-                    } else {
-                        "0000".to_string()
+                let search_params = search_params::SearchParams::from_iter(input);
+
+                tx_search.send(GoCommand {
+                    start_time,
+                    params: search_params,
+                    chess: board.clone(),
+                    sig: rx_abort,
+                    debug,
+                })?;
+
+                // @todo - Calc thinking time
+                let think_time = std::time::Duration::from_millis(5 * 1000);
+
+                // Timeout thread
+                let tx_abort = new_context.tx_abort.clone();
+
+                new_context.timeout_handle = Some(std::thread::spawn(move || {
+                    match rx_stop.recv_timeout(think_time) {
+                        Ok(_) => {}
+                        Err(channel::RecvTimeoutError::Timeout) => {
+                            let _ = tx_abort.try_send(SigAbort {});
+                        }
+                        Err(channel::RecvTimeoutError::Disconnected) => {
+                            panic!("Timeout thread disconnected")
+                        }
                     }
-                );
+                }));
+
+                context = Some(new_context);
             }
-            Some("stop") => return Err(anyhow::anyhow!("Stop command received")),
-            Some("quit") => {
-                return Ok(());
-            }
-            Some(arg) => return Err(anyhow::anyhow!("Unknown command: {}", arg)),
+            Some("quit") => break,
+            Some(arg) => return Err(anyhow::anyhow!("Unknown command: \"{}\"", arg)),
             None => return Err(anyhow::anyhow!("No command provided")),
         }
     }
@@ -147,7 +221,24 @@ fn main() {
 
     let result = match mode.as_str() {
         "gui" => chess_ui(),
-        "uci" => chess_uci(),
+        "uci" => {
+            let (tx_search, rx_search) = channel::bounded(1);
+            let tables = tables::Tables::new();
+
+            let result = std::thread::scope(|s| {
+                let st = s.spawn(|| {
+                    search_thread(rx_search, &tables);
+                });
+
+                let result = chess_uci(tx_search, &tables);
+
+                st.join().unwrap();
+
+                result
+            });
+
+            result
+        }
         _ => panic!("Unknown mode: {}", mode),
     };
 
