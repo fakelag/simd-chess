@@ -19,3 +19,4 @@ pub trait Search<'a> {
 pub mod search_params;
 pub mod v1_negamax;
 pub mod v2_alphabeta;
+pub mod v3_itdep;

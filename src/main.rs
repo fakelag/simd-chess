@@ -46,7 +46,10 @@ fn search_thread(rx_search: channel::Receiver<GoCommand>, tables: &tables::Table
         match rx_search.recv() {
             Ok(go) => {
                 let mut search_engine =
-                    search::v2_alphabeta::Alphabeta::new(go.params, go.chess, tables, &go.sig);
+                    search::v3_itdep::IterativeDeepening::new(go.params, go.chess, tables, &go.sig);
+
+                // let mut search_engine =
+                //     search::v2_alphabeta::Alphabeta::new(go.params, go.chess, tables, &go.sig);
 
                 let best_move = search_engine.search();
 
@@ -91,6 +94,20 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
 
     let mut context: Option<GoContext> = None;
 
+    fn abort_search_uci(context: &mut Option<GoContext>) {
+        if let Some(context) = context.take() {
+            let _ = context.tx_abort.try_send(SigAbort {});
+
+            if let Some(handle) = context.timeout_handle {
+                // Exit timeout thread
+                if !handle.is_finished() {
+                    context.tx_stop.try_send(SigAbort {}).unwrap();
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
     'next_cmd: loop {
         let mut buffer = String::new();
         std::io::stdin().read_line(&mut buffer)?;
@@ -106,19 +123,7 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
                 Some("off") => debug = false,
                 _ => panic!("Expected 'on' or 'off' after debug command"),
             },
-            Some("stop") => {
-                if let Some(context) = context.take() {
-                    let _ = context.tx_abort.try_send(SigAbort {});
-
-                    if let Some(handle) = context.timeout_handle {
-                        // Exit timeout thread
-                        if !handle.is_finished() {
-                            context.tx_stop.try_send(SigAbort {}).unwrap();
-                            handle.join().unwrap();
-                        }
-                    }
-                }
-            }
+            Some("stop") => abort_search_uci(&mut context),
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let moves_it = if let Some(position_string) = input.next() {
@@ -168,6 +173,8 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
             Some("go") => {
                 let start_time = std::time::Instant::now();
 
+                abort_search_uci(&mut context);
+
                 let (tx_abort, rx_abort) = channel::bounded(1);
                 let (tx_stop, rx_stop) = channel::bounded(1);
 
@@ -188,7 +195,7 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
                 })?;
 
                 // @todo - Calc thinking time
-                let think_time = std::time::Duration::from_millis(5 * 1000);
+                let think_time = std::time::Duration::from_millis(100);
 
                 // Timeout thread
                 let tx_abort = new_context.tx_abort.clone();
@@ -212,6 +219,8 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
             None => return Err(anyhow::anyhow!("No command provided")),
         }
     }
+
+    abort_search_uci(&mut context);
 
     Ok(())
 }
