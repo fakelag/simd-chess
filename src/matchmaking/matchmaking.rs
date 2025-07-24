@@ -7,7 +7,7 @@ use crate::{
     util::{self},
 };
 
-pub const NEXT_MATCH_DELAY_SECONDS: u64 = 3;
+pub const NEXT_MATCH_DELAY_SECONDS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersusState {
@@ -54,7 +54,7 @@ pub struct Matchmaking {
     pub versus_btime_ms: usize,
     pub versus_wtime_ms: usize,
     pub versus_move_start_time: Option<std::time::Instant>,
-    pub versus_opening_book: bool,
+    pub versus_opening_book_after_matches: Option<u8>,
 }
 
 impl Matchmaking {
@@ -78,7 +78,7 @@ impl Matchmaking {
             versus_btime_ms: 0,
             versus_wtime_ms: 0,
             versus_move_start_time: None,
-            versus_opening_book: false,
+            versus_opening_book_after_matches: None,
         };
 
         mm.load_fen(fen)?;
@@ -265,7 +265,12 @@ impl Matchmaking {
         self.engines[0] = Some(EngineProcess::new(engine_white)?);
         self.engines[1] = Some(EngineProcess::new(engine_black)?);
         self.engine_white = 0;
-        self.versus_opening_book = use_opening_book && self.is_startpos;
+        self.versus_opening_book_after_matches = if use_opening_book && self.is_startpos {
+            // Use openings after playing 2 games from startpos
+            Some(2)
+        } else {
+            None
+        };
         self.versus_matches_left = num_matches;
 
         self.load_openings()?;
@@ -343,7 +348,7 @@ impl Matchmaking {
         self.engines[0] = None;
         self.engines[1] = None;
         self.engine_white = 0;
-        self.versus_opening_book = false;
+        self.versus_opening_book_after_matches = None;
         self.reset_timers();
 
         let fen_copy = self.fen.clone();
@@ -396,9 +401,16 @@ impl Matchmaking {
     }
 
     fn on_new_match(&mut self) -> bool {
-        if !self.versus_opening_book {
-            self.versus_current_opening = None;
-            return true;
+        match self.versus_opening_book_after_matches {
+            Some(0) => {}
+            Some(matches_left) => {
+                self.versus_opening_book_after_matches = Some(matches_left - 1);
+                return true;
+            }
+            None => {
+                self.versus_current_opening = None;
+                return true;
+            }
         }
 
         if self.versus_current_opening.is_none() || self.versus_matches_left % 2 == 0 {

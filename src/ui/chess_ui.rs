@@ -18,6 +18,7 @@ pub struct ChessUi {
     input_black_engine: ImguiTextInput,
     input_num_games: ImguiTextInput,
     input_start_paused: bool,
+    input_use_opening_book: bool,
 }
 
 fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
@@ -57,13 +58,9 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
     ));
 
     if let Some(opening) = &matchmaking.versus_current_opening {
-        ui.text_wrapped(format!(
-            "Opening ({}): {}",
-            opening.moves.len(),
-            opening.name
-        ));
+        ui.text_wrapped(format!("Opening ({}): {}", opening.eco, opening.name));
     } else {
-        ui.text_wrapped("No opening book used");
+        ui.text_wrapped("Opening: None");
     }
 }
 
@@ -97,9 +94,10 @@ impl ChessUi {
             ),
             input_num_games: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::CHARS_DECIMAL,
-                Some("100"),
+                Some("500"),
             ),
             input_start_paused: false,
+            input_use_opening_book: true,
         }
     }
 
@@ -302,6 +300,7 @@ impl ChessUi {
                                 .draw(Some("Number of games"), ui, "num_games_inp");
 
                             ui.checkbox("Start paused", &mut self.input_start_paused);
+                            ui.checkbox("Use opening book", &mut self.input_use_opening_book);
 
                             if ui.button("Start new Versus") {
                                 if let Err(err) = self.matchmaking.versus_start(
@@ -309,7 +308,7 @@ impl ChessUi {
                                     &self.input_black_engine.buf,
                                     self.input_num_games.buf.parse().unwrap_or(1),
                                     self.input_start_paused,
-                                    true,
+                                    self.input_use_opening_book,
                                 ) {
                                     eprintln!("Failed to spawn engines: {}", err);
                                 }
