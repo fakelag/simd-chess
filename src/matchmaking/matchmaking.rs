@@ -1,24 +1,13 @@
-use std::io::BufRead;
-
-use rand::Rng;
-use rand::SeedableRng;
-
+use crate::matchmaking::openings::OpeningBook;
+use crate::matchmaking::openings::OpeningMoves;
+use crate::matchmaking::openings::load_openings_from_dir;
 use crate::{
     engine::{chess, tables},
-    matchmaking::{
-        pgn::parse_pgn,
-        process::{EngineProcess, EngineState},
-    },
+    matchmaking::process::{EngineProcess, EngineState},
     util::{self},
 };
 
-pub const NEXT_MATCH_DELAY_SECONDS: u64 = 10;
-
-#[derive(Debug, Clone)]
-pub struct OpeningMoves {
-    pub name: String,
-    pub moves: Vec<u16>,
-}
+pub const NEXT_MATCH_DELAY_SECONDS: u64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersusState {
@@ -55,8 +44,8 @@ pub struct Matchmaking {
     is_startpos: bool,
     engine_command_buf: String,
 
-    rng: rand::rngs::StdRng,
-    opening_list: Vec<OpeningMoves>,
+    opening_book: OpeningBook,
+
     pub versus_current_opening: Option<OpeningMoves>,
 
     pub versus_state: VersusState,
@@ -70,26 +59,18 @@ pub struct Matchmaking {
 
 impl Matchmaking {
     pub fn new(fen: &str) -> anyhow::Result<Self> {
-        let mut board = chess::ChessGame::new();
-
-        board
-            .load_fen(fen)
-            .map_err(|e| anyhow::anyhow!("Failed to load FEN '{}': {}", fen, e))?;
-
         let mut mm = Self {
             fen: fen.to_string(),
             is_startpos: fen == util::FEN_STARTPOS,
-            board,
+            board: chess::ChessGame::new(),
             tables: tables::Tables::new(),
             moves: Vec::new(),
             legal_moves: Vec::new(),
             engines: [None, None],
             engine_white: 0,
             engine_command_buf: String::new(),
-            opening_list: Vec::new(),
+            opening_book: OpeningBook::new(Vec::new()),
             versus_current_opening: None,
-
-            rng: rand::rngs::StdRng::seed_from_u64(0xc0ffee),
 
             versus_state: VersusState::Idle,
             versus_matches_left: 0,
@@ -100,8 +81,7 @@ impl Matchmaking {
             versus_opening_book: false,
         };
 
-        mm.update_legal_moves();
-        mm.load_openings()?;
+        mm.load_fen(fen)?;
 
         Ok(mm)
     }
@@ -176,8 +156,12 @@ impl Matchmaking {
                     self.versus_state = VersusState::InProgress;
 
                     if self.versus_matches_left > 0 {
-                        self.on_new_match();
-                        self.uci_nextmove();
+                        if self.on_new_match() {
+                            self.uci_nextmove();
+                        } else {
+                            self.versus_matches_left = 0;
+                            self.versus_state = VersusState::Done;
+                        }
                     } else {
                         eprintln!("No matches left, ending versus mode");
                         self.versus_state = VersusState::Done;
@@ -281,17 +265,21 @@ impl Matchmaking {
         self.engines[0] = Some(EngineProcess::new(engine_white)?);
         self.engines[1] = Some(EngineProcess::new(engine_black)?);
         self.engine_white = 0;
-        self.versus_opening_book = use_opening_book;
-
+        self.versus_opening_book = use_opening_book && self.is_startpos;
         self.versus_matches_left = num_matches;
 
-        self.on_new_match();
+        self.load_openings()?;
 
-        if start_paused {
-            self.versus_state = VersusState::Paused;
+        if !self.on_new_match() {
+            self.versus_matches_left = 0;
+            self.versus_state = VersusState::Done;
         } else {
-            self.versus_state = VersusState::InProgress;
-            self.uci_nextmove();
+            if start_paused {
+                self.versus_state = VersusState::Paused;
+            } else {
+                self.versus_state = VersusState::InProgress;
+                self.uci_nextmove();
+            }
         }
 
         Ok(())
@@ -391,91 +379,41 @@ impl Matchmaking {
     }
 
     fn load_openings(&mut self) -> anyhow::Result<()> {
-        self.opening_list.clear();
+        if self.is_startpos {
+            let mut opening_list = Vec::new();
+            load_openings_from_dir(&self.board, &self.tables, &mut opening_list)?;
 
-        let opening_files = std::fs::read_dir("openings")
-            .expect("Failed to read openings directory")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.metadata().map_or(false, |meta| meta.is_file())
-                    && entry.path().extension().map_or(false, |ext| ext == "tsv")
-            })
-            .map(|entry| entry.path());
-
-        for file_path in opening_files {
-            let file = match std::fs::File::open(&file_path) {
-                Ok(file) => file,
-                Err(err) => {
-                    eprintln!("Failed to open file \"{:?}\": {}", file_path, err);
-                    continue;
-                }
-            };
-
-            let lines = std::io::BufReader::new(file).lines();
-
-            for (line_num, line) in lines.enumerate() {
-                if line_num == 0 {
-                    // Skip the header line
-                    continue;
-                }
-
-                let line = match line {
-                    Ok(line) => line,
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to read opening line from file {:?}: {}",
-                            file_path, e
-                        );
-                        continue;
-                    }
-                };
-
-                let mut opening_board = self.board.clone();
-                let mut parts = line.split('\t');
-
-                let _eco = parts.next().expect("Missing ECO code in opening line");
-                let name = parts.next().expect("Missing opening name in opening line");
-                let moves = match parse_pgn(&mut parts, &mut opening_board, &self.tables) {
-                    Ok(moves) => moves,
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to parse opening \"{}\" line in file {:?}: {}",
-                            name, file_path, e
-                        );
-                        continue;
-                    }
-                };
-
-                if self.is_board_checkmated(&opening_board) {
-                    // Skip checkmate openings
-                    continue;
-                }
-
-                self.opening_list.push(OpeningMoves {
-                    name: name.to_string(),
-                    moves,
-                });
-            }
+            self.opening_book = OpeningBook::new(opening_list);
+        } else {
+            println!(
+                "Not loading openings for a non-startpos FEN \"{}\"",
+                self.fen
+            );
+            self.opening_book = OpeningBook::new(Vec::new());
         }
 
         Ok(())
     }
 
-    fn on_new_match(&mut self) {
+    fn on_new_match(&mut self) -> bool {
         if !self.versus_opening_book {
             self.versus_current_opening = None;
-            return;
-        }
-
-        if self.opening_list.is_empty() {
-            panic!("No openings loaded, cannot start match with opening book");
+            return true;
         }
 
         if self.versus_current_opening.is_none() || self.versus_matches_left % 2 == 0 {
-            // Select a random opening after every team swap
-            let opening_index = self.rng.random_range(0..self.opening_list.len());
-            let opening = self.opening_list[opening_index].clone();
-            self.versus_current_opening = Some(opening);
+            let next_opening = self.opening_book.next();
+
+            match next_opening {
+                Some(opening) => {
+                    println!("Using opening: {}", opening.name);
+                    self.versus_current_opening = Some(opening);
+                }
+                None => {
+                    println!("Opening book exhausted, signaling versus mode to end");
+                    return false;
+                }
+            }
         }
 
         let opening = self.versus_current_opening.as_ref().unwrap().clone();
@@ -488,33 +426,8 @@ impl Matchmaking {
                 );
             }
         }
-    }
 
-    /// Returns true if side2move is checkmated
-    fn is_board_checkmated(&self, board: &chess::ChessGame) -> bool {
-        let mut is_checkmate = false;
-
-        let mut move_list = [0u16; 256];
-        if board.in_check_slow(&self.tables, board.b_move) {
-            is_checkmate =
-                (0..board.gen_moves_slow(&self.tables, &mut move_list)).all(|mv_index| {
-                    let mv = move_list[mv_index];
-
-                    let mut board_copy = board.clone();
-
-                    if !board_copy.make_move_slow(mv, &self.tables) {
-                        return true;
-                    }
-
-                    if board_copy.in_check_slow(&self.tables, !board_copy.b_move) {
-                        return true;
-                    }
-
-                    false
-                });
-        }
-
-        is_checkmate
+        true
     }
 
     fn check_timer(&mut self) -> bool {

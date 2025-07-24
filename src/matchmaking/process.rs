@@ -49,7 +49,7 @@ impl EngineInternal {
                 self.bestmove = Some(bestmove.to_string());
             }
             _ => {
-                eprintln!("[{}] stdout: {}", self.name, line);
+                // eprintln!("[{}] stdout: {}", self.name, line);
             }
         }
 
@@ -123,12 +123,9 @@ impl EngineProcess {
     }
 
     pub fn redeploy(&mut self) -> anyhow::Result<()> {
-        println!("Redeploying engine: {}", self.path);
         self.shutdown();
-        println!("Redeploying engine process: {}", self.path);
 
         *self = EngineProcess::new(&self.path)?;
-        println!("Engine redeployed: {}", self.path);
 
         Ok(())
     }
