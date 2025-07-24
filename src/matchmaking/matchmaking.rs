@@ -349,6 +349,7 @@ impl Matchmaking {
         self.engines[1] = None;
         self.engine_white = 0;
         self.versus_opening_book_after_matches = None;
+        self.versus_current_opening = None;
         self.reset_timers();
 
         let fen_copy = self.fen.clone();
@@ -507,8 +508,8 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str(
             format!(
-                "go depth 4 wtime {} btime {}\n",
-                self.versus_wtime_ms, self.versus_btime_ms
+                "go depth {} wtime {} btime {}\n",
+                4, self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),
         );

@@ -49,7 +49,7 @@ impl EngineInternal {
                 self.bestmove = Some(bestmove.to_string());
             }
             _ => {
-                // eprintln!("[{}] stdout: {}", self.name, line);
+                eprintln!("[{}] stdout: {}", self.name, line);
             }
         }
 
@@ -125,7 +125,12 @@ impl EngineProcess {
     pub fn redeploy(&mut self) -> anyhow::Result<()> {
         self.shutdown();
 
+        // @todo - Hack to preserve wins status, move wins outside of process.rs eventually
+        let wins = self.versus_wins;
+
         *self = EngineProcess::new(&self.path)?;
+
+        self.versus_wins = wins;
 
         Ok(())
     }
