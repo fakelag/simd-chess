@@ -225,6 +225,58 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
     Ok(())
 }
 
+// fn test() {
+//     use std::arch::x86_64::*;
+
+//     let mut bb = [0u64; 12];
+//     let b_move = false;
+
+//     bb[0] = 0b0;
+//     bb[1] = 0b0;
+//     bb[2] = 0b0;
+
+//     struct T {
+//         tables: [[u64; 64]; 6],
+//     }
+
+//     let mut t = T {
+//         tables: [
+//             [0b10; 64],
+//             [0b111; 64],
+//             [0b1111; 64],
+//             [0; 64],
+//             [0; 64],
+//             [0; 64],
+//         ],
+//     };
+
+//     t.tables[1][1] = 0b101;
+
+//     unsafe {
+//         let most_sig_bit_1 = _mm512_set1_epi64(1 << 63);
+//         let sixtythree = _mm512_set1_epi64(63);
+
+//         // Getting piece squares and popping ms1b for next it
+//         let pieces_vec = _mm512_loadu_si512(bb.as_ptr().add(b_move as usize * 6) as *const _);
+//         let ms1b_vec = _mm512_lzcnt_epi64(pieces_vec);
+//         let shft = _mm512_srlv_epi64(most_sig_bit_1, ms1b_vec);
+//         let popped = _mm512_xor_si512(pieces_vec, shft);
+//         let realindexes = _mm512_sub_epi64(sixtythree, ms1b_vec);
+
+//         // println!("Pieces: {:?}", pieces_vec);
+//         // println!("MS1B: {:?}", ms1b_vec);
+//         // println!("shft: {:?}", shft);
+//         // println!("Popped: {:?}", popped);
+//         // println!("Real indexes: {:?}", realindexes);
+
+//         // Gathering tables from mem
+//         let vindex = _mm256_set_epi32(0, 0, 0, 0, 0, 64 * 2, 64 + 1, 0);
+//         let lol = _mm512_i32gather_epi64(vindex, t.tables.as_ptr() as *const i64, 8);
+
+//         println!("Gathered tables: {:?}", lol);
+//     }
+// }
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
 
