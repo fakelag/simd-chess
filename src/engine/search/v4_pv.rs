@@ -1,3 +1,5 @@
+use std::{cell::UnsafeCell, mem::MaybeUninit};
+
 use crossbeam::channel;
 
 use crate::{
@@ -16,77 +18,98 @@ const WEIGHT_ROOK: i32 = 525;
 const WEIGHT_BISHOP: i32 = 350;
 const WEIGHT_KNIGHT: i32 = 350;
 const WEIGHT_PAWN: i32 = 100;
+const PV_DEPTH: usize = 64;
 
-pub struct Alphabeta<'a> {
+#[derive(Debug)]
+pub struct PvTable {
+    pub moves: [[u16; PV_DEPTH]; PV_DEPTH],
+    pub lengths: [u8; PV_DEPTH],
+}
+
+impl PvTable {
+    pub fn new() -> Self {
+        PvTable {
+            moves: [[0; PV_DEPTH]; PV_DEPTH],
+            lengths: [0; PV_DEPTH],
+        }
+    }
+}
+
+pub struct Search<'a> {
     params: SearchParams,
     chess: chess::ChessGame,
     tables: &'a tables::Tables,
     sig: &'a AbortSignal,
+
+    ply: u8,
     is_stopping: bool,
+
     nodes: u64,
     score: i32,
+
+    pv_table: Box<PvTable>,
+    pv: [u16; PV_DEPTH],
+    pv_length: usize,
+    pv_trace: bool,
 }
 
-impl<'a> SearchStrategy<'a> for Alphabeta<'a> {
+impl<'a> SearchStrategy<'a> for Search<'a> {
+    #[inline(never)]
     fn new(
         params: SearchParams,
         chess: chess::ChessGame,
         tables: &'a tables::Tables,
         sig: &'a AbortSignal,
-    ) -> Alphabeta<'a> {
-        Alphabeta {
+    ) -> Search<'a> {
+        let s = Search {
+            sig,
             chess,
             params,
             tables,
             nodes: 0,
+            ply: 0,
             is_stopping: false,
             score: -i32::MAX,
-            sig,
-        }
+            pv_table: unsafe {
+                let mut pv_table = Box::new_uninit();
+                pv_table.write(PvTable::new());
+                pv_table.assume_init()
+            },
+            pv: [0; PV_DEPTH],
+            pv_length: 0,
+            pv_trace: false,
+        };
+
+        s
     }
 
     fn search(&mut self) -> u16 {
-        let mut move_list = [0u16; 256];
-        let move_count = self.chess.gen_moves_slow(&self.tables, &mut move_list);
-
         let mut best_score = -i32::MAX;
-        let mut best_move = 0;
+        let mut node_count = 0;
 
-        for i in 0..move_count {
-            let mv = move_list[i];
+        let max_depth = self.params.depth.unwrap_or(63);
 
-            let board_copy = self.chess.clone();
+        'outer: for depth in 1..=max_depth {
+            self.ply = 0;
 
-            let is_legal_move = self.chess.make_move_slow(mv, &self.tables)
-                && !self.chess.in_check_slow(&self.tables, !self.chess.b_move);
-
-            if !is_legal_move {
-                self.chess = board_copy;
-                continue;
-            }
-
-            let depth = self
-                .params
-                .depth
-                .expect("Expected \"depth\" command for alphabeta")
-                - 1;
-
-            let score = -self.alphabeta(-i32::MAX, i32::MAX, depth);
-
-            self.chess = board_copy;
+            let score = self.go(-i32::MAX, i32::MAX, depth);
 
             if self.is_stopping {
-                return 0; // Return 0 if search was stopped
+                break 'outer;
             }
 
-            if score > best_score {
-                best_score = score;
-                best_move = mv;
-            }
+            node_count = self.nodes;
+            self.pv_length = self.pv_table.lengths[0] as usize;
+            self.pv[0..self.pv_length].copy_from_slice(&self.pv_table.moves[0][0..self.pv_length]);
+            self.pv_trace = self.pv_length > 0;
+
+            best_score = score;
         }
 
+        self.nodes = node_count;
         self.score = best_score;
-        best_move
+
+        self.pv[0]
     }
 
     fn num_nodes_searched(&self) -> u64 {
@@ -98,53 +121,42 @@ impl<'a> SearchStrategy<'a> for Alphabeta<'a> {
     }
 }
 
-impl<'a> Alphabeta<'a> {
-    // Alpha-Beta pruning cuts off branches of the search tree where the opponent could play a move on
-    // their current turn that will result in a worse outcome for engine's side than what a previously
-    // explored branch will lead to. This will only cut off branches that are worse than a previously
-    // found move, since an opponent playing optimally will choose a move leading to a better outcome for them than
-    // what we have already found on another branch, with respect to our evaluation function.
-    //
-    // In the example below, white should NOT play move #2 because it contains a move for black that will lead to a worse
-    // outcome (W50) than an already found move #1 (W100). The search will continue from move #3 without spending time on
-    // exploring sub-branches of #2.
-    //
-    //
-    // Branch#1:                α = -∞
-    // Swap + negate            β = +∞           #1               /------\     #3
-    //  α and β:            /-------------------------------------| W100 |-----------...
-    //      α = -β (-∞)     |                  Branch#2:          \------/
-    //      β = -α (+∞)     |                  α=100 (100 > -∞)      |
-    //                      |                                        |
-    //                      |                  Swap + negate         | #2
-    //                      |                   α and β:             |
-    // No branches can be   |                       α = -β (-∞)      |
-    // pruned because β=+∞  \/                      β = -α (-100)    \/
-    //                   /-------\                                /------\
-    //       /-----------| B-100 |----------\          /----------| B-50 |
-    //       |           \-------/          |          |          \------/
-    //       |              |               |          |              X <- Beta prune due to -50 >= β (-50 >= -100).
-    //       |              |               |          |                   β tells that a better move for white was already
-    //       \/             \/              \/         \/                 found from an earlier branch (#1).
-    //    /------\       /------\       /------\      /------\            Continue search from #3.
-    //    | W500 |       | W200 |       | W100 |      | W50  |
-    //    \------/       \------/       \------/      \------/
-    fn alphabeta(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
+impl<'a> Search<'a> {
+    pub fn get_pv(&self) -> &[u16] {
+        &self.pv[0..self.pv_length]
+    }
+
+    fn go(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
+        // @perf - Can rust reason ply < PV_DEPTH without recursive assertions
+        assert!(self.ply < PV_DEPTH as u8);
+
         self.nodes += 1;
+        self.pv_table.lengths[self.ply as usize] = 0;
+
+        if self.nodes & 0x7FF == 0 && self.check_sigabort() {
+            self.is_stopping = true;
+            return 0;
+        }
 
         if depth == 0 {
             return self.evaluate();
         }
 
-        if self.nodes & 0xFFF == 0 && self.check_sigabort() {
-            self.is_stopping = true;
-            return 0;
-        }
-
         let mut alpha = alpha;
 
         let mut move_list = [0u16; 256];
-        let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
+
+        let move_count = if self.pv_trace {
+            // PV Tracing: Generate the PV-move from the last iteration as an extra first move to play.
+            // This makes sure that PV is played first on subsequent searches. Though it means that the move
+            // is possibly played twice for a given board position, it reduces overall nodes searched due to AB cutoffs.
+            self.pv_trace = self.pv_length > (self.ply as usize + 1);
+
+            move_list[0] = self.pv[self.ply as usize];
+            self.chess.gen_moves_slow(self.tables, &mut move_list[1..]) + 1
+        } else {
+            self.chess.gen_moves_slow(self.tables, &mut move_list)
+        };
 
         let mut best_score = -i32::MAX;
         let mut has_legal_moves = false;
@@ -164,7 +176,11 @@ impl<'a> Alphabeta<'a> {
 
             has_legal_moves = true;
 
-            let score = -self.alphabeta(-beta, -alpha, depth - 1);
+            self.ply += 1;
+
+            let score = -self.go(-beta, -alpha, depth - 1);
+
+            self.ply -= 1;
 
             self.chess = board_copy;
 
@@ -178,6 +194,22 @@ impl<'a> Alphabeta<'a> {
                 if best_score > alpha {
                     alpha = best_score;
                 }
+
+                // Update PV
+                let child_pv_length = self.pv_table.lengths[self.ply as usize + 1];
+
+                self.pv_table.moves[self.ply as usize][0] = mv;
+                self.pv_table.lengths[self.ply as usize] = child_pv_length + 1;
+
+                // @perf - use disjoint unchecked
+                let [root_pv_moves, child_pv_moves] = self
+                    .pv_table
+                    .moves
+                    .get_disjoint_mut([self.ply as usize, self.ply as usize + 1])
+                    .unwrap();
+
+                root_pv_moves[1..child_pv_length as usize + 1]
+                    .copy_from_slice(&child_pv_moves[0..child_pv_length as usize]);
             }
 
             if best_score >= beta {
@@ -187,7 +219,7 @@ impl<'a> Alphabeta<'a> {
 
         if !has_legal_moves {
             if self.chess.in_check_slow(self.tables, self.chess.b_move) {
-                return -SCORE_INF;
+                return -SCORE_INF + self.ply as i32;
             }
 
             // Stalemate

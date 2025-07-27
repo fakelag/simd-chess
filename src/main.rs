@@ -6,7 +6,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use crate::{
     engine::{
         chess,
-        search::{self, AbortSignal, Search, SigAbort, search_params},
+        search::{self, AbortSignal, SearchStrategy, SigAbort, search_params},
         tables,
     },
     ui::chess_ui::ChessUi,
@@ -46,7 +46,10 @@ fn search_thread(rx_search: channel::Receiver<GoCommand>, tables: &tables::Table
         match rx_search.recv() {
             Ok(go) => {
                 let mut search_engine =
-                    search::v3_itdep::IterativeDeepening::new(go.params, go.chess, tables, &go.sig);
+                    search::v4_pv::Search::new(go.params, go.chess, tables, &go.sig);
+
+                // let mut search_engine =
+                //     search::v3_itdep::IterativeDeepening::new(go.params, go.chess, tables, &go.sig);
 
                 // let mut search_engine =
                 //     search::v2_alphabeta::Alphabeta::new(go.params, go.chess, tables, &go.sig);

@@ -119,7 +119,7 @@ impl Matchmaking {
     pub fn make_move_with_validation(&mut self, mv: u16) -> anyhow::Result<bool> {
         let mv_string = util::move_string(mv);
 
-        if self.update_timers() {
+        if self.update_versus_timers() {
             // Force game over due to out of time
             self.versus_check_game_over();
             return Ok(false);
@@ -197,11 +197,10 @@ impl Matchmaking {
     }
 
     fn versus_check_game_over(&mut self) -> bool {
-        if self.check_timer() {
+        if self.check_versus_timer() {
             let engine = self
                 .get_engine_for_side_mut(util::Side::from(!self.board.b_move))
                 .unwrap();
-            // @todo - Playing without engine
             engine.versus_wins += 1;
         } else {
             match self.board.check_game_state(
@@ -308,7 +307,7 @@ impl Matchmaking {
         self.redeploy_engines()
             .expect("Failed to redeploy engines during pause");
 
-        if self.update_timers() {
+        if self.update_versus_timers() {
             self.versus_check_game_over();
         }
 
@@ -323,7 +322,7 @@ impl Matchmaking {
         self.redeploy_engines()
             .expect("Failed to redeploy engines during pause");
 
-        if self.update_timers() {
+        if self.update_versus_timers() {
             self.versus_check_game_over();
         }
 
@@ -443,7 +442,11 @@ impl Matchmaking {
         true
     }
 
-    fn check_timer(&mut self) -> bool {
+    fn check_versus_timer(&mut self) -> bool {
+        if self.versus_state == VersusState::Idle {
+            return false;
+        }
+
         let side_timer = if self.board.b_move {
             self.versus_btime_ms
         } else {
@@ -459,7 +462,11 @@ impl Matchmaking {
         side_timer.saturating_sub(elapsed_ms) == 0
     }
 
-    fn update_timers(&mut self) -> bool {
+    fn update_versus_timers(&mut self) -> bool {
+        if self.versus_state == VersusState::Idle {
+            return false;
+        }
+
         let side_timer = if self.board.b_move {
             &mut self.versus_btime_ms
         } else {

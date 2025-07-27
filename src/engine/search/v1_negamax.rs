@@ -1,7 +1,7 @@
 use crate::{
     engine::{
         chess,
-        search::{AbortSignal, Search, search_params::SearchParams},
+        search::{AbortSignal, SearchStrategy, search_params::SearchParams},
         tables,
     },
     util,
@@ -23,7 +23,7 @@ pub struct Negamax<'a> {
     score: i32,
 }
 
-impl<'a> Search<'a> for Negamax<'a> {
+impl<'a> SearchStrategy<'a> for Negamax<'a> {
     fn new(
         params: SearchParams,
         chess: chess::ChessGame,
@@ -45,6 +45,8 @@ impl<'a> Search<'a> for Negamax<'a> {
 
         let mut best_score = -i32::MAX;
         let mut best_move = 0;
+
+        self.nodes += 1;
 
         for i in 0..move_count {
             let mv = move_list[i];
@@ -89,8 +91,9 @@ impl<'a> Search<'a> for Negamax<'a> {
 
 impl<'a> Negamax<'a> {
     fn negamax(&mut self, depth: u8) -> i32 {
+        self.nodes += 1;
+
         if depth == 0 {
-            self.nodes += 1;
             return self.evaluate();
         }
 

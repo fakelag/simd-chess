@@ -67,7 +67,7 @@ impl ChessGame {
         }
     }
 
-    pub fn gen_moves_slow(&self, tables: &Tables, move_list: &mut [u16; 256]) -> usize {
+    pub fn gen_moves_slow(&self, tables: &Tables, move_list: &mut [u16]) -> usize {
         let mut move_cursor = 0;
         let side_cursor = 6 * self.b_move as usize;
         let opponent_cursor = 6 * !self.b_move as usize;

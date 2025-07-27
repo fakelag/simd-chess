@@ -3,7 +3,7 @@ use crossbeam::channel;
 use crate::{
     engine::{
         chess,
-        search::{AbortSignal, Search, search_params::SearchParams},
+        search::{AbortSignal, SearchStrategy, search_params::SearchParams},
         tables,
     },
     util,
@@ -30,7 +30,7 @@ pub struct IterativeDeepening<'a> {
     score: i32,
 }
 
-impl<'a> Search<'a> for IterativeDeepening<'a> {
+impl<'a> SearchStrategy<'a> for IterativeDeepening<'a> {
     fn new(
         params: SearchParams,
         chess: chess::ChessGame,
@@ -56,7 +56,11 @@ impl<'a> Search<'a> for IterativeDeepening<'a> {
         let mut move_list = [0u16; 256];
         let move_count = self.chess.gen_moves_slow(&self.tables, &mut move_list);
 
-        'outer: for depth in 1..64 {
+        self.nodes += 1;
+
+        let max_depth = self.params.depth.unwrap_or(63);
+
+        'outer: for depth in 1..=max_depth {
             let mut iter_best_score = -i32::MAX;
             let mut iter_best_move = 0;
 
@@ -75,7 +79,7 @@ impl<'a> Search<'a> for IterativeDeepening<'a> {
 
                 self.ply += 1;
 
-                let score = -self.go(-i32::MAX, i32::MAX, depth);
+                let score = -self.go(-i32::MAX, i32::MAX, depth - 1);
 
                 self.ply -= 1;
 
