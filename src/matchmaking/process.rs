@@ -49,7 +49,7 @@ impl EngineInternal {
                 self.bestmove = Some(bestmove.to_string());
             }
             _ => {
-                eprintln!("[{}] stdout: {}", self.name, line);
+                // eprintln!("[{}] stdout: {}", self.name, line);
             }
         }
 

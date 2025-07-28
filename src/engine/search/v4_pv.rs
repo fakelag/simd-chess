@@ -54,7 +54,6 @@ pub struct Search<'a> {
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
-    #[inline(never)]
     fn new(
         params: SearchParams,
         chess: chess::ChessGame,

@@ -7,7 +7,7 @@ use crate::{
     util::{self},
 };
 
-pub const NEXT_MATCH_DELAY_SECONDS: u64 = 10;
+pub const NEXT_MATCH_DELAY_SECONDS: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersusState {
@@ -146,8 +146,6 @@ impl Matchmaking {
         match self.versus_state {
             VersusState::NextMatch(start_time) => {
                 if start_time.elapsed().as_secs() >= NEXT_MATCH_DELAY_SECONDS {
-                    println!("Next match starting...");
-
                     // Reset board and swap sides
                     let fen_copy = self.fen.clone();
                     self.load_fen(&fen_copy)
@@ -401,6 +399,18 @@ impl Matchmaking {
     }
 
     fn on_new_match(&mut self) -> bool {
+        let stats = self.versus_stats();
+        let match_num = stats.draws + stats.engine1_wins + stats.engine2_wins + 1;
+        println!(
+            "Starting match {}: {} {} wins, {} {} wins, draws: {}",
+            match_num,
+            stats.engine1_name,
+            stats.engine1_wins,
+            stats.engine2_name,
+            stats.engine2_wins,
+            stats.draws
+        );
+
         match self.versus_opening_book_after_matches {
             Some(0) => {}
             Some(matches_left) => {
@@ -513,10 +523,17 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str("\n");
 
+        let go_command = match engine.path {
+            _ if engine.path.starts_with("ab") => " depth 4 ",
+            _ if engine.path.starts_with("itdep") => " ",
+            _ if engine.path.starts_with("pv") => " ",
+            _ => panic!("No command for engine {}", engine.path),
+        };
+
         self.engine_command_buf.push_str(
             format!(
-                "go depth {} wtime {} btime {}\n",
-                4, self.versus_wtime_ms, self.versus_btime_ms
+                "go{}wtime {} btime {}\n",
+                go_command, self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),
         );
