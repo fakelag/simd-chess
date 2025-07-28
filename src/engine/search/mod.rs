@@ -17,7 +17,9 @@ pub trait SearchStrategy<'a> {
 }
 
 pub mod search_params;
+pub mod transposition;
 pub mod v1_negamax;
 pub mod v2_alphabeta;
 pub mod v3_itdep;
 pub mod v4_pv;
+pub mod v5_tt;
