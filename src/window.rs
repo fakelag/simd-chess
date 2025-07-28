@@ -274,8 +274,8 @@ impl ApplicationHandler for App {
                 window.surface_desc = wgpu::SurfaceConfiguration {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                     format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    width: size.width,
-                    height: size.height,
+                    width: size.width.max(1),
+                    height: size.height.max(1),
                     present_mode: wgpu::PresentMode::Fifo,
                     desired_maximum_frame_latency: 2,
                     alpha_mode: wgpu::CompositeAlphaMode::Auto,
