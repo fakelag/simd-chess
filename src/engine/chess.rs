@@ -53,6 +53,7 @@ pub struct ChessGame {
     pub en_passant: Option<u8>, // @perf - Encode as 64u8
     pub half_moves: u32,
     pub full_moves: u32,
+    pub zobrist_key: u64,
 }
 
 impl ChessGame {
@@ -64,6 +65,7 @@ impl ChessGame {
             en_passant: None,
             half_moves: 0,
             full_moves: 1,
+            zobrist_key: 0,
         }
     }
 
@@ -453,9 +455,13 @@ impl ChessGame {
     }
 
     pub fn make_move_slow(&mut self, mv: u16, tables: &Tables) -> bool {
+        let zb_keys = &tables.zobrist_hash_keys;
+
         let from_sq = (mv & 0x3F) as u8;
         let from_bit: u64 = 1 << from_sq;
-        let to_bit: u64 = 1 << ((mv >> 6) & 0x3F);
+
+        let to_sq = (mv >> 6) & 0x3F;
+        let to_bit: u64 = 1 << to_sq;
 
         let move_flags = mv & MV_FLAGS;
 
@@ -473,6 +479,10 @@ impl ChessGame {
 
                 let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
                 self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
+
+                // Re-add Zobrist key for moved rook
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize + 1];
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize - 1];
             }
             MV_FLAGS_CASTLE_QUEEN => {
                 if [from_sq, from_sq - 1, from_sq - 2]
@@ -487,6 +497,10 @@ impl ChessGame {
 
                 let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
                 self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
+
+                // Re-add Zobrist key for moved rook
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize - 2];
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize + 1];
             }
             _ => {}
         }
@@ -494,28 +508,48 @@ impl ChessGame {
         let from_piece = self.piece_at_slow(from_bit) - 1;
         let to_piece = self.piece_at_slow(to_bit);
 
+        // Remove moved piece from from_sq and add it to to_sq
+        self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][from_sq as usize];
+        self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][to_sq as usize];
+
         if to_piece != 0 {
             self.board.bitboards[to_piece - 1] &= !to_bit;
+
+            // Remove captured piece from Zobrist key
+            self.zobrist_key ^= zb_keys.hash_piece_squares[to_piece - 1][to_sq as usize];
         }
         self.board.bitboards[from_piece] ^= to_bit | from_bit;
 
-        self.en_passant = None;
+        if let Some(ep_square) = self.en_passant.take() {
+            // Remove en passant square from Zobrist key
+            self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
+        }
 
         match move_flags {
             MV_FLAG_EPCAP => {
-                if self.b_move {
-                    self.board.bitboards[PieceId::WhitePawn as usize] &= !(to_bit << 8);
+                let (piece_id, ep_square) = if self.b_move {
+                    (PieceId::WhitePawn as usize, to_sq + 8)
                 } else {
-                    self.board.bitboards[PieceId::BlackPawn as usize] &= !(to_bit >> 8);
-                }
+                    (PieceId::BlackPawn as usize, to_sq - 8)
+                };
+
+                self.board.bitboards[piece_id] &= !(1 << ep_square);
+
+                // Remove captured pawn from Zobrist key
+                self.zobrist_key ^= zb_keys.hash_piece_squares[piece_id][ep_square as usize];
             }
             MV_FLAG_DPP => {
                 let from_sq = ((mv >> 6) & 0x3F) as u8;
-                self.en_passant = if self.b_move {
-                    Some(from_sq + 8)
+                let en_passant = if self.b_move {
+                    from_sq + 8
                 } else {
-                    Some(from_sq - 8)
+                    from_sq - 8
                 };
+
+                self.en_passant = Some(en_passant);
+
+                // Add new en passant square to Zobrist key
+                self.zobrist_key ^= zb_keys.hash_en_passant_squares[en_passant as usize];
             }
             _ => {}
         }
@@ -530,7 +564,14 @@ impl ChessGame {
             };
             self.board.bitboards[from_piece] &= !to_bit;
             self.board.bitboards[promotion_piece] |= to_bit;
+
+            // Remove Zobrist key for promoted pawn and add it for promoted-to piece
+            self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][to_sq as usize];
+            self.zobrist_key ^= zb_keys.hash_piece_squares[promotion_piece][to_sq as usize];
         }
+
+        // Remove Zobrist key for castling rights
+        self.zobrist_key ^= zb_keys.hash_castling_rights[self.castles as usize];
 
         // @perf - Castling rights could be encoded into a table to avoid branches
         if to_piece != 0 {
@@ -557,6 +598,9 @@ impl ChessGame {
             }
         }
 
+        // Add Zobrist key for castling rights
+        self.zobrist_key ^= zb_keys.hash_castling_rights[self.castles as usize];
+
         self.half_moves += 1;
         self.full_moves += self.b_move as u32;
 
@@ -568,6 +612,7 @@ impl ChessGame {
         }
 
         self.b_move = !self.b_move;
+        self.zobrist_key ^= zb_keys.hash_side_to_move;
 
         // debug_assert!(self.is_valid(), "Board is invalid after move");
         true
@@ -613,7 +658,7 @@ impl ChessGame {
         node_count
     }
 
-    pub fn load_fen(&mut self, fen: &str) -> Result<usize, String> {
+    pub fn load_fen(&mut self, fen: &str, tables: &Tables) -> Result<usize, String> {
         self.reset();
 
         #[derive(Debug)]
@@ -790,6 +835,8 @@ impl ChessGame {
             }
         }
 
+        self.zobrist_key = self.calc_initial_zobrist_key(tables);
+
         Ok(fen_length)
     }
 
@@ -842,6 +889,36 @@ impl ChessGame {
         }
 
         true
+    }
+
+    pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> u64 {
+        let mut zobrist_hash = 0u64;
+        let zb_keys = &tables.zobrist_hash_keys;
+
+        for square in 0..64 {
+            let piece_id = self.piece_at_slow(1 << square);
+
+            if piece_id == 0 {
+                continue;
+            }
+
+            let piece_id = piece_id - 1;
+            zobrist_hash ^= zb_keys.hash_piece_squares[piece_id][square as usize];
+        }
+
+        if let Some(ep_square) = self.en_passant {
+            zobrist_hash ^= zb_keys.hash_en_passant_squares[ep_square as usize];
+        }
+
+        zobrist_hash ^= zb_keys.hash_castling_rights[self.castles as usize];
+
+        zobrist_hash ^= if self.b_move {
+            zb_keys.hash_side_to_move
+        } else {
+            0
+        };
+
+        zobrist_hash
     }
 
     #[inline(always)]
@@ -936,7 +1013,7 @@ mod tests {
         fen: &'static str,
         tables: &Tables,
     ) -> u64 {
-        assert!(board.load_fen(fen).is_ok());
+        assert!(board.load_fen(fen, tables).is_ok());
 
         let mut perft_moves = Vec::new();
 
@@ -1034,7 +1111,7 @@ mod tests {
         ]
         .iter()
         .for_each(|&fen| {
-            assert!(board.load_fen(fen).is_ok());
+            assert!(board.load_fen(fen, &tables).is_ok());
 
             let mut move_list = [0u16; 256];
             let move_count = board.gen_moves_slow(&tables, &mut move_list);
@@ -1061,6 +1138,80 @@ mod tests {
                     move_string, fen, mv, recreated_move
                 );
             }
+        });
+    }
+
+    #[test]
+    fn test_zobrist_hashing() {
+        let mut board = ChessGame::new();
+        let tables = Tables::new();
+        [
+            ("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1", 3),
+            ("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w - - 0 1", 3),
+            ("4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1", 3),
+            ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", 3),
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                4,
+            ),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                4,
+            ),
+            (
+                "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+                4,
+            ),
+        ]
+        .iter()
+        .for_each(|&(fen, depth)| {
+            assert!(board.load_fen(fen, &tables).is_ok());
+
+            fn check_keys_to_depth(
+                fen: &str,
+                depth: usize,
+                board: &mut ChessGame,
+                tables: &Tables,
+            ) {
+                if depth == 0 {
+                    return;
+                }
+
+                let mut move_list = [0u16; 256];
+                let move_count = board.gen_moves_slow(&tables, &mut move_list);
+
+                for i in 0..move_count {
+                    let mv = move_list[i];
+
+                    let board_copy = board.clone();
+
+                    let is_legal_move = board.make_move_slow(mv, &tables)
+                        && !board.in_check_slow(&tables, !board.b_move);
+
+                    if !is_legal_move {
+                        *board = board_copy;
+                        continue;
+                    }
+
+                    let calculated_zobrist_key = board.calc_initial_zobrist_key(&tables);
+
+                    assert_eq!(
+                        board.zobrist_key,
+                        calculated_zobrist_key,
+                        "Zobrist hash mismatch for move {}. Fen: {} Expected: {:#X}, got: {:#X}",
+                        util::move_string(mv),
+                        fen,
+                        calculated_zobrist_key,
+                        board.zobrist_key,
+                    );
+
+                    check_keys_to_depth(fen, depth - 1, board, tables);
+
+                    *board = board_copy;
+                }
+            }
+
+            check_keys_to_depth(fen, depth as usize, &mut board, &tables);
         });
     }
 

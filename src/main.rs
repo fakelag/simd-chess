@@ -46,7 +46,9 @@ fn search_thread(rx_search: channel::Receiver<GoCommand>, tables: &tables::Table
         match rx_search.recv() {
             Ok(go) => {
                 let mut search_engine =
-                    search::v4_pv::Search::new(go.params, go.chess, tables, &go.sig);
+                    search::v5_tt::Search::new(go.params, go.chess, tables, &go.sig);
+                // let mut search_engine =
+                //     search::v4_pv::Search::new(go.params, go.chess, tables, &go.sig);
 
                 // let mut search_engine =
                 //     search::v3_itdep::IterativeDeepening::new(go.params, go.chess, tables, &go.sig);
@@ -132,7 +134,7 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
                 let moves_it = if let Some(position_string) = input.next() {
                     match position_string {
                         "startpos" => {
-                            board.load_fen(util::FEN_STARTPOS).unwrap();
+                            board.load_fen(util::FEN_STARTPOS, tables).unwrap();
                             Some(input)
                         }
                         "fen" => {
@@ -141,7 +143,9 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
                                 + position_string.len()
                                 + 1;
 
-                            let fen_length = match board.load_fen(&buffer[fen_start_index..]) {
+                            let fen_length = match board
+                                .load_fen(&buffer[fen_start_index..], tables)
+                            {
                                 Ok(fen_length) => fen_length,
                                 Err(e) => return Err(anyhow::anyhow!("Failed to load FEN: {}", e)),
                             };
@@ -234,9 +238,9 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
 //     let mut bb = [0u64; 12];
 //     let b_move = false;
 
-//     bb[0] = 0b0;
-//     bb[1] = 0b0;
-//     bb[2] = 0b0;
+//     bb[0] = 0b100;
+//     bb[1] = 0b010;
+//     bb[2] = 0b001;
 
 //     struct T {
 //         tables: [[u64; 64]; 6],
@@ -266,11 +270,11 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
 //         let popped = _mm512_xor_si512(pieces_vec, shft);
 //         let realindexes = _mm512_sub_epi64(sixtythree, ms1b_vec);
 
-//         // println!("Pieces: {:?}", pieces_vec);
-//         // println!("MS1B: {:?}", ms1b_vec);
-//         // println!("shft: {:?}", shft);
-//         // println!("Popped: {:?}", popped);
-//         // println!("Real indexes: {:?}", realindexes);
+//         println!("Pieces: {:?}", pieces_vec);
+//         println!("MS1B: {:?}", ms1b_vec);
+//         println!("shft: {:?}", shft);
+//         println!("Popped: {:?}", popped);
+//         println!("Real indexes: {:?}", realindexes);
 
 //         // Gathering tables from mem
 //         let vindex = _mm256_set_epi32(0, 0, 0, 0, 0, 64 * 2, 64 + 1, 0);

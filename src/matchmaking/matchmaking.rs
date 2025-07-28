@@ -88,7 +88,7 @@ impl Matchmaking {
 
     pub fn load_fen(&mut self, fen: &str) -> anyhow::Result<()> {
         self.board
-            .load_fen(fen)
+            .load_fen(fen, &self.tables)
             .map_err(|e| anyhow::anyhow!("Failed to load FEN '{}': {}", fen, e))?;
         self.fen = fen.to_string();
         self.is_startpos = fen == util::FEN_STARTPOS;
@@ -523,17 +523,10 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str("\n");
 
-        let go_command = match engine.path {
-            _ if engine.path.starts_with("ab") => " depth 4 ",
-            _ if engine.path.starts_with("itdep") => " ",
-            _ if engine.path.starts_with("pv") => " ",
-            _ => panic!("No command for engine {}", engine.path),
-        };
-
         self.engine_command_buf.push_str(
             format!(
-                "go{}wtime {} btime {}\n",
-                go_command, self.versus_wtime_ms, self.versus_btime_ms
+                "go wtime {} btime {}\n",
+                self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),
         );

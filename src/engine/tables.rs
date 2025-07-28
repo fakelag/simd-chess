@@ -1,3 +1,5 @@
+use rand::{Rng, SeedableRng};
+
 use crate::util::Side;
 use std::arch::x86_64::*;
 
@@ -64,16 +66,37 @@ const EX_OUTER: u64 = const {
         & ex_mask!(FileOrRank::Rank(Rank::Eight))
 };
 
+pub struct ZobristKeys {
+    pub hash_piece_squares: [[u64; 64]; 12],
+    pub hash_side_to_move: u64,
+    pub hash_castling_rights: [u64; 16],
+    pub hash_en_passant_squares: [u64; 64],
+}
+
 pub struct Tables {
     rook_move_mask: Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]>,
     bishop_move_mask: Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]>,
+    pub zobrist_hash_keys: Box<ZobristKeys>,
 }
 
 impl Tables {
     pub fn new() -> Self {
+        let (
+            zobrist_hash_squares,
+            zobrist_side_to_move,
+            zobrist_castling_rights,
+            zobrist_en_passant_squares,
+        ) = Self::gen_zobrist_hashes();
+
         Self {
             rook_move_mask: Self::gen_rook_move_table(),
             bishop_move_mask: Self::gen_bishop_move_table(),
+            zobrist_hash_keys: Box::new(ZobristKeys {
+                hash_piece_squares: zobrist_hash_squares,
+                hash_side_to_move: zobrist_side_to_move,
+                hash_castling_rights: zobrist_castling_rights,
+                hash_en_passant_squares: zobrist_en_passant_squares,
+            }),
         }
     }
 
@@ -522,6 +545,39 @@ impl Tables {
         }
 
         (hash_magics, hash_shifts)
+    }
+
+    pub fn gen_zobrist_hashes() -> ([[u64; 64]; 12], u64, [u64; 16], [u64; 64]) {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        let mut hash_squares = [[0u64; 64]; 12];
+        let mut hash_side_to_move = 0;
+        let mut hash_castling_rights: [u64; 16] = [0; 16];
+        let mut zobrist_en_passant_squares = [0; 64];
+
+        for piece in 0..12 {
+            for square in 0..64 {
+                let hash_key = rng.random::<u64>();
+                hash_squares[piece][square] = hash_key;
+            }
+        }
+
+        for castles in 0..16 {
+            hash_castling_rights[castles] = rng.random::<u64>();
+        }
+
+        hash_side_to_move = rng.random::<u64>();
+
+        for square in 0..64 {
+            zobrist_en_passant_squares[square] = rng.random::<u64>();
+        }
+
+        (
+            hash_squares,
+            hash_side_to_move,
+            hash_castling_rights,
+            zobrist_en_passant_squares,
+        )
     }
 
     #[cfg_attr(any(), rustfmt::skip)]
