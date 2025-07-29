@@ -82,7 +82,7 @@ impl ChessUi {
             ask_promotion: None,
             input_fen: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
-                Some("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+                Some(util::FEN_STARTPOS),
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
@@ -134,6 +134,8 @@ impl ChessUi {
                             .size([size_w * board_size, size_w * board_size])
                             .scroll_bar(false)
                             .build(|| {
+                                square_wh = SquareUi::calc_square_wh(ui);
+
                                 // let hovering_sq_index = (0..64).find_map(|square_index| {
                                 //     let [wnd_x, wnd_y] = ui.window_pos();
                                 //     let rank = square_index / 8;
@@ -275,6 +277,11 @@ impl ChessUi {
                     ));
 
                     ui.text(format!("Castles: {:04b}", self.matchmaking.board.castles));
+
+                    ui.text(format!(
+                        "zobrist_key: {:016X}",
+                        self.matchmaking.board.zobrist_key
+                    ));
 
                     ui.text(format!(
                         "half_moves: {}, full_moves: {}",
