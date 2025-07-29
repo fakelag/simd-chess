@@ -1,5 +1,3 @@
-use std::{cell::UnsafeCell, mem::MaybeUninit};
-
 use crossbeam::channel;
 
 use crate::{
@@ -54,34 +52,6 @@ pub struct Search<'a> {
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
-    fn new(
-        params: SearchParams,
-        chess: chess::ChessGame,
-        tables: &'a tables::Tables,
-        sig: &'a AbortSignal,
-    ) -> Search<'a> {
-        let s = Search {
-            sig,
-            chess,
-            params,
-            tables,
-            nodes: 0,
-            ply: 0,
-            is_stopping: false,
-            score: -i32::MAX,
-            pv_table: unsafe {
-                let mut pv_table = Box::new_uninit();
-                pv_table.write(PvTable::new());
-                pv_table.assume_init()
-            },
-            pv: [0; PV_DEPTH],
-            pv_length: 0,
-            pv_trace: false,
-        };
-
-        s
-    }
-
     fn search(&mut self) -> u16 {
         let mut best_score = -i32::MAX;
         let mut node_count = 0;
@@ -121,6 +91,34 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
 }
 
 impl<'a> Search<'a> {
+    pub fn new(
+        params: SearchParams,
+        chess: chess::ChessGame,
+        tables: &'a tables::Tables,
+        sig: &'a AbortSignal,
+    ) -> Search<'a> {
+        let s = Search {
+            sig,
+            chess,
+            params,
+            tables,
+            nodes: 0,
+            ply: 0,
+            is_stopping: false,
+            score: -i32::MAX,
+            pv_table: unsafe {
+                let mut pv_table = Box::new_uninit();
+                pv_table.write(PvTable::new());
+                pv_table.assume_init()
+            },
+            pv: [0; PV_DEPTH],
+            pv_length: 0,
+            pv_trace: false,
+        };
+
+        s
+    }
+
     pub fn get_pv(&self) -> &[u16] {
         &self.pv[0..self.pv_length]
     }

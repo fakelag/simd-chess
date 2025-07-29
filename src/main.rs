@@ -1,4 +1,6 @@
-use std::thread::JoinHandle;
+#![feature(sync_unsafe_cell)]
+
+use std::{cell::SyncUnsafeCell, thread::JoinHandle};
 
 use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -6,7 +8,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use crate::{
     engine::{
         chess,
-        search::{self, AbortSignal, SearchStrategy, SigAbort, search_params},
+        search::{self, AbortSignal, SearchStrategy, SigAbort, search_params, transposition},
         tables,
     },
     ui::chess_ui::ChessUi,
@@ -41,12 +43,18 @@ fn chess_ui() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn search_thread(rx_search: channel::Receiver<GoCommand>, tables: &tables::Tables) {
+fn search_thread(
+    rx_search: channel::Receiver<GoCommand>,
+    tables: &tables::Tables,
+    tt: &SyncUnsafeCell<transposition::TranspositionTable>,
+) {
+    let tt = unsafe { &mut *tt.get() };
     loop {
         match rx_search.recv() {
             Ok(go) => {
                 let mut search_engine =
-                    search::v5_tt::Search::new(go.params, go.chess, tables, &go.sig);
+                    search::v5_tt::Search::new(go.params, go.chess, tables, tt, &go.sig);
+
                 // let mut search_engine =
                 //     search::v4_pv::Search::new(go.params, go.chess, tables, &go.sig);
 
@@ -87,9 +95,13 @@ fn search_thread(rx_search: channel::Receiver<GoCommand>, tables: &tables::Table
     }
 }
 
-fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> anyhow::Result<()> {
+fn chess_uci(
+    tx_search: channel::Sender<GoCommand>,
+    tables: &tables::Tables,
+    tt: &SyncUnsafeCell<transposition::TranspositionTable>,
+) -> anyhow::Result<()> {
     let mut debug = false;
-    let mut board = chess::ChessGame::new();
+    let mut game_board: Option<chess::ChessGame> = None;
 
     struct GoContext {
         tx_abort: channel::Sender<SigAbort>,
@@ -131,6 +143,13 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
             Some("stop") => abort_search_uci(&mut context),
             Some("isready") => println!("readyok"),
             Some("position") => {
+                let mut board = chess::ChessGame::new();
+
+                // Safety: Engine should not be calculating when receiving a position command
+                let tt = unsafe { &mut *tt.get() };
+
+                tt.clear();
+
                 let moves_it = if let Some(position_string) = input.next() {
                     match position_string {
                         "startpos" => {
@@ -174,8 +193,12 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
                         if !board.make_move_slow(mv, &tables) {
                             return Err(anyhow::anyhow!("Invalid move: {}", mv_str));
                         }
+
+                        // let is_irreversible = board.half_moves == 0;
                     }
                 }
+
+                game_board = Some(board);
             }
             Some("go") => {
                 let start_time = std::time::Instant::now();
@@ -196,7 +219,9 @@ fn chess_uci(tx_search: channel::Sender<GoCommand>, tables: &tables::Tables) -> 
                 tx_search.send(GoCommand {
                     start_time,
                     params: search_params,
-                    chess: board.clone(),
+                    chess: game_board
+                        .take()
+                        .expect("Expected position command to be sent before go"),
                     sig: rx_abort,
                     debug,
                 })?;
@@ -293,12 +318,18 @@ fn main() {
             let (tx_search, rx_search) = channel::bounded(1);
             let tables = tables::Tables::new();
 
+            // Safety: TranspositionTable is Send+Sync, it is up to the table implementation itself to
+            // implement thread safety correctly. This has a few benefits:
+            // 1. TranspositionTable can be accessed without runtime costs such as locks or refcounters
+            // 2. The table can potentially be shared between threads efficiently, even unsoundly if races are deemed to be acceptable
+            let tt = SyncUnsafeCell::new(transposition::TranspositionTable::new(8));
+
             let result = std::thread::scope(|s| {
                 let st = s.spawn(|| {
-                    search_thread(rx_search, &tables);
+                    search_thread(rx_search, &tables, &tt);
                 });
 
-                let result = chess_uci(tx_search, &tables);
+                let result = chess_uci(tx_search, &tables, &tt);
 
                 st.join().unwrap();
 

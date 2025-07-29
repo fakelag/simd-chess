@@ -54,40 +54,10 @@ pub struct Search<'a> {
     pv_length: usize,
     pv_trace: bool,
 
-    pub tt: TranspositionTable,
+    tt: &'a mut TranspositionTable,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
-    fn new(
-        params: SearchParams,
-        chess: chess::ChessGame,
-        tables: &'a tables::Tables,
-        sig: &'a AbortSignal,
-    ) -> Search<'a> {
-        let s = Search {
-            sig,
-            chess,
-            params,
-            tables,
-            nodes: 0,
-            ply: 0,
-            is_stopping: false,
-            score: -i32::MAX,
-            pv_table: unsafe {
-                let mut pv_table = Box::new_uninit();
-                pv_table.write(PvTable::new());
-                pv_table.assume_init()
-            },
-            pv: [0; PV_DEPTH],
-            pv_length: 0,
-            pv_trace: false,
-
-            tt: TranspositionTable::new(8),
-        };
-
-        s
-    }
-
     fn search(&mut self) -> u16 {
         let mut best_score = -i32::MAX;
         let mut node_count = 0;
@@ -127,6 +97,37 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
 }
 
 impl<'a> Search<'a> {
+    pub fn new(
+        params: SearchParams,
+        chess: chess::ChessGame,
+        tables: &'a tables::Tables,
+        tt: &'a mut TranspositionTable,
+        sig: &'a AbortSignal,
+    ) -> Search<'a> {
+        let s = Search {
+            sig,
+            chess,
+            params,
+            tables,
+            nodes: 0,
+            ply: 0,
+            is_stopping: false,
+            score: -i32::MAX,
+            pv_table: unsafe {
+                let mut pv_table = Box::new_uninit();
+                pv_table.write(PvTable::new());
+                pv_table.assume_init()
+            },
+            pv: [0; PV_DEPTH],
+            pv_length: 0,
+            pv_trace: false,
+
+            tt,
+        };
+
+        s
+    }
+
     pub fn get_pv(&self) -> &[u16] {
         &self.pv[0..self.pv_length]
     }
@@ -143,11 +144,11 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        // if self.ply > 0 {
-        //     if let Some(score) = self.tt.probe(self.chess.zobrist_key, depth, alpha, beta) {
-        //         return score;
-        //     }
-        // }
+        if self.ply > 0 {
+            if let Some(score) = self.tt.probe(self.chess.zobrist_key, depth, alpha, beta) {
+                return score;
+            }
+        }
 
         if depth == 0 {
             return self.evaluate();
@@ -221,8 +222,8 @@ impl<'a> Search<'a> {
                     .copy_from_slice(&child_pv_moves[0..child_pv_length as usize]);
 
                 if score >= beta {
-                    // self.tt
-                    //     .store(self.chess.zobrist_key, score, depth, BoundType::LowerBound);
+                    self.tt
+                        .store(self.chess.zobrist_key, score, depth, BoundType::LowerBound);
                     return score;
                 }
 
@@ -242,8 +243,8 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        // self.tt
-        //     .store(self.chess.zobrist_key, best_score, depth, bound_type);
+        self.tt
+            .store(self.chess.zobrist_key, best_score, depth, bound_type);
 
         best_score
     }

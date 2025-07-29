@@ -28,23 +28,6 @@ pub struct Alphabeta<'a> {
 }
 
 impl<'a> SearchStrategy<'a> for Alphabeta<'a> {
-    fn new(
-        params: SearchParams,
-        chess: chess::ChessGame,
-        tables: &'a tables::Tables,
-        sig: &'a AbortSignal,
-    ) -> Alphabeta<'a> {
-        Alphabeta {
-            chess,
-            params,
-            tables,
-            nodes: 0,
-            is_stopping: false,
-            score: -i32::MAX,
-            sig,
-        }
-    }
-
     fn search(&mut self) -> u16 {
         let mut move_list = [0u16; 256];
         let move_count = self.chess.gen_moves_slow(&self.tables, &mut move_list);
@@ -99,6 +82,23 @@ impl<'a> SearchStrategy<'a> for Alphabeta<'a> {
 }
 
 impl<'a> Alphabeta<'a> {
+    pub fn new(
+        params: SearchParams,
+        chess: chess::ChessGame,
+        tables: &'a tables::Tables,
+        sig: &'a AbortSignal,
+    ) -> Alphabeta<'a> {
+        Alphabeta {
+            chess,
+            params,
+            tables,
+            nodes: 0,
+            is_stopping: false,
+            score: -i32::MAX,
+            sig,
+        }
+    }
+
     // Alpha-Beta pruning cuts off branches of the search tree where the opponent could play a move on
     // their current turn that will result in a worse outcome for engine's side than what a previously
     // explored branch will lead to. This will only cut off branches that are worse than a previously

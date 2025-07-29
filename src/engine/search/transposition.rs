@@ -39,6 +39,10 @@ pub struct TranspositionTable {
     entries: Box<[TranspositionEntry]>,
 }
 
+// Safety: TranspositionTable must implement thread safety by itself
+unsafe impl Send for TranspositionTable {}
+unsafe impl Sync for TranspositionTable {}
+
 impl TranspositionTable {
     pub fn new(size_hint_mb: usize) -> Self {
         const ENTRY_SIZE: usize = std::mem::size_of::<TranspositionEntry>();
@@ -79,6 +83,12 @@ impl TranspositionTable {
             entry.score = score;
             entry.depth = depth;
             entry.flags = flags;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for entry in &mut self.entries {
+            *entry = TranspositionEntry::new();
         }
     }
 

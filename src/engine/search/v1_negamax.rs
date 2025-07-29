@@ -1,7 +1,7 @@
 use crate::{
     engine::{
         chess,
-        search::{AbortSignal, SearchStrategy, search_params::SearchParams},
+        search::{SearchStrategy, search_params::SearchParams},
         tables,
     },
     util,
@@ -24,21 +24,6 @@ pub struct Negamax<'a> {
 }
 
 impl<'a> SearchStrategy<'a> for Negamax<'a> {
-    fn new(
-        params: SearchParams,
-        chess: chess::ChessGame,
-        tables: &'a tables::Tables,
-        _sig: &AbortSignal,
-    ) -> Negamax<'a> {
-        Negamax {
-            chess,
-            params,
-            tables,
-            nodes: 0,
-            score: -i32::MAX,
-        }
-    }
-
     fn search(&mut self) -> u16 {
         let mut move_list = [0u16; 256];
         let move_count = self.chess.gen_moves_slow(&self.tables, &mut move_list);
@@ -90,6 +75,20 @@ impl<'a> SearchStrategy<'a> for Negamax<'a> {
 }
 
 impl<'a> Negamax<'a> {
+    pub fn new(
+        params: SearchParams,
+        chess: chess::ChessGame,
+        tables: &'a tables::Tables,
+    ) -> Negamax<'a> {
+        Negamax {
+            chess,
+            params,
+            tables,
+            nodes: 0,
+            score: -i32::MAX,
+        }
+    }
+
     fn negamax(&mut self, depth: u8) -> i32 {
         self.nodes += 1;
 

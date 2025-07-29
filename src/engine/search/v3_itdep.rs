@@ -31,24 +31,6 @@ pub struct IterativeDeepening<'a> {
 }
 
 impl<'a> SearchStrategy<'a> for IterativeDeepening<'a> {
-    fn new(
-        params: SearchParams,
-        chess: chess::ChessGame,
-        tables: &'a tables::Tables,
-        sig: &'a AbortSignal,
-    ) -> IterativeDeepening<'a> {
-        IterativeDeepening {
-            chess,
-            params,
-            tables,
-            nodes: 0,
-            ply: 0,
-            is_stopping: false,
-            score: -i32::MAX,
-            sig,
-        }
-    }
-
     fn search(&mut self) -> u16 {
         let mut best_move = 0;
         let mut best_score = -i32::MAX;
@@ -114,6 +96,24 @@ impl<'a> SearchStrategy<'a> for IterativeDeepening<'a> {
 }
 
 impl<'a> IterativeDeepening<'a> {
+    pub fn new(
+        params: SearchParams,
+        chess: chess::ChessGame,
+        tables: &'a tables::Tables,
+        sig: &'a AbortSignal,
+    ) -> IterativeDeepening<'a> {
+        IterativeDeepening {
+            chess,
+            params,
+            tables,
+            nodes: 0,
+            ply: 0,
+            is_stopping: false,
+            score: -i32::MAX,
+            sig,
+        }
+    }
+
     fn go(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
         self.nodes += 1;
 

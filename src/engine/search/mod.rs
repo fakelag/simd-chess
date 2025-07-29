@@ -5,12 +5,6 @@ pub struct SigAbort {}
 pub type AbortSignal = crossbeam::channel::Receiver<SigAbort>;
 
 pub trait SearchStrategy<'a> {
-    fn new(
-        params: SearchParams,
-        chess: chess::ChessGame,
-        tables: &'a tables::Tables,
-        sig: &'a AbortSignal,
-    ) -> Self;
     fn search(&mut self) -> u16;
     fn num_nodes_searched(&self) -> u64;
     fn search_score(&self) -> i32;
