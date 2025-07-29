@@ -16,6 +16,7 @@ pub trait SearchStrategy<'a> {
     fn search_score(&self) -> i32;
 }
 
+mod repetition;
 pub mod search_params;
 pub mod transposition;
 pub mod v1_negamax;
