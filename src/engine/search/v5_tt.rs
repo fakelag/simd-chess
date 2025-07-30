@@ -5,6 +5,7 @@ use crate::{
         chess,
         search::{
             AbortSignal, SearchStrategy,
+            repetition::RepetitionTable,
             search_params::SearchParams,
             transposition::{BoundType, TranspositionTable},
         },
@@ -55,6 +56,7 @@ pub struct Search<'a> {
     pv_trace: bool,
 
     tt: &'a mut TranspositionTable,
+    rt: RepetitionTable,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
@@ -102,6 +104,7 @@ impl<'a> Search<'a> {
         chess: chess::ChessGame,
         tables: &'a tables::Tables,
         tt: &'a mut TranspositionTable,
+        rt: RepetitionTable,
         sig: &'a AbortSignal,
     ) -> Search<'a> {
         let s = Search {
@@ -121,7 +124,7 @@ impl<'a> Search<'a> {
             pv: [0; PV_DEPTH],
             pv_length: 0,
             pv_trace: false,
-
+            rt,
             tt,
         };
 
@@ -145,6 +148,10 @@ impl<'a> Search<'a> {
         }
 
         if self.ply > 0 {
+            if self.chess.half_moves >= 100 || self.rt.is_repeated(self.chess.zobrist_key) {
+                return 0;
+            }
+
             if let Some(score) = self.tt.probe(self.chess.zobrist_key, depth, alpha, beta) {
                 return score;
             }
@@ -174,6 +181,9 @@ impl<'a> Search<'a> {
 
         let mut best_score = -i32::MAX;
         let mut has_legal_moves = false;
+
+        self.rt
+            .push_position(self.chess.zobrist_key, self.chess.half_moves == 0);
 
         for i in 0..move_count {
             let mv = move_list[i];
@@ -224,6 +234,7 @@ impl<'a> Search<'a> {
                 if score >= beta {
                     self.tt
                         .store(self.chess.zobrist_key, score, depth, BoundType::LowerBound);
+                    self.rt.pop_position();
                     return score;
                 }
 
@@ -233,6 +244,7 @@ impl<'a> Search<'a> {
                 }
             }
         }
+        self.rt.pop_position();
 
         if !has_legal_moves {
             if self.chess.in_check_slow(self.tables, self.chess.b_move) {

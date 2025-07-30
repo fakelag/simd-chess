@@ -27,6 +27,7 @@ struct GoCommand {
     params: search_params::SearchParams,
     chess: chess::ChessGame,
     sig: AbortSignal,
+    repetition_table: search::repetition::RepetitionTable,
     debug: bool,
 }
 
@@ -52,8 +53,14 @@ fn search_thread(
     loop {
         match rx_search.recv() {
             Ok(go) => {
-                let mut search_engine =
-                    search::v5_tt::Search::new(go.params, go.chess, tables, tt, &go.sig);
+                let mut search_engine = search::v5_tt::Search::new(
+                    go.params,
+                    go.chess,
+                    tables,
+                    tt,
+                    go.repetition_table,
+                    &go.sig,
+                );
 
                 // let mut search_engine =
                 //     search::v4_pv::Search::new(go.params, go.chess, tables, &go.sig);
@@ -102,6 +109,7 @@ fn chess_uci(
 ) -> anyhow::Result<()> {
     let mut debug = false;
     let mut game_board: Option<chess::ChessGame> = None;
+    let mut repetition_table: Option<search::repetition::RepetitionTable> = None;
 
     struct GoContext {
         tx_abort: channel::Sender<SigAbort>,
@@ -144,6 +152,7 @@ fn chess_uci(
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let mut board = chess::ChessGame::new();
+                let mut rep_table = search::repetition::RepetitionTable::new();
 
                 // Safety: Engine should not be calculating when receiving a position command
                 let tt = unsafe { &mut *tt.get() };
@@ -186,6 +195,8 @@ fn chess_uci(
                     }
                 };
 
+                rep_table.push_position(board.zobrist_key, true);
+
                 if let Some("moves") = moves_it.next() {
                     while let Some(mv_str) = moves_it.next() {
                         let mv = util::fix_move(&board, util::create_move(mv_str));
@@ -194,11 +205,17 @@ fn chess_uci(
                             return Err(anyhow::anyhow!("Invalid move: {}", mv_str));
                         }
 
-                        // let is_irreversible = board.half_moves == 0;
+                        let is_irreversible = board.half_moves == 0;
+                        rep_table.push_position(board.zobrist_key, is_irreversible);
                     }
                 }
+                // Pop off last move from repetition table to prevent duplicates,
+                // the search will start from pushing the current board position
+                // into the stack
+                rep_table.pop_position();
 
                 game_board = Some(board);
+                repetition_table = Some(rep_table);
             }
             Some("go") => {
                 let start_time = std::time::Instant::now();
@@ -220,6 +237,9 @@ fn chess_uci(
                     start_time,
                     params: search_params,
                     chess: game_board
+                        .take()
+                        .expect("Expected position command to be sent before go"),
+                    repetition_table: repetition_table
                         .take()
                         .expect("Expected position command to be sent before go"),
                     sig: rx_abort,

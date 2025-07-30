@@ -1,47 +1,60 @@
+const REPTABLE_SIZE: usize = 1 << 10;
+
 pub struct RepetitionTable {
-    /// Repetition table which records the last 128 moves (Zobrist hash of the table after the move)
-    /// in a ring buffer. A chess game ends after 100 reversible moves, 128 is used to allow for quick
-    /// wrap-around with bitwise and. last_irreversible tracks the start of reversible moves
-    pub moves: [u64; 128],
     pub cursor: usize,
-    pub last_irreversible: usize,
+    pub irreversible: [u64; REPTABLE_SIZE / 64],
+    pub moves: Box<[u64; REPTABLE_SIZE]>,
 }
 
 impl RepetitionTable {
     pub fn new() -> Self {
         Self {
-            moves: [0; 128],
+            moves: vec![0; REPTABLE_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+            irreversible: [0; REPTABLE_SIZE / 64],
             cursor: 0,
-            last_irreversible: 0,
         }
     }
 
-    pub fn add_position(&mut self, hash: u64, last_move_irreversible: bool) {
-        self.moves[self.cursor] = hash;
-        self.cursor = (self.cursor + 1) & 127;
+    pub fn push_position(&mut self, hash: u64, last_move_irreversible: bool) {
+        let irreversible_bit = 1 << (self.cursor & 63);
+        let last_irreversible = self.cursor / 64;
+
         if last_move_irreversible {
-            self.last_irreversible = self.cursor.wrapping_sub(1) & 127;
-        }
+            self.irreversible[last_irreversible] |= irreversible_bit;
+        } else {
+            self.irreversible[last_irreversible] &= !irreversible_bit;
+        };
+
+        // @todo - Indexing optimisation for self.cursor
+        self.moves[self.cursor] = hash;
+        self.cursor += 1;
+
+        debug_assert!(
+            self.cursor <= REPTABLE_SIZE,
+            "Repetition table overflow: cursor = {}, size = {}",
+            self.cursor,
+            REPTABLE_SIZE
+        );
+    }
+
+    pub fn pop_position(&mut self) {
+        debug_assert!(self.cursor > 0, "Cannot pop from an empty repetition table");
+        self.cursor -= 1;
     }
 
     pub fn is_repeated(&self, hash: u64) -> bool {
-        let mut c = self.cursor;
-
-        loop {
-            c = c.wrapping_sub(1) & 127;
-
-            // Avoid a single repetition.
-            // @todo - Check if counting 2 repetitions would be preferable
-            // due to 3-fold repetition rule
-            if unsafe { *self.moves.get_unchecked(c) } == hash {
+        // @todo - Indexing optimisation for self.cursor
+        for i in (0..self.cursor).rev() {
+            if self.moves[i] == hash {
                 return true;
             }
-
-            if c == self.last_irreversible {
+            if (self.irreversible[i / 64] & (1 << (i & 63))) != 0 {
                 break;
             }
         }
-
         false
     }
 }
@@ -154,7 +167,7 @@ mod tests {
             ("h4f3", true),
         ];
 
-        table.add_position(board.zobrist_key, true);
+        table.push_position(board.zobrist_key, true);
 
         for (mv_string, is_repeated) in moves {
             let mv = util::fix_move(&board, util::create_move(mv_string));
@@ -168,7 +181,16 @@ mod tests {
                 if is_repeated { "" } else { "not " }
             );
 
-            table.add_position(board.zobrist_key, board.half_moves == 0);
+            table.push_position(board.zobrist_key, board.half_moves == 0);
+        }
+
+        assert!(
+            table.is_repeated(board.zobrist_key),
+            "Last move should be repeated"
+        );
+        for i in 0..moves.len() {
+            table.pop_position();
+            assert_eq!(table.is_repeated(board.zobrist_key), i <= 3);
         }
     }
 
@@ -187,7 +209,7 @@ mod tests {
                 let mut board = chess::ChessGame::new();
                 assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
 
-                reptable.add_position(board.zobrist_key, true);
+                reptable.push_position(board.zobrist_key, true);
 
                 moves.clear();
                 assert!(find_moves_with_repetition(&mut board, &tables, i, moves));
@@ -195,7 +217,7 @@ mod tests {
                 for mv in moves.iter().take(i - 4) {
                     assert!(board.make_move_slow(*mv, &tables));
                     assert!(!board.in_check_slow(&tables, !board.b_move));
-                    reptable.add_position(board.zobrist_key, board.half_moves == 0);
+                    reptable.push_position(board.zobrist_key, board.half_moves == 0);
                 }
 
                 for (index, mv) in moves.iter().enumerate().skip(i - 4) {
