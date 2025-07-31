@@ -4,8 +4,12 @@ pub struct ImguiTextInput {
 }
 
 impl ImguiTextInput {
-    pub fn new(flags: imgui::InputTextFlags, default: Option<&'static str>) -> Self {
-        let mut buf = String::with_capacity(256);
+    pub fn new(
+        flags: imgui::InputTextFlags,
+        default: Option<&'static str>,
+        cap: Option<usize>,
+    ) -> Self {
+        let mut buf = String::with_capacity(cap.unwrap_or(256));
 
         if let Some(default) = default {
             buf.push_str(default);

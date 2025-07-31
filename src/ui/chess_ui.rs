@@ -82,19 +82,23 @@ impl ChessUi {
             ask_promotion: None,
             input_fen: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
-                Some(util::FEN_STARTPOS),
+                Some("startpos moves e2e4"),
+                Some(1024),
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("ab.exe"),
+                Some("tt.exe"),
+                None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("negamax.exe"),
+                Some("pv.exe"),
+                None,
             ),
             input_num_games: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::CHARS_DECIMAL,
-                Some("500"),
+                Some("1000"),
+                None,
             ),
             input_start_paused: false,
             input_use_opening_book: true,
@@ -245,11 +249,40 @@ impl ChessUi {
                                 }
                             });
 
-                        if let Some(fen) = self.input_fen.draw(None, ui, "fen_inp") {
-                            if let Err(err) = self.matchmaking.load_fen(&fen) {
-                                eprintln!("Failed to load FEN: {}", err);
-                            } else {
-                                self.input_fen.buf.clear();
+                        if let Some(position_str) = self.input_fen.draw(None, ui, "fen_inp") {
+                            let mut moves = Vec::new();
+                            let mut fen = String::new();
+
+                            match util::parse_position(
+                                &position_str,
+                                &mut chess::ChessGame::new(),
+                                &self.matchmaking.tables,
+                                None,
+                                Some(&mut moves),
+                                Some(&mut fen),
+                            ) {
+                                Ok(_) => {
+                                    if let Err(err) = self.matchmaking.load_fen(&fen) {
+                                        eprintln!("Failed to load FEN: {}", err);
+                                    } else {
+                                        for mv in moves {
+                                            if let Err(err) =
+                                                self.matchmaking.make_move_with_validation(mv)
+                                            {
+                                                eprintln!(
+                                                    "Failed to make move {}: {}",
+                                                    util::move_string(mv),
+                                                    err
+                                                );
+                                            }
+                                        }
+                                        // self.input_fen.buf.clear();
+                                    }
+                                    println!("Loaded position: {}", position_str);
+                                }
+                                Err(err) => {
+                                    eprintln!("Failed to parse position: {}", err);
+                                }
                             }
                         }
                     });
@@ -294,6 +327,11 @@ impl ChessUi {
                             .board
                             .in_check_slow(&self.matchmaking.tables, self.matchmaking.board.b_move)
                     ));
+
+                    if ui.button("Copy FEN") {
+                        let fen = self.matchmaking.board.gen_fen();
+                        ui.set_clipboard_text(fen);
+                    }
 
                     ui.separator();
 

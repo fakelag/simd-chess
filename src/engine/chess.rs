@@ -840,6 +840,118 @@ impl ChessGame {
         Ok(fen_length)
     }
 
+    pub fn gen_fen(&self) -> String {
+        use std::fmt::Write;
+
+        #[derive(Debug, Clone, Copy)]
+        enum RankContent {
+            Piece(PieceId),
+            Empty(u8),
+        }
+
+        let mut fen_string = (0..8)
+            .rev()
+            .flat_map(|rank| (0..8).map(move |file| rank * 8 + file))
+            .map(|square_index| (square_index, self.piece_at_slow(1 << square_index)))
+            .array_chunks::<8>()
+            .map(|rank_squares| {
+                let rank_content =
+                    rank_squares
+                        .iter()
+                        .fold(([None; 8], 0usize), |mut acc, curr| {
+                            let previous_slot = acc.0[acc.1];
+                            match (previous_slot, curr.1) {
+                                (Some(RankContent::Empty(empty_squares)), 0) => {
+                                    acc.0[acc.1] = Some(RankContent::Empty(empty_squares + 1))
+                                }
+                                (
+                                    None
+                                    | Some(RankContent::Empty(_))
+                                    | Some(RankContent::Piece(_)),
+                                    piece_id,
+                                ) => {
+                                    acc.1 += (previous_slot.is_some()) as usize;
+                                    acc.0[acc.1] = if piece_id == 0 {
+                                        Some(RankContent::Empty(1))
+                                    } else {
+                                        Some(RankContent::Piece(PieceId::from(piece_id - 1)))
+                                    }
+                                }
+                            }
+
+                            acc
+                        });
+
+                rank_content.0
+            })
+            .map(|c| {
+                let rank_string = c
+                    .iter()
+                    .fuse()
+                    .filter_map(|content_type| match content_type {
+                        Some(r) => Some(r),
+                        None => None,
+                    })
+                    .map(|square_content| match square_content {
+                        RankContent::Piece(piece_id) => {
+                            Into::<char>::into(PieceId::from(*piece_id))
+                        }
+                        RankContent::Empty(empty_squares) => (b'0' + *empty_squares as u8) as char,
+                    })
+                    .collect::<String>();
+
+                rank_string
+            })
+            .enumerate()
+            .fold(
+                String::with_capacity(64),
+                |mut acc, (rank_index, rank_string)| {
+                    write!(
+                        &mut acc,
+                        "{}{}",
+                        if rank_index != 0 { "/" } else { "" },
+                        rank_string
+                    )
+                    .unwrap();
+                    acc
+                },
+            );
+
+        fen_string.push_str(if self.b_move { " b " } else { " w " });
+
+        let castling_string = ['q', 'k', 'Q', 'K']
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.castles & (1 << index) != 0)
+            .map(|(_, c)| *c)
+            .rev()
+            .collect::<String>();
+
+        if castling_string.is_empty() {
+            fen_string.push('-');
+        } else {
+            fen_string.push_str(&castling_string);
+        }
+
+        fen_string.push(' ');
+
+        if let Some(ep_square) = self.en_passant {
+            let file = (ep_square % 8) as u8;
+            let rank = (ep_square / 8) as u8;
+            fen_string.push((b'a' + file) as char);
+            fen_string.push((b'1' + rank) as char);
+        } else {
+            fen_string.push('-');
+        }
+
+        fen_string.push(' ');
+        fen_string.push_str(&self.half_moves.to_string());
+        fen_string.push(' ');
+        fen_string.push_str(&self.full_moves.to_string());
+
+        fen_string
+    }
+
     pub fn reset(&mut self) {
         *self = Self::new();
     }
@@ -1319,5 +1431,26 @@ mod tests {
                 *expected
             );
         });
+    }
+
+    #[test]
+    fn test_generate_fen() {
+        let mut board = ChessGame::new();
+        let tables = Tables::new();
+
+        let test_fens = [
+            "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1",
+            "5k2/8/8/8/8/8/8/4K2R w K - 0 1",
+        ];
+
+        for &fen in &test_fens {
+            assert!(board.load_fen(fen, &tables).is_ok());
+
+            let generated_fen = board.gen_fen();
+            assert_eq!(generated_fen, fen);
+        }
     }
 }

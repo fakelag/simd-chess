@@ -1,6 +1,9 @@
 use core::panic;
 
-use crate::engine::chess::{self};
+use crate::engine::{
+    chess::{self},
+    search, tables,
+};
 
 pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -71,6 +74,26 @@ impl Into<usize> for PieceId {
             PieceId::BlackBishop => 9,
             PieceId::BlackKnight => 10,
             PieceId::BlackPawn => 11,
+            PieceId::PieceMax => panic!("Invalid piece ID"),
+        }
+    }
+}
+
+impl Into<char> for PieceId {
+    fn into(self) -> char {
+        match self {
+            PieceId::WhiteKing => 'K',
+            PieceId::WhiteQueen => 'Q',
+            PieceId::WhiteRook => 'R',
+            PieceId::WhiteBishop => 'B',
+            PieceId::WhiteKnight => 'N',
+            PieceId::WhitePawn => 'P',
+            PieceId::BlackKing => 'k',
+            PieceId::BlackQueen => 'q',
+            PieceId::BlackRook => 'r',
+            PieceId::BlackBishop => 'b',
+            PieceId::BlackKnight => 'n',
+            PieceId::BlackPawn => 'p',
             PieceId::PieceMax => panic!("Invalid piece ID"),
         }
     }
@@ -195,4 +218,87 @@ pub fn move_string(mv: u16) -> String {
 
 pub fn time_format(ms: u64) -> String {
     format!("{}:{:02}.{:03}", ms / 60000, (ms / 1000) % 60, ms % 1000,)
+}
+
+pub fn parse_position<'a>(
+    position_buf: &'a str,
+    board: &mut chess::ChessGame,
+    tables: &tables::Tables,
+    mut repetition_table: Option<&mut search::repetition::RepetitionTable>,
+    mut out_moves: Option<&mut Vec<u16>>,
+    out_fen: Option<&mut String>,
+) -> anyhow::Result<()> {
+    let mut fen = FEN_STARTPOS;
+    let mut whitespace_it = position_buf.split_whitespace();
+
+    let moves_it = if let Some(position_string) = whitespace_it.next() {
+        match position_string {
+            "startpos" => {
+                board.load_fen(FEN_STARTPOS, tables).unwrap();
+                Some(whitespace_it)
+            }
+            "fen" => {
+                let fen_start_index = position_string.as_ptr() as usize
+                    - position_buf.as_ptr() as usize
+                    + position_string.len()
+                    + 1;
+
+                let fen_length = match board.load_fen(&position_buf[fen_start_index..], tables) {
+                    Ok(fen_length) => fen_length,
+                    Err(e) => return Err(anyhow::anyhow!("Failed to load FEN: {}", e)),
+                };
+
+                fen = &position_buf[fen_start_index..fen_start_index + fen_length];
+
+                Some(position_buf[fen_start_index + fen_length..].split_whitespace())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    if let Some(out_fen) = out_fen {
+        *out_fen = fen.to_string();
+    }
+
+    let mut moves_it = match moves_it {
+        Some(it) => it,
+        None => {
+            return Err(anyhow::anyhow!(
+                "Expected 'startpos' or 'fen' in position command"
+            ));
+        }
+    };
+
+    if let Some(rep_table) = &mut repetition_table {
+        rep_table.push_position(board.zobrist_key, true);
+    }
+
+    if let Some("moves") = moves_it.next() {
+        while let Some(mv_str) = moves_it.next() {
+            let mv = fix_move(&board, create_move(mv_str));
+
+            if !board.make_move_slow(mv, &tables) {
+                return Err(anyhow::anyhow!("Invalid move: {}", mv_str));
+            }
+
+            if let Some(out_moves) = &mut out_moves {
+                out_moves.push(mv);
+            }
+
+            if let Some(rep_table) = &mut repetition_table {
+                let is_irreversible = board.half_moves == 0;
+                rep_table.push_position(board.zobrist_key, is_irreversible);
+            }
+        }
+    }
+    // Pop off last move from repetition table to prevent duplicates,
+    // the search will start from pushing the current board position
+    // into the stack
+    if let Some(rep_table) = &mut repetition_table {
+        rep_table.pop_position();
+    }
+
+    Ok(())
 }

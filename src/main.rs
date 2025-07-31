@@ -1,4 +1,5 @@
 #![feature(sync_unsafe_cell)]
+#![feature(iter_array_chunks)]
 
 use std::{cell::SyncUnsafeCell, thread::JoinHandle};
 
@@ -95,7 +96,7 @@ fn search_thread(
                 );
             }
             Err(_) => {
-                println!("Search thread terminated");
+                println!("info search thread terminated");
                 break;
             }
         }
@@ -119,7 +120,7 @@ fn chess_uci(
 
     let mut context: Option<GoContext> = None;
 
-    fn abort_search_uci(context: &mut Option<GoContext>) {
+    fn abort_search_uci(_debug: bool, context: &mut Option<GoContext>) {
         if let Some(context) = context.take() {
             let _ = context.tx_abort.try_send(SigAbort {});
 
@@ -148,7 +149,7 @@ fn chess_uci(
                 Some("off") => debug = false,
                 _ => panic!("Expected 'on' or 'off' after debug command"),
             },
-            Some("stop") => abort_search_uci(&mut context),
+            Some("stop") => abort_search_uci(debug, &mut context),
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let mut board = chess::ChessGame::new();
@@ -159,60 +160,20 @@ fn chess_uci(
 
                 tt.clear();
 
-                let moves_it = if let Some(position_string) = input.next() {
-                    match position_string {
-                        "startpos" => {
-                            board.load_fen(util::FEN_STARTPOS, tables).unwrap();
-                            Some(input)
-                        }
-                        "fen" => {
-                            let fen_start_index = position_string.as_ptr() as usize
-                                - buffer.as_ptr() as usize
-                                + position_string.len()
-                                + 1;
+                let position_start_index = input
+                    .next()
+                    .expect("Expected \"startpos\" or \"fen\" after position")
+                    .as_ptr() as usize
+                    - buffer.as_ptr() as usize;
 
-                            let fen_length = match board
-                                .load_fen(&buffer[fen_start_index..], tables)
-                            {
-                                Ok(fen_length) => fen_length,
-                                Err(e) => return Err(anyhow::anyhow!("Failed to load FEN: {}", e)),
-                            };
-
-                            Some(buffer[fen_start_index + fen_length..].split_whitespace())
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                let mut moves_it = match moves_it {
-                    Some(it) => it,
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "Expected 'startpos' or 'fen' in position command"
-                        ));
-                    }
-                };
-
-                rep_table.push_position(board.zobrist_key, true);
-
-                if let Some("moves") = moves_it.next() {
-                    while let Some(mv_str) = moves_it.next() {
-                        let mv = util::fix_move(&board, util::create_move(mv_str));
-
-                        if !board.make_move_slow(mv, &tables) {
-                            return Err(anyhow::anyhow!("Invalid move: {}", mv_str));
-                        }
-
-                        let is_irreversible = board.half_moves == 0;
-                        rep_table.push_position(board.zobrist_key, is_irreversible);
-                    }
-                }
-                // Pop off last move from repetition table to prevent duplicates,
-                // the search will start from pushing the current board position
-                // into the stack
-                rep_table.pop_position();
+                util::parse_position(
+                    &buffer[position_start_index..],
+                    &mut board,
+                    tables,
+                    Some(&mut rep_table),
+                    None,
+                    None,
+                )?;
 
                 game_board = Some(board);
                 repetition_table = Some(rep_table);
@@ -220,7 +181,7 @@ fn chess_uci(
             Some("go") => {
                 let start_time = std::time::Instant::now();
 
-                abort_search_uci(&mut context);
+                abort_search_uci(debug, &mut context);
 
                 let (tx_abort, rx_abort) = channel::bounded(1);
                 let (tx_stop, rx_stop) = channel::bounded(1);
@@ -272,7 +233,11 @@ fn chess_uci(
         }
     }
 
-    abort_search_uci(&mut context);
+    if debug {
+        println!("info exiting UCI mode");
+    }
+
+    abort_search_uci(debug, &mut context);
 
     Ok(())
 }
@@ -342,7 +307,7 @@ fn main() {
             // implement thread safety correctly. This has a few benefits:
             // 1. TranspositionTable can be accessed without runtime costs such as locks or refcounters
             // 2. The table can potentially be shared between threads efficiently, even unsoundly if races are deemed to be acceptable
-            let tt = SyncUnsafeCell::new(transposition::TranspositionTable::new(8));
+            let tt = SyncUnsafeCell::new(transposition::TranspositionTable::new(4));
 
             let result = std::thread::scope(|s| {
                 let st = s.spawn(|| {
