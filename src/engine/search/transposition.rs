@@ -21,6 +21,7 @@ pub struct TranspositionEntry {
     hash: u64,
     score: i32,
     depth: u8,
+    mv: u16,
     flags: BoundType,
 }
 
@@ -30,6 +31,7 @@ impl TranspositionEntry {
             hash: 0,
             score: 0,
             depth: 0,
+            mv: 0,
             flags: BoundType::Exact,
         }
     }
@@ -55,12 +57,12 @@ impl TranspositionTable {
         }
     }
 
-    pub fn probe(&self, hash: u64, depth: u8, alpha: i32, beta: i32) -> Option<i32> {
+    pub fn probe(&self, hash: u64, depth: u8, alpha: i32, beta: i32) -> (Option<i32>, Option<u16>) {
         let entry_index = (hash as usize) & (self.entries.len() - 1);
         let entry = &self.entries[entry_index];
 
         if entry.hash != hash || entry.depth < depth {
-            return None;
+            return (None, None);
         }
 
         let score = match entry.flags {
@@ -70,10 +72,10 @@ impl TranspositionTable {
             _ => None,
         };
 
-        score
+        (score, Some(entry.mv))
     }
 
-    pub fn store(&mut self, hash: u64, score: i32, depth: u8, flags: BoundType) {
+    pub fn store(&mut self, hash: u64, score: i32, depth: u8, mv: u16, flags: BoundType) {
         let entry_index = (hash as usize) & (self.entries.len() - 1);
         let entry = &mut self.entries[entry_index];
 
@@ -83,6 +85,7 @@ impl TranspositionTable {
             entry.score = score;
             entry.depth = depth;
             entry.flags = flags;
+            entry.mv = mv;
         }
     }
 

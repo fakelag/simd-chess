@@ -40,7 +40,7 @@ mod tests {
         let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
 
         let bench = || {
-            let mut tt = transposition::TranspositionTable::new(8);
+            let mut tt = transposition::TranspositionTable::new(4);
             let mut rt = repetition::RepetitionTable::new();
 
             let mut chess = ChessGame::new();
@@ -51,7 +51,7 @@ mod tests {
             );
 
             let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(7));
+            params.depth = Some(std::hint::black_box(8));
 
             let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
@@ -66,6 +66,14 @@ mod tests {
             };
             println!("Best move: {}", util::move_string(bestmove));
             println!("Nodes searched: {}", search_engine.num_nodes_searched());
+            println!(
+                "PV: {:?}",
+                search_engine
+                    .get_pv()
+                    .iter()
+                    .map(|mv| util::move_string(*mv))
+                    .collect::<Vec<_>>()
+            );
             println!("Search time: {} cycles", delta);
 
             delta

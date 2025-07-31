@@ -3,13 +3,13 @@ const REPTABLE_SIZE: usize = 1 << 10;
 pub struct RepetitionTable {
     pub cursor: usize,
     pub irreversible: [u64; REPTABLE_SIZE / 64],
-    pub moves: Box<[u64; REPTABLE_SIZE]>,
+    pub hashes: Box<[u64; REPTABLE_SIZE]>,
 }
 
 impl RepetitionTable {
     pub fn new() -> Self {
         Self {
-            moves: vec![0; REPTABLE_SIZE]
+            hashes: vec![0; REPTABLE_SIZE]
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
@@ -29,7 +29,7 @@ impl RepetitionTable {
         };
 
         // @todo - Indexing optimisation for self.cursor
-        self.moves[self.cursor] = hash;
+        self.hashes[self.cursor] = hash;
         self.cursor += 1;
 
         debug_assert!(
@@ -48,7 +48,7 @@ impl RepetitionTable {
     pub fn is_repeated(&self, hash: u64) -> bool {
         // @todo - Indexing optimisation for self.cursor
         for i in (0..self.cursor).rev() {
-            if self.moves[i] == hash {
+            if self.hashes[i] == hash {
                 return true;
             }
             if (self.irreversible[i / 64] & (1 << (i & 63))) != 0 {

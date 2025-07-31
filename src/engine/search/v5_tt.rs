@@ -147,17 +147,31 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        if self.ply > 0 {
+        let mut move_list = [0u16; 256];
+        let mut move_count = 0;
+
+        if self.ply > 0 && !self.pv_trace {
             if self.chess.half_moves >= 100 || self.rt.is_repeated(self.chess.zobrist_key) {
                 return 0;
             }
 
-            if let Some(score) = self.tt.probe(self.chess.zobrist_key, depth, alpha, beta) {
+            let (score, mv) = self.tt.probe(self.chess.zobrist_key, depth, alpha, beta);
+
+            if let Some(score) = score {
                 return score;
+            }
+
+            if let Some(mv) = mv {
+                // @todo correctness - Zobrist keys can clash, which could generate an invalid move
+                // for the current position. Move insertion is done now for perf, but if sorting is added
+                // we can also remove the move in case its not valid for the current position.
+                move_list[0] = mv;
+                move_count += 1;
             }
         }
 
         if depth == 0 {
+            debug_assert!(!self.pv_trace);
             return self.evaluate();
         }
 
@@ -165,21 +179,23 @@ impl<'a> Search<'a> {
 
         let mut alpha = alpha;
 
-        let mut move_list = [0u16; 256];
-
-        let move_count = if self.pv_trace {
+        if self.pv_trace {
             // PV Tracing: Generate the PV-move from the last iteration as an extra first move to play.
             // This makes sure that PV is played first on subsequent searches. Though it means that the move
             // is possibly played twice for a given board position, it reduces overall nodes searched due to AB cutoffs.
             self.pv_trace = self.pv_length > (self.ply as usize + 1);
 
+            move_list[1] = move_list[0]; // Copy TT move (if any) to the second position
             move_list[0] = self.pv[self.ply as usize];
-            self.chess.gen_moves_slow(self.tables, &mut move_list[1..]) + 1
-        } else {
-            self.chess.gen_moves_slow(self.tables, &mut move_list)
-        };
+            move_count += 1;
+        }
+
+        move_count += self
+            .chess
+            .gen_moves_slow(self.tables, &mut move_list[move_count..]);
 
         let mut best_score = -i32::MAX;
+        let mut best_move = 0;
         let mut has_legal_moves = false;
 
         self.rt
@@ -214,6 +230,7 @@ impl<'a> Search<'a> {
 
             if score > best_score {
                 best_score = score;
+                best_move = mv;
 
                 // Update PV
                 let child_pv_length = self.pv_table.lengths[self.ply as usize + 1];
@@ -232,8 +249,13 @@ impl<'a> Search<'a> {
                     .copy_from_slice(&child_pv_moves[0..child_pv_length as usize]);
 
                 if score >= beta {
-                    self.tt
-                        .store(self.chess.zobrist_key, score, depth, BoundType::LowerBound);
+                    self.tt.store(
+                        self.chess.zobrist_key,
+                        score,
+                        depth,
+                        mv,
+                        BoundType::LowerBound,
+                    );
                     self.rt.pop_position();
                     return score;
                 }
@@ -255,8 +277,13 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        self.tt
-            .store(self.chess.zobrist_key, best_score, depth, bound_type);
+        self.tt.store(
+            self.chess.zobrist_key,
+            best_score,
+            depth,
+            best_move,
+            bound_type,
+        );
 
         best_score
     }
