@@ -165,6 +165,25 @@ impl<'a> Search<'a> {
                 // @todo correctness - Zobrist keys can clash, which could generate an invalid move
                 // for the current position. Move insertion is done now for perf, but if sorting is added
                 // we can also remove the move in case its not valid for the current position.
+                #[cfg(debug_assertions)]
+                {
+                    let mut verify_move_list = [0u16; 256];
+
+                    debug_assert!(
+                        (0..self
+                            .chess
+                            .gen_moves_slow(self.tables, &mut verify_move_list))
+                            .any(|mv_index| {
+                                if verify_move_list[mv_index] != mv {
+                                    return false;
+                                }
+                                let mut board_copy = self.chess.clone();
+                                board_copy.make_move_slow(mv, self.tables)
+                                    && !board_copy.in_check_slow(self.tables, !board_copy.b_move)
+                            })
+                    );
+                }
+
                 move_list[0] = mv;
                 move_count += 1;
             }

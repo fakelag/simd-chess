@@ -826,7 +826,7 @@ impl ChessGame {
                     _ => return Err(format!("Invalid half move character '{}'", c)),
                 },
                 FenState::MovesFull => match c {
-                    ' ' | '\n' => break,
+                    ' ' | '\n' | '\r' => break,
                     '0'..='9' => {
                         self.full_moves = self.full_moves * 10 + (c as u8 - b'0') as u32;
                     }
