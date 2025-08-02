@@ -1,17 +1,14 @@
 use crossbeam::channel;
 
-use crate::{
-    engine::{
-        chess,
-        search::{
-            AbortSignal, SearchStrategy,
-            repetition::RepetitionTable,
-            search_params::SearchParams,
-            transposition::{BoundType, TranspositionTable},
-        },
-        tables,
+use crate::engine::{
+    chess,
+    search::{
+        AbortSignal, SearchStrategy,
+        repetition::RepetitionTable,
+        search_params::SearchParams,
+        transposition::{BoundType, TranspositionTable},
     },
-    util,
+    tables,
 };
 
 const SCORE_INF: i32 = i32::MAX - 1;
@@ -22,6 +19,21 @@ const WEIGHT_BISHOP: i32 = 350;
 const WEIGHT_KNIGHT: i32 = 350;
 const WEIGHT_PAWN: i32 = 100;
 const PV_DEPTH: usize = 64;
+
+const WEIGHT_TABLE: [i32; 12] = [
+    WEIGHT_KING,
+    WEIGHT_QUEEN,
+    WEIGHT_ROOK,
+    WEIGHT_BISHOP,
+    WEIGHT_KNIGHT,
+    WEIGHT_PAWN,
+    -WEIGHT_KING,
+    -WEIGHT_QUEEN,
+    -WEIGHT_ROOK,
+    -WEIGHT_BISHOP,
+    -WEIGHT_KNIGHT,
+    -WEIGHT_PAWN,
+];
 
 #[derive(Debug)]
 pub struct PvTable {
@@ -57,6 +69,7 @@ pub struct Search<'a> {
 
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
+    // pub __evalits: Vec<u8>,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
@@ -126,6 +139,7 @@ impl<'a> Search<'a> {
             pv_trace: false,
             rt,
             tt,
+            // __evalits: Vec::new(),
         };
 
         s
@@ -307,28 +321,228 @@ impl<'a> Search<'a> {
         best_score
     }
 
-    fn evaluate(&self) -> i32 {
+    // #[inline(never)]
+    fn evaluate(&mut self) -> i32 {
+        use std::arch::x86_64::*;
+
+        let mut final_score = 0;
+
         let boards = &self.chess.board.bitboards;
 
-        let w_q = boards[util::PieceId::WhiteQueen as usize].count_ones() as i32;
-        let w_r = boards[util::PieceId::WhiteRook as usize].count_ones() as i32;
-        let w_b = boards[util::PieceId::WhiteBishop as usize].count_ones() as i32;
-        let w_n = boards[util::PieceId::WhiteKnight as usize].count_ones() as i32;
-        let w_p = boards[util::PieceId::WhitePawn as usize].count_ones() as i32;
+        unsafe {
+            let const_boards_0_mask = 0b01111111;
+            let const_boards_1_mask = 0b11111110;
+            let const_1vec = _mm512_set1_epi64(1);
+            let const_63vec = _mm512_set1_epi64(63);
+            let const_64vec = _mm512_set1_epi64(64);
+            let const_0vec = _mm256_setzero_si256();
+            let const_piece_offsets_0_vec =
+                _mm512_set_epi64(0, 64 * 5, 64 * 5, 64 * 4, 64 * 3, 64 * 2, 64, 0);
+            let const_piece_offsets_1_vec = _mm512_set_epi64(
+                64 * 5 + 384,
+                64 * 4 + 384,
+                64 * 3 + 384,
+                64 * 2 + 384,
+                64 + 384,
+                384,
+                64 * 5 + 384,
+                0,
+            );
+            let const_weights_0_vec = _mm256_set_epi32(
+                0,
+                WEIGHT_PAWN,
+                WEIGHT_PAWN,
+                WEIGHT_KNIGHT,
+                WEIGHT_BISHOP,
+                WEIGHT_ROOK,
+                WEIGHT_QUEEN,
+                WEIGHT_KING,
+            );
+            let const_weights_1_vec = _mm256_set_epi32(
+                -WEIGHT_PAWN,
+                -WEIGHT_KNIGHT,
+                -WEIGHT_BISHOP,
+                -WEIGHT_ROOK,
+                -WEIGHT_QUEEN,
+                -WEIGHT_KING,
+                -WEIGHT_PAWN,
+                0,
+            );
 
-        let b_q = boards[util::PieceId::BlackQueen as usize].count_ones() as i32;
-        let b_r = boards[util::PieceId::BlackRook as usize].count_ones() as i32;
-        let b_b = boards[util::PieceId::BlackBishop as usize].count_ones() as i32;
-        let b_n = boards[util::PieceId::BlackKnight as usize].count_ones() as i32;
-        let b_p = boards[util::PieceId::BlackPawn as usize].count_ones() as i32;
+            let const_pawn_split_mask: u64 = 0xF0F0F0F0F0F0F0F0u64;
+            let const_pawn_split_mask_0_vec = _mm512_set_epi64(
+                !0,
+                !const_pawn_split_mask as i64,
+                const_pawn_split_mask as i64,
+                !0,
+                !0,
+                !0,
+                !0,
+                !0,
+            );
+            let const_pawn_split_mask_1_vec = _mm512_set_epi64(
+                const_pawn_split_mask as i64,
+                !0,
+                !0,
+                !0,
+                !0,
+                !0,
+                !const_pawn_split_mask as i64,
+                !0,
+            );
+            let const_pawn_split_1_cross_lane_selector = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0x7, 0);
 
-        let material_score = (w_q - b_q) * WEIGHT_QUEEN
-            + (w_r - b_r) * WEIGHT_ROOK
-            + (w_b - b_b) * WEIGHT_BISHOP
-            + (w_n - b_n) * WEIGHT_KNIGHT
-            + (w_p - b_p) * WEIGHT_PAWN;
+            let mut boards_0_vec = _mm512_loadu_epi64(boards.as_ptr() as *const i64); // 8 cycles
+            let mut boards_1_vec = _mm512_loadu_epi64(boards.as_ptr().add(4) as *const i64); // 8 cycles
 
-        let final_score = material_score;
+            // Split pawns into two lanes
+            boards_0_vec = _mm512_mask_permutex_epi64(boards_0_vec, 1 << 6, boards_0_vec, 0x10); // 3 cycles
+            boards_0_vec = _mm512_and_si512(boards_0_vec, const_pawn_split_mask_0_vec); // 1 cycle
+
+            boards_1_vec = _mm512_mask_permutex2var_epi64(
+                boards_1_vec,
+                1 << 1,
+                const_pawn_split_1_cross_lane_selector,
+                boards_1_vec,
+            ); // 3 cycles
+            boards_1_vec = _mm512_and_si512(boards_1_vec, const_pawn_split_mask_1_vec); // 1 cycle
+
+            let mut score_vec = _mm256_setzero_si256();
+
+            loop {
+                let lzcnt_0_vec =
+                    _mm512_mask_lzcnt_epi64(const_64vec, const_boards_0_mask, boards_0_vec); // 4 cycles
+
+                let lzcnt_1_vec =
+                    _mm512_mask_lzcnt_epi64(const_64vec, const_boards_1_mask, boards_1_vec); // 4 cycles
+
+                let active_pieces_0_mask = _mm512_cmpneq_epi64_mask(lzcnt_0_vec, const_64vec); // 3 cycles
+                let active_pieces_1_mask = _mm512_cmpneq_epi64_mask(lzcnt_1_vec, const_64vec); // 3 cycles
+
+                if (active_pieces_0_mask | active_pieces_1_mask) == 0 {
+                    break;
+                }
+
+                let piece_index_0_vec = _mm512_sub_epi64(const_63vec, lzcnt_0_vec); // 1 cycle
+                let piece_index_1_vec = _mm512_sub_epi64(const_63vec, lzcnt_1_vec); // 1 cycle
+
+                let gather_offsets_0_vec =
+                    _mm512_add_epi64(const_piece_offsets_0_vec, piece_index_0_vec); // 1 cycle
+                let bonuses_0 = _mm512_mask_i64gather_epi32(
+                    const_0vec,
+                    active_pieces_0_mask,
+                    gather_offsets_0_vec,
+                    tables::Tables::EVAL_TABLES_INV.as_ptr() as *const i32,
+                    4,
+                ); // 25 cycles
+
+                let gather_offsets_1_vec =
+                    _mm512_add_epi64(const_piece_offsets_1_vec, piece_index_1_vec); // 1 cycle
+                let bonuses_1 = _mm512_mask_i64gather_epi32(
+                    const_0vec,
+                    active_pieces_1_mask,
+                    gather_offsets_1_vec,
+                    tables::Tables::EVAL_TABLES_INV.as_ptr() as *const i32,
+                    4,
+                ); // 25 cycles
+
+                let scores_0 =
+                    _mm256_maskz_add_epi32(active_pieces_0_mask, bonuses_0, const_weights_0_vec); // 1 cycle
+
+                let scores_1 =
+                    _mm256_maskz_add_epi32(active_pieces_1_mask, bonuses_1, const_weights_1_vec); // 1 cycle
+
+                let scores = _mm256_add_epi32(scores_0, scores_1); // 1 cycle
+                score_vec = _mm256_add_epi32(score_vec, scores); // 1 cycle
+
+                let pop_vec = _mm512_sllv_epi64(const_1vec, piece_index_0_vec); // 1 cycle
+                boards_0_vec = _mm512_xor_epi64(boards_0_vec, pop_vec); // 1 cycle
+
+                let pop_vec = _mm512_sllv_epi64(const_1vec, piece_index_1_vec); // 1 cycle
+                boards_1_vec = _mm512_xor_epi64(boards_1_vec, pop_vec); // 1 cycle
+            }
+
+            final_score =
+                _mm512_mask_reduce_add_epi32(0b0000000011111111, _mm512_castsi256_si512(score_vec)); // ?? cycles
+        }
+
+        // if true {
+        //     let mut nonsimd_score = 0;
+        //     for piece_id in util::PieceId::WhiteKing as usize..util::PieceId::PieceMax as usize {
+        //         // let board_bits = boards[piece_id];
+        //         //     unsafe {
+        //         //         let mut board = _mm256_set1_epi64x(board_bits as i64);
+
+        //         //         let mut bonus_sum: i32 = 0;
+        //         //         let mut num_pieces = 0;
+
+        //         //         loop {
+        //         //             mmlzc
+        //         //             let tz = board.trailing_zeros();
+
+        //         //             let tz_mask = tz.simd_ne(eights);
+        //         //             let tz_offsets = elem_bits_offsets + tz;
+
+        //         //             let bonus = i32x8::gather_select_unchecked(
+        //         //                 &tables::Tables::EVAL_TABLES_INV[piece_id as usize],
+        //         //                 tz_mask.into(),
+        //         //                 tz_offsets.cast(),
+        //         //                 zeros.cast(),
+        //         //             );
+
+        //         //             // @todo - bonus might overflow
+        //         //             bonus_sum += bonus.reduce_sum() as i32;
+
+        //         //             let set_bits = (ones << tz_offsets) & tz_mask.to_int().cast();
+        //         //             board ^= set_bits;
+        //         //             num_pieces += tz_mask.to_bitmask().count_ones() as i32;
+
+        //         //             if board.eq(&zeros) {
+        //         //                 break;
+        //         //             }
+        //         //         }
+        //         //     }
+        //         //     let simd_score = WEIGHT_TABLE[piece_id] * num_pieces + bonus_sum;
+        //         //     final_score += simd_score;
+        //         let mut board_bits = boards[piece_id];
+        //         loop {
+        //             let piece_square = pop_ls1b!(board_bits);
+        //             // @todo - Transition king to an engame variant of the table
+        //             let square_bonus =
+        //                 tables::Tables::EVAL_TABLES_INV[piece_id][piece_square as usize];
+        //             // final_score += WEIGHT_TABLE[piece_id] + square_bonus as i32;
+        //             nonsimd_score += WEIGHT_TABLE[piece_id] + square_bonus as i32;
+        //         }
+        //     }
+        //     assert!(
+        //         nonsimd_score == final_score,
+        //         "Non-simd and simd evaluation mismatch for {} != {}. b_move= {}",
+        //         nonsimd_score,
+        //         final_score,
+        //         self.chess.b_move
+        //     );
+        // }
+
+        // let w_q = boards[util::PieceId::WhiteQueen as usize].count_ones() as i32;
+        // let w_r = boards[util::PieceId::WhiteRook as usize].count_ones() as i32;
+        // let w_b = boards[util::PieceId::WhiteBishop as usize].count_ones() as i32;
+        // let w_n = boards[util::PieceId::WhiteKnight as usize].count_ones() as i32;
+        // let w_p = boards[util::PieceId::WhitePawn as usize].count_ones() as i32;
+
+        // let b_q = boards[util::PieceId::BlackQueen as usize].count_ones() as i32;
+        // let b_r = boards[util::PieceId::BlackRook as usize].count_ones() as i32;
+        // let b_b = boards[util::PieceId::BlackBishop as usize].count_ones() as i32;
+        // let b_n = boards[util::PieceId::BlackKnight as usize].count_ones() as i32;
+        // let b_p = boards[util::PieceId::BlackPawn as usize].count_ones() as i32;
+
+        // let material_score = (w_q - b_q) * WEIGHT_QUEEN
+        //     + (w_r - b_r) * WEIGHT_ROOK
+        //     + (w_b - b_b) * WEIGHT_BISHOP
+        //     + (w_n - b_n) * WEIGHT_KNIGHT
+        //     + (w_p - b_p) * WEIGHT_PAWN;
+        // let final_score = material_score;
+
+        //     assert!(material_score == final_score);
 
         final_score * if self.chess.b_move { -1 } else { 1 }
     }
