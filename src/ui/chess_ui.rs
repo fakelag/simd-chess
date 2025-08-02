@@ -87,12 +87,12 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("tt.exe"),
+                Some("v6_psquare.exe"),
                 None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("pv.exe"),
+                Some("v5_tt.exe"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(
@@ -129,6 +129,8 @@ impl ChessUi {
                 let mut board_cursor_xy: [f32; 2] = [0.0; 2];
                 let mut square_wh = [0.0; 2];
 
+                let mut hovering_sq_index = None;
+
                 ui.child_window("board_container")
                     .size([size_w * board_size, -1.0])
                     .scroll_bar(false)
@@ -140,25 +142,23 @@ impl ChessUi {
                             .build(|| {
                                 square_wh = SquareUi::calc_square_wh(ui);
 
-                                // let hovering_sq_index = (0..64).find_map(|square_index| {
-                                //     let [wnd_x, wnd_y] = ui.window_pos();
-                                //     let rank = square_index / 8;
-                                //     let file = square_index % 8;
+                                hovering_sq_index = (0..64).find_map(|square_index| {
+                                    let [wnd_x, wnd_y] = ui.window_pos();
+                                    let rank = square_index / 8;
+                                    let file = square_index % 8;
 
-                                //     square_wh = SquareUi::calc_square_wh(ui);
+                                    let x = wnd_x + file as f32 * square_wh[0];
+                                    let y = wnd_y + (rank ^ 7) as f32 * square_wh[1];
 
-                                //     let x = wnd_x + file as f32 * square_wh[0];
-                                //     let y = wnd_y + (rank ^ 7) as f32 * square_wh[1];
-
-                                //     if ui.is_mouse_hovering_rect(
-                                //         [x, y],
-                                //         [x + square_wh[0], y + square_wh[1]],
-                                //     ) {
-                                //         Some(square_index as u8)
-                                //     } else {
-                                //         None
-                                //     }
-                                // });
+                                    if ui.is_mouse_hovering_rect(
+                                        [x, y],
+                                        [x + square_wh[0], y + square_wh[1]],
+                                    ) {
+                                        Some(square_index as u8)
+                                    } else {
+                                        None
+                                    }
+                                });
 
                                 if let Some(from_sq) = self.from_square {
                                     if !self
@@ -335,6 +335,28 @@ impl ChessUi {
 
                     ui.separator();
 
+                    if let Some(hovering_sq_index) = hovering_sq_index {
+                        ui.text(format!(
+                            "Square: {} (index {})",
+                            square_name(hovering_sq_index),
+                            hovering_sq_index,
+                        ));
+                        let square_piece =
+                            self.matchmaking.board.piece_at_slow(1 << hovering_sq_index);
+
+                        if square_piece == 0 {
+                            ui.text("No piece on this square");
+                        } else {
+                            ui.text(format!(
+                                "Square bonus: {} (for {:?})",
+                                tables::Tables::EVAL_TABLES_INV[square_piece - 1]
+                                    [hovering_sq_index as usize],
+                                PieceId::from(square_piece - 1)
+                            ));
+                        }
+                    }
+                    ui.separator();
+
                     match self.matchmaking.versus_state {
                         VersusState::Idle => {
                             self.input_white_engine
@@ -391,7 +413,7 @@ impl ChessUi {
                                 self.matchmaking.versus_reset();
                             }
                         }
-                        VersusState::NextMatch(ended_at) => {
+                        VersusState::NextMatch(ended_at, _) => {
                             draw_versus_stats(&ui, &self.matchmaking);
                             ui.separator();
                             ui.text(format!(

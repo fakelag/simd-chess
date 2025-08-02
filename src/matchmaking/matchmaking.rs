@@ -14,7 +14,7 @@ pub enum VersusState {
     Idle,
     InProgress,
     Paused,
-    NextMatch(std::time::Instant),
+    NextMatch(std::time::Instant, bool),
     Done,
 }
 
@@ -144,14 +144,18 @@ impl Matchmaking {
 
     pub fn poll(&mut self) {
         match self.versus_state {
-            VersusState::NextMatch(start_time) => {
+            VersusState::NextMatch(start_time, start_paused) => {
                 if start_time.elapsed().as_secs() >= NEXT_MATCH_DELAY_SECONDS {
                     // Reset board and swap sides
                     let fen_copy = self.fen.clone();
                     self.load_fen(&fen_copy)
                         .expect("Failed to reset board after match end");
                     self.engine_white = (self.engine_white + 1) % 2;
-                    self.versus_state = VersusState::InProgress;
+                    self.versus_state = if start_paused {
+                        VersusState::Paused
+                    } else {
+                        VersusState::InProgress
+                    };
 
                     if self.versus_matches_left > 0 {
                         if self.on_new_match() {
@@ -183,7 +187,7 @@ impl Matchmaking {
             VersusState::Idle
             | VersusState::Paused
             | VersusState::Done
-            | VersusState::NextMatch(_) => return,
+            | VersusState::NextMatch(_, _) => return,
             VersusState::InProgress => {}
         }
 
@@ -241,7 +245,10 @@ impl Matchmaking {
             return true;
         }
 
-        self.versus_state = VersusState::NextMatch(std::time::Instant::now());
+        self.versus_state = VersusState::NextMatch(
+            std::time::Instant::now(),
+            self.versus_state == VersusState::Paused,
+        );
         return true;
     }
 
