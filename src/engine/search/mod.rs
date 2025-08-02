@@ -22,6 +22,7 @@ pub mod v2_alphabeta;
 pub mod v3_itdep;
 pub mod v4_pv;
 pub mod v5_tt;
+pub mod v6_psquare;
 
 #[cfg(test)]
 mod tests {
@@ -51,9 +52,12 @@ mod tests {
             );
 
             let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(8));
+            params.depth = Some(std::hint::black_box(7));
 
-            let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+            let mut search_engine =
+                v6_psquare::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+
+            // let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
             // let mut search_engine = v3_itdep::IterativeDeepening::new(params, chess, &tables, &rx);
 
@@ -65,6 +69,19 @@ mod tests {
                 (mv, end - start)
             };
             println!("Best move: {}", util::move_string(bestmove));
+            // println!(
+            //     "__evalits median: {}",
+            //     search_engine.__evalits[search_engine.__evalits.len() / 2]
+            // );
+            // println!(
+            //     "__evalits average: {}",
+            //     search_engine
+            //         .__evalits
+            //         .iter()
+            //         .map(|&x| x as i64)
+            //         .sum::<i64>() as f64
+            //         / search_engine.__evalits.len() as f64
+            // );
             println!("Nodes searched: {}", search_engine.num_nodes_searched());
             println!(
                 "PV: {:?}",
@@ -74,7 +91,11 @@ mod tests {
                     .map(|mv| util::move_string(*mv))
                     .collect::<Vec<_>>()
             );
-            println!("Search time: {} cycles", delta);
+            println!(
+                "Search time: {} cycles ({} Mcycles)",
+                delta,
+                delta / 1_000_000
+            );
 
             delta
         };
