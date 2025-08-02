@@ -69,7 +69,7 @@ pub struct Search<'a> {
 
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
-    // pub __evalits: Vec<u8>,
+    // pub __evalstats: Vec<([u8; 6], u64)>,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
@@ -139,7 +139,7 @@ impl<'a> Search<'a> {
             pv_trace: false,
             rt,
             tt,
-            // __evalits: Vec::new(),
+            // __evalstats: Vec::new(),
         };
 
         s
@@ -329,6 +329,12 @@ impl<'a> Search<'a> {
 
         let boards = &self.chess.board.bitboards;
 
+        // let mut evalstats = ([0; 6], 0u64);
+
+        // for i in 0..6 {
+        //     evalstats.0[i] = (boards[i].count_ones() as u8).max(boards[i + 6].count_ones() as u8);
+        // }
+
         unsafe {
             let const_boards_0_mask = 0b01111111;
             let const_boards_1_mask = 0b11111110;
@@ -371,7 +377,7 @@ impl<'a> Search<'a> {
 
             let const_pawn_split_mask: u64 = 0xF0F0F0F0F0F0F0F0u64;
             let const_pawn_split_mask_0_vec = _mm512_set_epi64(
-                !0,
+                0,
                 !const_pawn_split_mask as i64,
                 const_pawn_split_mask as i64,
                 !0,
@@ -388,7 +394,7 @@ impl<'a> Search<'a> {
                 !0,
                 !0,
                 !const_pawn_split_mask as i64,
-                !0,
+                0,
             );
             let const_pawn_split_1_cross_lane_selector = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0x7, 0);
 
@@ -410,6 +416,8 @@ impl<'a> Search<'a> {
             let mut score_vec = _mm256_setzero_si256();
 
             loop {
+                // evalstats.1 += 1;
+
                 let lzcnt_0_vec =
                     _mm512_mask_lzcnt_epi64(const_64vec, const_boards_0_mask, boards_0_vec); // 4 cycles
 
@@ -464,6 +472,8 @@ impl<'a> Search<'a> {
 
             final_score =
                 _mm512_mask_reduce_add_epi32(0b0000000011111111, _mm512_castsi256_si512(score_vec)); // ?? cycles
+
+            // self.__evalstats.push(evalstats);
         }
 
         // if true {
@@ -506,7 +516,7 @@ impl<'a> Search<'a> {
         //         //     final_score += simd_score;
         //         let mut board_bits = boards[piece_id];
         //         loop {
-        //             let piece_square = pop_ls1b!(board_bits);
+        //             let piece_square = crate::pop_ls1b!(board_bits);
         //             // @todo - Transition king to an engame variant of the table
         //             let square_bonus =
         //                 tables::Tables::EVAL_TABLES_INV[piece_id][piece_square as usize];
