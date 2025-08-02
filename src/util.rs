@@ -7,6 +7,21 @@ use crate::engine::{
 
 pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
+#[macro_export]
+macro_rules! pop_ls1b {
+    ($bitboard:ident) => {{
+        let ls1b_index = $bitboard.trailing_zeros() as u16;
+
+        if ls1b_index == 64 {
+            break;
+        }
+
+        $bitboard ^= 1 << ls1b_index;
+
+        ls1b_index
+    }};
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     White = 0,
@@ -113,6 +128,50 @@ pub const PICE_IMAGES: [&str; PieceId::PieceMax as usize] = [
     "assets/b_knight.png",
     "assets/b_pawn.png",
 ];
+
+pub const fn table_mirror<const N: usize>(table: [i32; N], stride: usize) -> [i32; N] {
+    let num_rows = N / stride;
+    let mut mirrored = [0i32; N];
+    let mut copyindex = 0;
+    loop {
+        if copyindex == N {
+            break;
+        }
+        mirrored[copyindex] = table[copyindex];
+        copyindex += 1;
+    }
+    let mut row = 0;
+    loop {
+        if row >= num_rows / 2 {
+            break;
+        }
+        let mut col = 0;
+        loop {
+            if col >= stride {
+                break;
+            }
+            mirrored[row * stride + col] = table[(num_rows - row - 1) * stride + col];
+            mirrored[(num_rows - row - 1) * stride + col] = table[row * stride + col];
+            col += 1;
+        }
+
+        row += 1;
+    }
+    mirrored
+}
+
+pub const fn table_negate<const N: usize>(table: [i32; N]) -> [i32; N] {
+    let mut negated = [0i32; N];
+    let mut i = 0;
+    loop {
+        if i == N {
+            break;
+        }
+        negated[i] = -table[i];
+        i += 1;
+    }
+    negated
+}
 
 pub const fn hex_to_f4_color(hex: u32, a: f32) -> [f32; 4] {
     let r = ((hex >> 16) & 0xFF) as f32 / 255.0;

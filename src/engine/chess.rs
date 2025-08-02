@@ -1,5 +1,6 @@
 use crate::{
     engine::tables::Tables,
+    pop_ls1b,
     util::{self, PieceId},
 };
 use std::arch::x86_64::*;
@@ -17,20 +18,6 @@ pub const MV_FLAGS_PR_QUEEN: u16 = 0b1011 << 12;
 
 pub const MV_FLAGS_CASTLE_KING: u16 = 0b0010 << 12;
 pub const MV_FLAGS_CASTLE_QUEEN: u16 = 0b0011 << 12;
-
-macro_rules! pop_ls1b {
-    ($bitboard:ident) => {{
-        let ls1b_index = $bitboard.trailing_zeros() as u16;
-
-        if ls1b_index == 64 {
-            break;
-        }
-
-        $bitboard ^= 1 << ls1b_index;
-
-        ls1b_index
-    }};
-}
 
 pub enum GameState {
     Ongoing,
