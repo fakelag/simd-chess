@@ -65,9 +65,15 @@ mod tests {
 
             let (bestmove, delta) = {
                 let start = rdtsc();
-                let mv = std::hint::black_box(search_engine.search());
-                let end = rdtsc();
 
+                let mv = std::hint::black_box(search_engine.search());
+                // for i in 0..100_000_000 {
+                //     let eval = search_engine.evaluate();
+                //     std::hint::black_box(eval);
+                // }
+                // let mv = 0;
+
+                let end = rdtsc();
                 (mv, end - start)
             };
             println!("Best move: {}", util::move_string(bestmove));

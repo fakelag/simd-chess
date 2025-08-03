@@ -50,6 +50,12 @@ impl PvTable {
     }
 }
 
+#[repr(C)]
+#[repr(align(64))]
+struct Pst {
+    piece_weights_with_bonuses: [[i32; 64]; 12],
+}
+
 pub struct Search<'a> {
     params: SearchParams,
     chess: chess::ChessGame,
@@ -69,6 +75,8 @@ pub struct Search<'a> {
 
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
+
+    pst: Pst,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
@@ -119,7 +127,7 @@ impl<'a> Search<'a> {
         rt: RepetitionTable,
         sig: &'a AbortSignal,
     ) -> Search<'a> {
-        let s = Search {
+        let mut s = Search {
             sig,
             chess,
             params,
@@ -138,7 +146,18 @@ impl<'a> Search<'a> {
             pv_trace: false,
             rt,
             tt,
+
+            pst: Pst {
+                piece_weights_with_bonuses: [[0; 64]; 12],
+            },
         };
+
+        for piece_id in 0..12 {
+            for square in 0..64 {
+                s.pst.piece_weights_with_bonuses[piece_id][square] =
+                    tables::Tables::EVAL_TABLES_INV[piece_id][square] + WEIGHT_TABLE[piece_id];
+            }
+        }
 
         s
     }
@@ -319,8 +338,8 @@ impl<'a> Search<'a> {
         best_score
     }
 
-    // #[inline(never)]
-    fn evaluate(&mut self) -> i32 {
+    #[inline(always)]
+    pub fn evaluate(&mut self) -> i32 {
         use std::arch::x86_64::*;
 
         // @todo - Transition king to an engame variant of the table
@@ -343,35 +362,16 @@ impl<'a> Search<'a> {
                 0x40,
                 0,
             );
+
             let const_bonus_gather_offsets_1_vec = _mm512_set_epi64(
+                0x40 * 5 + 0x180,
+                0x40 * 5 + 0x180,
                 0x40 * 5 + 0x180,
                 0x40 * 4 + 0x180,
                 0x40 * 3 + 0x180,
                 0x40 * 2 + 0x180,
                 0x40 + 0x180,
                 0x180,
-                0x40 * 5 + 0x180,
-                0x40 * 5 + 0x180,
-            );
-            let const_weights_0_vec = _mm256_set_epi32(
-                WEIGHT_PAWN,
-                WEIGHT_PAWN,
-                WEIGHT_PAWN,
-                WEIGHT_KNIGHT,
-                WEIGHT_BISHOP,
-                WEIGHT_ROOK,
-                WEIGHT_QUEEN,
-                WEIGHT_KING,
-            );
-            let const_weights_1_vec = _mm256_set_epi32(
-                -WEIGHT_PAWN,
-                -WEIGHT_KNIGHT,
-                -WEIGHT_BISHOP,
-                -WEIGHT_ROOK,
-                -WEIGHT_QUEEN,
-                -WEIGHT_KING,
-                -WEIGHT_PAWN,
-                -WEIGHT_PAWN,
             );
 
             let const_pawn_split_mask_abc: u64 = 0xE0E0E0E0E0E0E0E0u64;
@@ -393,81 +393,93 @@ impl<'a> Search<'a> {
                 !0,
                 !0,
             );
-            let const_pawn_split_mask_1_vec = _mm512_set_epi64(
-                const_pawn_split_mask_abc as i64,
-                !0,
-                !0,
-                !0,
-                !0,
-                !0,
-                const_pawn_split_mask_def as i64,
-                const_pawn_split_mask_gh as i64,
-            );
-            let const_pawn_split_1_cross_lane_selector =
-                _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0x7, 0x7);
 
             let mut boards_0_vec = _mm512_loadu_epi64(boards.as_ptr() as *const i64);
-            let mut boards_1_vec = _mm512_loadu_epi64(boards.as_ptr().add(4) as *const i64);
+            let mut boards_1_vec = _mm512_loadu_epi64(boards.as_ptr().add(6) as *const i64);
 
             // Split pawns into three lanes
             boards_0_vec =
                 _mm512_mask_permutex_epi64(boards_0_vec, 0b11000000, boards_0_vec, 0b1010000);
             boards_0_vec = _mm512_and_si512(boards_0_vec, const_pawn_split_mask_0_vec);
 
-            boards_1_vec = _mm512_mask_permutex2var_epi64(
-                boards_1_vec,
-                0b11,
-                const_pawn_split_1_cross_lane_selector,
-                boards_1_vec,
-            );
-            boards_1_vec = _mm512_and_si512(boards_1_vec, const_pawn_split_mask_1_vec);
+            boards_1_vec =
+                _mm512_mask_permutex_epi64(boards_1_vec, 0b11000000, boards_1_vec, 0b1010000);
+            boards_1_vec = _mm512_and_si512(boards_1_vec, const_pawn_split_mask_0_vec);
 
             let mut score_vec = _mm256_setzero_si256();
 
+            let mut lzcnt_0_vec = _mm512_lzcnt_epi64(boards_0_vec);
+            let mut lzcnt_1_vec = _mm512_lzcnt_epi64(boards_1_vec);
+
+            let mut active_pieces_0_mask = _mm512_cmpneq_epi64_mask(lzcnt_0_vec, const_64vec);
+            let mut active_pieces_1_mask = _mm512_cmpneq_epi64_mask(lzcnt_1_vec, const_64vec);
+
+            // In a valid chess board, both sides will start with at least a king
+            std::hint::assert_unchecked(active_pieces_0_mask != 0);
+            std::hint::assert_unchecked(active_pieces_1_mask != 0);
+
             loop {
-                let lzcnt_0_vec = _mm512_lzcnt_epi64(boards_0_vec);
-                let lzcnt_1_vec = _mm512_lzcnt_epi64(boards_1_vec);
-
-                let active_pieces_0_mask = _mm512_cmpneq_epi64_mask(lzcnt_0_vec, const_64vec);
-                let active_pieces_1_mask = _mm512_cmpneq_epi64_mask(lzcnt_1_vec, const_64vec);
-
-                if (active_pieces_0_mask | active_pieces_1_mask) == 0 {
-                    break;
-                }
-
                 let piece_index_0_vec = _mm512_sub_epi64(const_63vec, lzcnt_0_vec);
                 let piece_index_1_vec = _mm512_sub_epi64(const_63vec, lzcnt_1_vec);
 
-                let bonuses_0 = _mm512_mask_i64gather_epi32(
+                let scores_0 = _mm512_mask_i64gather_epi32(
                     const_0vec,
                     active_pieces_0_mask,
                     _mm512_add_epi64(const_bonus_gather_offsets_0_vec, piece_index_0_vec),
-                    tables::Tables::EVAL_TABLES_INV.as_ptr() as *const i32,
+                    self.pst.piece_weights_with_bonuses.as_ptr() as *const i32,
                     4,
                 );
 
-                let bonuses_1 = _mm512_mask_i64gather_epi32(
+                let scores_1 = _mm512_mask_i64gather_epi32(
                     const_0vec,
                     active_pieces_1_mask,
                     _mm512_add_epi64(const_bonus_gather_offsets_1_vec, piece_index_1_vec),
-                    tables::Tables::EVAL_TABLES_INV.as_ptr() as *const i32,
+                    self.pst.piece_weights_with_bonuses.as_ptr() as *const i32,
                     4,
                 );
 
-                let scores_0 =
-                    _mm256_maskz_add_epi32(active_pieces_0_mask, bonuses_0, const_weights_0_vec);
+                // [0] King
+                // [1] Queen
+                // [2] Rook
+                // [3] Bishop
+                // [4] Knight
+                // [5] Pawn ABC
+                // [6] Pawn DEF
+                // [7] Pawn GH
 
-                let scores_1 =
-                    _mm256_maskz_add_epi32(active_pieces_1_mask, bonuses_1, const_weights_1_vec);
+                // [8, 9, 0, 0, 0, 0, 0, 0]
 
-                let scores = _mm256_add_epi32(scores_0, scores_1);
-                score_vec = _mm256_add_epi32(score_vec, scores);
+                // [5, 5, 5, 5, 5, 5, 5, 5,
+                //  10, 5, ...]
+
+                // _mm512_permutexvar_epi8(
+                // let scores_0 =
+                //     _mm256_maskz_add_epi32(active_pieces_0_mask, bonuses_0, const_weights_0_vec);
+
+                // let scores_1 =
+                //     _mm256_maskz_add_epi32(active_pieces_1_mask, bonuses_1, const_weights_1_vec);
+
+                // let scores = _mm256_add_epi32(scores_0, scores_1);
+                // score_vec = _mm256_add_epi32(score_vec, scores);
+
+                score_vec = _mm256_add_epi32(score_vec, scores_0);
+                score_vec = _mm256_add_epi32(score_vec, scores_1);
 
                 let pop_vec = _mm512_sllv_epi64(const_1vec, piece_index_0_vec);
                 boards_0_vec = _mm512_xor_epi64(boards_0_vec, pop_vec);
 
                 let pop_vec = _mm512_sllv_epi64(const_1vec, piece_index_1_vec);
                 boards_1_vec = _mm512_xor_epi64(boards_1_vec, pop_vec);
+
+                lzcnt_0_vec = _mm512_lzcnt_epi64(boards_0_vec);
+                lzcnt_1_vec = _mm512_lzcnt_epi64(boards_1_vec);
+
+                active_pieces_0_mask = _mm512_cmpneq_epi64_mask(lzcnt_0_vec, const_64vec);
+                active_pieces_1_mask = _mm512_cmpneq_epi64_mask(lzcnt_1_vec, const_64vec);
+
+                if (active_pieces_0_mask | active_pieces_1_mask) == 0 {
+                    break;
+                }
             }
 
             score =

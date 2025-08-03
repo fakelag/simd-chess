@@ -27,6 +27,7 @@ pub enum GameState {
 }
 
 #[repr(C)]
+#[repr(align(64))]
 #[derive(Debug, Clone, Copy)]
 pub struct Bitboards {
     pub bitboards: [u64; 12],
