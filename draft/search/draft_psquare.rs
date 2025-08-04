@@ -11,7 +11,7 @@ use crate::{
         },
         tables::{self},
     },
-    util::PieceId,
+    util::{self, PieceId},
 };
 
 const SCORE_INF: i32 = i32::MAX - 1;
@@ -53,6 +53,12 @@ impl PvTable {
     }
 }
 
+#[repr(C)]
+#[repr(align(64))]
+struct Pst {
+    piece_weights_with_bonuses: [[i32; 64]; 12],
+}
+
 pub struct Search<'a> {
     params: SearchParams,
     chess: chess::ChessGame,
@@ -72,7 +78,101 @@ pub struct Search<'a> {
 
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
+    // pst: Pst,
 }
+
+#[cfg_attr(any(), rustfmt::skip)]
+pub const EVAL_TABLES_INV: [[i32; 64]; util::PieceId::PieceMax as usize] = const {
+    /*
+        Evals for white pieces in square format. Black pieces are mirrored
+        and inverted for quick negative scoring.
+        [a8, b8, c8, d8, e8, f8, g8, h8,
+        a7, b7, c7, d7, e7, f7, g7, h7,
+        a6, b6, c6, d6, e6, f6, g6, h6,
+        a5, b5, c5, d5, e5, f5, g5, h5,
+        a4, b4, c4, d4, e4, f4, g4, h4,
+        a3, b3, c3, d3, e3, f3, g3, h3,
+        a2, b2, c2, d2, e2, f2, g2, h2,
+        a1, b1, c1, d1, e1, f1, g1, h1]
+    */
+    let eval_white_king = [
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -20,-30,-30,-40,-40,-30,-30,-20,
+        -10,-20,-20,-20,-20,-20,-20,-10,
+        20, 20,  0,  0,  0,  0, 20, 20,
+        20, 30, 10,  0,  0, 10, 30, 20
+    ];
+    let eval_white_queen = [
+        -20,-10,-10, -5, -5,-10,-10,-20,
+        -10,  0,  0,  0,  0,  0,  0,-10,
+        -10,  0,  5,  5,  5,  5,  0,-10,
+        -5,  0,  5,  5,  5,  5,  0, -5,
+        0,  0,  5,  5,  5,  5,  0, -5,
+        -10,  5,  5,  5,  5,  5,  0,-10,
+        -10,  0,  5,  0,  0,  0,  0,-10,
+        -20,-10,-10, -5, -5,-10,-10,-20
+    ];
+    let eval_white_rook = [
+        0,  0,  0,  0,  0,  0,  0,  0,
+        5, 10, 10, 10, 10, 10, 10,  5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        0,  0,  0,  5,  5,  0,  0,  0
+    ];
+    let eval_white_bishop = [
+        -20,-10,-10,-10,-10,-10,-10,-20,
+        -10,  0,  0,  0,  0,  0,  0,-10,
+        -10,  0,  5, 10, 10,  5,  0,-10,
+        -10,  5,  5, 10, 10,  5,  5,-10,
+        -10,  0, 10, 10, 10, 10,  0,-10,
+        -10, 10, 10, 10, 10, 10, 10,-10,
+        -10,  5,  0,  0,  0,  0,  5,-10,
+        -20,-10,-10,-10,-10,-10,-10,-20,
+    ];
+    let eval_white_knight = [
+        -50,-40,-30,-30,-30,-30,-40,-50,
+        -40,-20,  0,  0,  0,  0,-20,-40,
+        -30,  0, 10, 15, 15, 10,  0,-30,
+        -30,  5, 15, 20, 20, 15,  5,-30,
+        -30,  0, 15, 20, 20, 15,  0,-30,
+        -30,  5, 10, 15, 15, 10,  5,-30,
+        -40,-20,  0,  5,  5,  0,-20,-40,
+        -50,-40,-30,-30,-30,-30,-40,-50,
+    ];
+    let eval_white_pawn = [
+        0,  0,  0,  0,  0,  0,  0,  0,
+        50, 50, 50, 50, 50, 50, 50, 50,
+        10, 10, 20, 30, 30, 20, 10, 10,
+        5,  5, 10, 25, 25, 10,  5,  5,
+        0,  0,  0, 20, 20,  0,  0,  0,
+        5, -5,-10,  0,  0,-10, -5,  5,
+        5, 10, 10,-20,-20, 10, 10,  5,
+        0,  0,  0,  0,  0,  0,  0,  0,
+    ];
+
+    [
+        // Mirror white pieces to LERF endianness
+        table_mirror(eval_white_king, 8),
+        table_mirror(eval_white_queen, 8),
+        table_mirror(eval_white_rook, 8),
+        table_mirror(eval_white_bishop, 8),
+        table_mirror(eval_white_knight, 8),
+        table_mirror(eval_white_pawn, 8),
+        // Black pieces have mappings mirrored to white pieces
+        table_negate_i32(eval_white_king),
+        table_negate_i32(eval_white_queen),
+        table_negate_i32(eval_white_rook),
+        table_negate_i32(eval_white_bishop),
+        table_negate_i32(eval_white_knight),
+        table_negate_i32(eval_white_pawn),
+    ]
+};
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
     fn search(&mut self) -> u16 {
@@ -141,7 +241,17 @@ impl<'a> Search<'a> {
             pv_trace: false,
             rt,
             tt,
+            pst: Pst {
+                piece_weights_with_bonuses: [[0; 64]; 12],
+            },
         };
+
+        for piece_id in 0..12 {
+            for square in 0..64 {
+                s.pst.piece_weights_with_bonuses[piece_id][square] =
+                    EVAL_TABLES_INV[piece_id][square] + WEIGHT_TABLE[piece_id];
+            }
+        }
 
         s
     }
@@ -322,7 +432,7 @@ impl<'a> Search<'a> {
         best_score
     }
 
-    #[inline(always)]
+    #[inline(never)]
     pub fn evaluate(&mut self) -> i32 {
         use std::arch::x86_64::*;
 
@@ -331,72 +441,129 @@ impl<'a> Search<'a> {
 
         let boards = &self.chess.board.bitboards;
 
-        const PST: &[[i8; 64]; 12] = &tables::Tables::EVAL_TABLES_INV_I8;
-
         unsafe {
-            let mut bonuses_vec = _mm512_setzero_si512();
+            let const_1vec = _mm512_set1_epi64(1);
+            let const_63vec = _mm512_set1_epi64(63);
+            let const_64vec = _mm512_set1_epi64(64);
+            let const_0vec = _mm256_setzero_si256();
+            let const_bonus_gather_offsets_0_vec = _mm512_set_epi64(
+                0x40 * 5,
+                0x40 * 5,
+                0x40 * 5,
+                0x40 * 4,
+                0x40 * 3,
+                0x40 * 2,
+                0x40,
+                0,
+            );
 
-            macro_rules! acc_piece_bonus_avx512 {
-                ($piece_id:expr) => {
-                    bonuses_vec = _mm512_mask_add_epi8(
-                        bonuses_vec,
-                        boards[$piece_id as usize],
-                        _mm512_loadu_epi8(PST[$piece_id as usize].as_ptr() as *const i8),
-                        bonuses_vec,
-                    );
-                };
+            let const_bonus_gather_offsets_1_vec = _mm512_set_epi64(
+                0x40 * 5 + 0x180,
+                0x40 * 5 + 0x180,
+                0x40 * 5 + 0x180,
+                0x40 * 4 + 0x180,
+                0x40 * 3 + 0x180,
+                0x40 * 2 + 0x180,
+                0x40 + 0x180,
+                0x180,
+            );
+
+            let const_pawn_split_mask_abc: u64 = 0xE0E0E0E0E0E0E0E0u64;
+            let const_pawn_split_mask_def: u64 = 0x1C1C1C1C1C1C1C1Cu64;
+            let const_pawn_split_mask_gh: u64 = 0x0303030303030303u64;
+
+            debug_assert!(
+                const_pawn_split_mask_abc ^ const_pawn_split_mask_def ^ const_pawn_split_mask_gh
+                    == 0xFFFFFFFFFFFFFFFFu64
+            );
+
+            let const_pawn_split_mask_0_vec = _mm512_set_epi64(
+                const_pawn_split_mask_gh as i64,
+                const_pawn_split_mask_def as i64,
+                const_pawn_split_mask_abc as i64,
+                !0,
+                !0,
+                !0,
+                !0,
+                !0,
+            );
+
+            let mut boards_0_vec = _mm512_loadu_epi64(boards.as_ptr() as *const i64);
+            let mut boards_1_vec = _mm512_loadu_epi64(boards.as_ptr().add(6) as *const i64);
+
+            // Split pawns into three lanes
+            boards_0_vec =
+                _mm512_mask_permutex_epi64(boards_0_vec, 0b11000000, boards_0_vec, 0b1010000);
+            boards_0_vec = _mm512_and_si512(boards_0_vec, const_pawn_split_mask_0_vec);
+
+            boards_1_vec =
+                _mm512_mask_permutex_epi64(boards_1_vec, 0b11000000, boards_1_vec, 0b1010000);
+            boards_1_vec = _mm512_and_si512(boards_1_vec, const_pawn_split_mask_0_vec);
+
+            let mut score_vec = _mm256_setzero_si256();
+
+            let mut lzcnt_0_vec = _mm512_lzcnt_epi64(boards_0_vec);
+            let mut lzcnt_1_vec = _mm512_lzcnt_epi64(boards_1_vec);
+
+            let mut active_pieces_0_mask = _mm512_cmpneq_epi64_mask(lzcnt_0_vec, const_64vec);
+            let mut active_pieces_1_mask = _mm512_cmpneq_epi64_mask(lzcnt_1_vec, const_64vec);
+
+            // In a valid chess board, both sides will start with at least a king
+            std::hint::assert_unchecked(active_pieces_0_mask != 0);
+            std::hint::assert_unchecked(active_pieces_1_mask != 0);
+
+            loop {
+                let piece_index_0_vec = _mm512_sub_epi64(const_63vec, lzcnt_0_vec);
+                let piece_index_1_vec = _mm512_sub_epi64(const_63vec, lzcnt_1_vec);
+
+                let scores_0 = _mm512_mask_i64gather_epi32(
+                    const_0vec,
+                    active_pieces_0_mask,
+                    _mm512_add_epi64(const_bonus_gather_offsets_0_vec, piece_index_0_vec),
+                    self.pst.piece_weights_with_bonuses.as_ptr() as *const i32,
+                    4,
+                );
+
+                let scores_1 = _mm512_mask_i64gather_epi32(
+                    const_0vec,
+                    active_pieces_1_mask,
+                    _mm512_add_epi64(const_bonus_gather_offsets_1_vec, piece_index_1_vec),
+                    self.pst.piece_weights_with_bonuses.as_ptr() as *const i32,
+                    4,
+                );
+
+                // [0] King
+                // [1] Queen
+                // [2] Rook
+                // [3] Bishop
+                // [4] Knight
+                // [5] Pawn ABC
+                // [6] Pawn DEF
+                // [7] Pawn GH
+
+                score_vec = _mm256_add_epi32(score_vec, scores_0);
+                score_vec = _mm256_add_epi32(score_vec, scores_1);
+
+                let pop_vec = _mm512_sllv_epi64(const_1vec, piece_index_0_vec);
+                boards_0_vec = _mm512_xor_epi64(boards_0_vec, pop_vec);
+
+                let pop_vec = _mm512_sllv_epi64(const_1vec, piece_index_1_vec);
+                boards_1_vec = _mm512_xor_epi64(boards_1_vec, pop_vec);
+
+                lzcnt_0_vec = _mm512_lzcnt_epi64(boards_0_vec);
+                lzcnt_1_vec = _mm512_lzcnt_epi64(boards_1_vec);
+
+                active_pieces_0_mask = _mm512_cmpneq_epi64_mask(lzcnt_0_vec, const_64vec);
+                active_pieces_1_mask = _mm512_cmpneq_epi64_mask(lzcnt_1_vec, const_64vec);
+
+                if (active_pieces_0_mask | active_pieces_1_mask) == 0 {
+                    break;
+                }
             }
 
-            acc_piece_bonus_avx512!(PieceId::WhiteKing);
-            acc_piece_bonus_avx512!(PieceId::WhiteQueen);
-            acc_piece_bonus_avx512!(PieceId::WhiteRook);
-            acc_piece_bonus_avx512!(PieceId::WhiteBishop);
-            acc_piece_bonus_avx512!(PieceId::WhiteKnight);
-            acc_piece_bonus_avx512!(PieceId::WhitePawn);
-
-            acc_piece_bonus_avx512!(PieceId::BlackKing);
-            acc_piece_bonus_avx512!(PieceId::BlackQueen);
-            acc_piece_bonus_avx512!(PieceId::BlackRook);
-            acc_piece_bonus_avx512!(PieceId::BlackBishop);
-            acc_piece_bonus_avx512!(PieceId::BlackKnight);
-            acc_piece_bonus_avx512!(PieceId::BlackPawn);
-
-            let bonuses_lsb = _mm512_castsi512_si256(bonuses_vec);
-            let bonuses_msb = _mm512_extracti64x4_epi64(bonuses_vec, 1);
-
-            let bonuses_lsb_i16 = _mm512_cvtepi8_epi16(bonuses_lsb);
-            let bonuses_msb_i16 = _mm512_cvtepi8_epi16(bonuses_msb);
-
-            let summed_bonuses = _mm512_add_epi16(bonuses_lsb_i16, bonuses_msb_i16);
-
-            let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
-            let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
-
-            score += _mm256_reduce_add_epi16(summed_bonuses_lsb) as i32;
-            score += _mm256_reduce_add_epi16(summed_bonuses_msb) as i32;
+            score =
+                _mm512_mask_reduce_add_epi32(0b0000000011111111, _mm512_castsi256_si512(score_vec));
         }
-
-        // There is always 1 king on the board, skip king weight itself which would be +-0
-
-        score += (boards[PieceId::WhiteQueen as usize].count_ones() as i32
-            - boards[PieceId::BlackQueen as usize].count_ones() as i32)
-            * WEIGHT_QUEEN;
-
-        score += (boards[PieceId::WhiteRook as usize].count_ones() as i32
-            - boards[PieceId::BlackRook as usize].count_ones() as i32)
-            * WEIGHT_ROOK;
-
-        score += (boards[PieceId::WhiteBishop as usize].count_ones() as i32
-            - boards[PieceId::BlackBishop as usize].count_ones() as i32)
-            * WEIGHT_BISHOP;
-
-        score += (boards[PieceId::WhiteKnight as usize].count_ones() as i32
-            - boards[PieceId::BlackKnight as usize].count_ones() as i32)
-            * WEIGHT_KNIGHT;
-
-        score += (boards[PieceId::WhitePawn as usize].count_ones() as i32
-            - boards[PieceId::BlackPawn as usize].count_ones() as i32)
-            * WEIGHT_PAWN;
 
         let final_score = score * if self.chess.b_move { -1 } else { 1 };
 
@@ -421,8 +588,7 @@ impl<'a> Search<'a> {
             let mut board_bits = boards[piece_id];
             loop {
                 let piece_square = crate::pop_ls1b!(board_bits);
-                let square_bonus =
-                    tables::Tables::EVAL_TABLES_INV_I8[piece_id][piece_square as usize];
+                let square_bonus = EVAL_TABLES_INV[piece_id][piece_square as usize];
                 final_score += WEIGHT_TABLE[piece_id] + square_bonus as i32;
             }
         }

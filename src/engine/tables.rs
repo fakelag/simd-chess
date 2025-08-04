@@ -1,6 +1,6 @@
 use rand::{Rng, SeedableRng};
 
-use crate::util::{self, Side, table_mirror, table_negate};
+use crate::util::{self, Side, table_mirror, table_negate_i8};
 use std::arch::x86_64::*;
 
 enum File {
@@ -292,7 +292,7 @@ impl Tables {
     };
 
     #[cfg_attr(any(), rustfmt::skip)]
-    pub const EVAL_TABLES_INV: [[i32; 64]; util::PieceId::PieceMax as usize] = const {
+    pub const EVAL_TABLES_INV_I8: [[i8; 64]; util::PieceId::PieceMax as usize] = const {
         /*
             Evals for white pieces in square format. Black pieces are mirrored
             and inverted for quick negative scoring.
@@ -365,6 +365,7 @@ impl Tables {
             5, 10, 10,-20,-20, 10, 10,  5,
             0,  0,  0,  0,  0,  0,  0,  0,
         ];
+
         [
             // Mirror white pieces to LERF endianness
             table_mirror(eval_white_king, 8),
@@ -374,12 +375,12 @@ impl Tables {
             table_mirror(eval_white_knight, 8),
             table_mirror(eval_white_pawn, 8),
             // Black pieces have mappings mirrored to white pieces
-            table_negate(eval_white_king),
-            table_negate(eval_white_queen),
-            table_negate(eval_white_rook),
-            table_negate(eval_white_bishop),
-            table_negate(eval_white_knight),
-            table_negate(eval_white_pawn),
+            table_negate_i8(eval_white_king),
+            table_negate_i8(eval_white_queen),
+            table_negate_i8(eval_white_rook),
+            table_negate_i8(eval_white_bishop),
+            table_negate_i8(eval_white_knight),
+            table_negate_i8(eval_white_pawn),
         ]
     };
 

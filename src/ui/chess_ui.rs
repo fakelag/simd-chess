@@ -335,27 +335,27 @@ impl ChessUi {
 
                     ui.separator();
 
-                    if let Some(hovering_sq_index) = hovering_sq_index {
-                        ui.text(format!(
-                            "Square: {} (index {})",
-                            square_name(hovering_sq_index),
-                            hovering_sq_index,
-                        ));
-                        let square_piece =
-                            self.matchmaking.board.piece_at_slow(1 << hovering_sq_index);
+                    // if let Some(hovering_sq_index) = hovering_sq_index {
+                    //     ui.text(format!(
+                    //         "Square: {} (index {})",
+                    //         square_name(hovering_sq_index),
+                    //         hovering_sq_index,
+                    //     ));
+                    //     let square_piece =
+                    //         self.matchmaking.board.piece_at_slow(1 << hovering_sq_index);
 
-                        if square_piece == 0 {
-                            ui.text("No piece on this square");
-                        } else {
-                            ui.text(format!(
-                                "Square bonus: {} (for {:?})",
-                                tables::Tables::EVAL_TABLES_INV[square_piece - 1]
-                                    [hovering_sq_index as usize],
-                                PieceId::from(square_piece - 1)
-                            ));
-                        }
-                    }
-                    ui.separator();
+                    //     if square_piece == 0 {
+                    //         ui.text("No piece on this square");
+                    //     } else {
+                    //         ui.text(format!(
+                    //             "Square bonus: {} (for {:?})",
+                    //             tables::Tables::EVAL_TABLES_INV[square_piece - 1]
+                    //                 [hovering_sq_index as usize],
+                    //             PieceId::from(square_piece - 1)
+                    //         ));
+                    //     }
+                    // }
+                    // ui.separator();
 
                     match self.matchmaking.versus_state {
                         VersusState::Idle => {

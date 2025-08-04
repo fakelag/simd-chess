@@ -129,9 +129,9 @@ pub const PICE_IMAGES: [&str; PieceId::PieceMax as usize] = [
     "assets/b_pawn.png",
 ];
 
-pub const fn table_mirror<const N: usize>(table: [i32; N], stride: usize) -> [i32; N] {
+pub const fn table_mirror<T: Copy, const N: usize>(table: [T; N], stride: usize) -> [T; N] {
     let num_rows = N / stride;
-    let mut mirrored = [0i32; N];
+    let mut mirrored: [T; N] = [table[0]; N];
     let mut copyindex = 0;
     loop {
         if copyindex == N {
@@ -160,18 +160,25 @@ pub const fn table_mirror<const N: usize>(table: [i32; N], stride: usize) -> [i3
     mirrored
 }
 
-pub const fn table_negate<const N: usize>(table: [i32; N]) -> [i32; N] {
-    let mut negated = [0i32; N];
-    let mut i = 0;
-    loop {
-        if i == N {
-            break;
+macro_rules! def_table_negate {
+    ($name:ident,$ty:ty) => {
+        pub const fn $name<const N: usize>(table: [$ty; N]) -> [$ty; N] {
+            let mut negated = [table[0]; N];
+            let mut i = 0;
+            loop {
+                if i == N {
+                    break;
+                }
+                negated[i] = -table[i];
+                i += 1;
+            }
+            negated
         }
-        negated[i] = -table[i];
-        i += 1;
-    }
-    negated
+    };
 }
+
+def_table_negate!(table_negate_i8, i8);
+def_table_negate!(table_negate_i32, i32);
 
 pub const fn hex_to_f4_color(hex: u32, a: f32) -> [f32; 4] {
     let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
