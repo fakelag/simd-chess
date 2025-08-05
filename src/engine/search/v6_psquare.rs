@@ -326,7 +326,6 @@ impl<'a> Search<'a> {
     pub fn evaluate(&mut self) -> i32 {
         use std::arch::x86_64::*;
 
-        // @todo - Transition king to an engame variant of the table
         let mut score = 0;
 
         let boards = &self.chess.board.bitboards;
