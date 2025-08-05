@@ -19,11 +19,11 @@ pub const MV_FLAGS_PR_QUEEN: u16 = 0b1011 << 12;
 pub const MV_FLAGS_CASTLE_KING: u16 = 0b0010 << 12;
 pub const MV_FLAGS_CASTLE_QUEEN: u16 = 0b0011 << 12;
 
-const MATERIAL_QUEEN: i32 = 1000;
-const MATERIAL_ROOK: i32 = 500;
-const MATERIAL_BISHOP: i32 = 300;
-const MATERIAL_KNIGHT: i32 = 300;
-const MATERIAL_PAWN: i32 = 100;
+const MATERIAL_QUEEN: i32 = 700;
+const MATERIAL_ROOK: i32 = 350;
+const MATERIAL_BISHOP: i32 = 210;
+const MATERIAL_KNIGHT: i32 = 210;
+const MATERIAL_PAWN: i32 = 70;
 const MATERIAL_TABLE: [u16; 13] = [
     0, // No piece
     0, // King has no material value
@@ -63,7 +63,7 @@ pub struct ChessGame {
     pub half_moves: u32,
     pub full_moves: u32,
     pub zobrist_key: u64,
-    // pub material: [u16; 2],
+    pub material: [u16; 2],
 }
 
 impl ChessGame {
@@ -76,7 +76,7 @@ impl ChessGame {
             half_moves: 0,
             full_moves: 1,
             zobrist_key: 0,
-            // material: [0; 2],
+            material: [0; 2],
         }
     }
 
@@ -530,7 +530,7 @@ impl ChessGame {
             self.zobrist_key ^= zb_keys.hash_piece_squares[to_piece - 1][to_sq as usize];
 
             // @todo - Can be branchless since MATERIAL_TABLE[0] == 0
-            // self.material[!self.b_move as usize] -= MATERIAL_TABLE[to_piece];
+            self.material[!self.b_move as usize] -= MATERIAL_TABLE[to_piece];
         }
         self.board.bitboards[from_piece] ^= to_bit | from_bit;
 
@@ -552,7 +552,7 @@ impl ChessGame {
                 // Remove captured pawn from Zobrist key
                 self.zobrist_key ^= zb_keys.hash_piece_squares[piece_id][ep_square as usize];
 
-                // self.material[!self.b_move as usize] -= MATERIAL_TABLE[piece_id + 1];
+                self.material[!self.b_move as usize] -= MATERIAL_TABLE[piece_id + 1];
             }
             MV_FLAG_DPP => {
                 let from_sq = ((mv >> 6) & 0x3F) as u8;
@@ -585,8 +585,8 @@ impl ChessGame {
             self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][to_sq as usize];
             self.zobrist_key ^= zb_keys.hash_piece_squares[promotion_piece][to_sq as usize];
 
-            // self.material[self.b_move as usize] +=
-            //     MATERIAL_TABLE[promotion_piece + 1] - MATERIAL_TABLE[from_piece + 1];
+            self.material[self.b_move as usize] +=
+                MATERIAL_TABLE[promotion_piece + 1] - MATERIAL_TABLE[from_piece + 1];
         }
 
         // Remove Zobrist key for castling rights
@@ -658,12 +658,12 @@ impl ChessGame {
             let board_copy = self.clone();
 
             if self.make_move_slow(mv, tables) && !self.in_check_slow(tables, !self.b_move) {
-                // if INTEGRITY_CHECK {
-                //     assert!(
-                //         self.material == self.calc_material(),
-                //         "Material mismatch after move"
-                //     );
-                // }
+                if INTEGRITY_CHECK {
+                    assert!(
+                        self.material == self.calc_material(),
+                        "Material mismatch after move"
+                    );
+                }
                 let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None);
                 node_count += nodes;
 
@@ -861,7 +861,7 @@ impl ChessGame {
         }
 
         self.zobrist_key = self.calc_initial_zobrist_key(tables);
-        // self.material = self.calc_material();
+        self.material = self.calc_material();
 
         Ok(fen_length)
     }
