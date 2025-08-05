@@ -121,7 +121,7 @@ impl Matchmaking {
 
         if self.update_versus_timers() {
             // Force game over due to out of time
-            self.versus_check_game_over();
+            self.versus_check_game_over(self.versus_state == VersusState::Paused);
             return Ok(false);
         }
 
@@ -159,7 +159,9 @@ impl Matchmaking {
 
                     if self.versus_matches_left > 0 {
                         if self.on_new_match() {
-                            self.uci_nextmove();
+                            if self.versus_state == VersusState::InProgress {
+                                self.uci_nextmove();
+                            }
                         } else {
                             self.versus_matches_left = 0;
                             self.versus_state = VersusState::Done;
@@ -191,14 +193,16 @@ impl Matchmaking {
             VersusState::InProgress => {}
         }
 
-        if poll_result != EnginePollResult::OutOfTime && !self.versus_check_game_over() {
+        if poll_result != EnginePollResult::OutOfTime
+            && !self.versus_check_game_over(self.versus_state == VersusState::Paused)
+        {
             // Advance game loop
             self.uci_nextmove();
             return;
         }
     }
 
-    fn versus_check_game_over(&mut self) -> bool {
+    fn versus_check_game_over(&mut self, start_paused: bool) -> bool {
         if self.check_versus_timer() {
             let engine = self
                 .get_engine_for_side_mut(util::Side::from(!self.board.b_move))
@@ -245,10 +249,7 @@ impl Matchmaking {
             return true;
         }
 
-        self.versus_state = VersusState::NextMatch(
-            std::time::Instant::now(),
-            self.versus_state == VersusState::Paused,
-        );
+        self.versus_state = VersusState::NextMatch(std::time::Instant::now(), start_paused);
         return true;
     }
 
@@ -312,8 +313,10 @@ impl Matchmaking {
         self.redeploy_engines()
             .expect("Failed to redeploy engines during pause");
 
-        if self.update_versus_timers() {
-            self.versus_check_game_over();
+        self.versus_move_start_time = None;
+
+        if self.versus_check_game_over(true) {
+            return;
         }
 
         self.versus_state = VersusState::Paused;
@@ -327,8 +330,9 @@ impl Matchmaking {
         self.redeploy_engines()
             .expect("Failed to redeploy engines during pause");
 
-        if self.update_versus_timers() {
-            self.versus_check_game_over();
+        self.update_versus_timers();
+        if self.versus_check_game_over(false) {
+            return;
         }
 
         self.versus_state = VersusState::InProgress;
@@ -336,7 +340,8 @@ impl Matchmaking {
     }
 
     pub fn versus_step(&mut self) {
-        if self.versus_check_game_over() {
+        self.update_versus_timers();
+        if self.versus_check_game_over(self.versus_state == VersusState::Paused) {
             return;
         }
 
