@@ -331,35 +331,65 @@ impl<'a> Search<'a> {
 
         let boards = &self.chess.board.bitboards;
 
-        const PST: &[[i8; 64]; 12] = &tables::Tables::EVAL_TABLES_INV_I8;
+        const PST: &[[i8; 64]; 14] = &tables::Tables::EVAL_TABLES_INV_I8;
 
         unsafe {
+            let is_endgame =
+                ((self.chess.material[0] & (!1023)) | (self.chess.material[1] & (!1023))) == 0;
+            let endgame_offset = (is_endgame as usize) << 6;
+
             let mut bonuses_vec = _mm512_setzero_si512();
 
-            macro_rules! acc_piece_bonus_avx512 {
+            macro_rules! acc_piece_bonus_white_avx512 {
                 ($piece_id:expr) => {
-                    bonuses_vec = _mm512_mask_add_epi8(
-                        bonuses_vec,
+                    bonuses_vec = _mm512_mask_blend_epi8(
                         boards[$piece_id as usize],
-                        _mm512_loadu_epi8(PST[$piece_id as usize].as_ptr() as *const i8),
                         bonuses_vec,
+                        _mm512_loadu_epi8(PST[$piece_id as usize + 1].as_ptr() as *const i8),
+                    );
+                };
+            }
+            macro_rules! acc_piece_bonus_black_avx512 {
+                ($piece_id:expr) => {
+                    bonuses_vec = _mm512_mask_blend_epi8(
+                        boards[$piece_id as usize],
+                        bonuses_vec,
+                        _mm512_loadu_epi8(PST[$piece_id as usize + 2].as_ptr() as *const i8),
                     );
                 };
             }
 
-            acc_piece_bonus_avx512!(PieceId::WhiteKing);
-            acc_piece_bonus_avx512!(PieceId::WhiteQueen);
-            acc_piece_bonus_avx512!(PieceId::WhiteRook);
-            acc_piece_bonus_avx512!(PieceId::WhiteBishop);
-            acc_piece_bonus_avx512!(PieceId::WhiteKnight);
-            acc_piece_bonus_avx512!(PieceId::WhitePawn);
+            bonuses_vec = _mm512_mask_blend_epi8(
+                boards[PieceId::WhiteKing as usize],
+                bonuses_vec,
+                _mm512_loadu_epi8(
+                    PST[PieceId::WhiteKing as usize]
+                        .as_ptr()
+                        .add(endgame_offset) as *const i8,
+                ),
+            );
 
-            acc_piece_bonus_avx512!(PieceId::BlackKing);
-            acc_piece_bonus_avx512!(PieceId::BlackQueen);
-            acc_piece_bonus_avx512!(PieceId::BlackRook);
-            acc_piece_bonus_avx512!(PieceId::BlackBishop);
-            acc_piece_bonus_avx512!(PieceId::BlackKnight);
-            acc_piece_bonus_avx512!(PieceId::BlackPawn);
+            acc_piece_bonus_white_avx512!(PieceId::WhiteQueen);
+            acc_piece_bonus_white_avx512!(PieceId::WhiteRook);
+            acc_piece_bonus_white_avx512!(PieceId::WhiteBishop);
+            acc_piece_bonus_white_avx512!(PieceId::WhiteKnight);
+            acc_piece_bonus_white_avx512!(PieceId::WhitePawn);
+
+            bonuses_vec = _mm512_mask_blend_epi8(
+                boards[PieceId::BlackKing as usize],
+                bonuses_vec,
+                _mm512_loadu_epi8(
+                    PST[PieceId::BlackKing as usize + 1]
+                        .as_ptr()
+                        .add(endgame_offset) as *const i8,
+                ),
+            );
+
+            acc_piece_bonus_black_avx512!(PieceId::BlackQueen);
+            acc_piece_bonus_black_avx512!(PieceId::BlackRook);
+            acc_piece_bonus_black_avx512!(PieceId::BlackBishop);
+            acc_piece_bonus_black_avx512!(PieceId::BlackKnight);
+            acc_piece_bonus_black_avx512!(PieceId::BlackPawn);
 
             let bonuses_lsb = _mm512_castsi512_si256(bonuses_vec);
             let bonuses_msb = _mm512_extracti64x4_epi64(bonuses_vec, 1);
@@ -377,7 +407,6 @@ impl<'a> Search<'a> {
         }
 
         // There is always 1 king on the board, skip king weight itself which would be +-0
-
         score += (boards[PieceId::WhiteQueen as usize].count_ones() as i32
             - boards[PieceId::BlackQueen as usize].count_ones() as i32)
             * WEIGHT_QUEEN;
@@ -412,17 +441,38 @@ impl<'a> Search<'a> {
     }
 
     fn evaluate_legacy(&mut self) -> i32 {
+        let is_endgame = (((self.chess.material[0] & (!1023)) | (self.chess.material[1] & (!1023)))
+            == 0) as usize;
+
         let boards = &self.chess.board.bitboards;
 
         let mut final_score = 0;
+
         for piece_id in
             crate::util::PieceId::WhiteKing as usize..crate::util::PieceId::PieceMax as usize
         {
             let mut board_bits = boards[piece_id];
             loop {
                 let piece_square = crate::pop_ls1b!(board_bits);
+
+                let pst_index = match PieceId::from(piece_id) {
+                    PieceId::WhiteKing => is_endgame as usize,
+                    PieceId::WhiteQueen => piece_id + 1,
+                    PieceId::WhiteRook => piece_id + 1,
+                    PieceId::WhiteBishop => piece_id + 1,
+                    PieceId::WhiteKnight => piece_id + 1,
+                    PieceId::WhitePawn => piece_id + 1,
+                    PieceId::BlackKing => piece_id + is_endgame + 1,
+                    PieceId::BlackQueen => piece_id + 2,
+                    PieceId::BlackRook => piece_id + 2,
+                    PieceId::BlackBishop => piece_id + 2,
+                    PieceId::BlackKnight => piece_id + 2,
+                    PieceId::BlackPawn => piece_id + 2,
+                    _ => unreachable!(),
+                };
+
                 let square_bonus =
-                    tables::Tables::EVAL_TABLES_INV_I8[piece_id][piece_square as usize];
+                    tables::Tables::EVAL_TABLES_INV_I8[pst_index][piece_square as usize];
                 final_score += WEIGHT_TABLE[piece_id] + square_bonus as i32;
             }
         }

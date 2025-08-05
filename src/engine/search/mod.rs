@@ -67,7 +67,7 @@ mod tests {
                 let start = rdtsc();
 
                 let mv = std::hint::black_box(search_engine.search());
-                // for i in 0..100_000_000 {
+                // for i in 0..1_000_000_000 {
                 //     let eval = search_engine.evaluate();
                 //     std::hint::black_box(eval);
                 // }

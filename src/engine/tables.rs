@@ -292,7 +292,7 @@ impl Tables {
     };
 
     #[cfg_attr(any(), rustfmt::skip)]
-    pub const EVAL_TABLES_INV_I8: [[i8; 64]; util::PieceId::PieceMax as usize] = const {
+    pub const EVAL_TABLES_INV_I8: [[i8; 64]; util::PieceId::PieceMax as usize + 2] = const {
         /*
             Evals for white pieces in square format. Black pieces are mirrored
             and inverted for quick negative scoring.
@@ -314,6 +314,16 @@ impl Tables {
             -10,-20,-20,-20,-20,-20,-20,-10,
             20, 20,  0,  0,  0,  0, 20, 20,
             20, 30, 10,  0,  0, 10, 30, 20
+        ];
+        let eval_white_king_eg = [
+            -50,-40,-30,-20,-20,-30,-40,-50,
+            -30,-20,-10,  0,  0,-10,-20,-30,
+            -30,-10, 20, 30, 30, 20,-10,-30,
+            -30,-10, 30, 40, 40, 30,-10,-30,
+            -30,-10, 30, 40, 40, 30,-10,-30,
+            -30,-10, 20, 30, 30, 20,-10,-30,
+            -30,-30,  0,  0,  0,  0,-30,-30,
+            -50,-30,-30,-30,-30,-30,-30,-50
         ];
         let eval_white_queen = [
             -20,-10,-10, -5, -5,-10,-10,-20,
@@ -369,6 +379,7 @@ impl Tables {
         [
             // Mirror white pieces to LERF endianness
             table_mirror(eval_white_king, 8),
+            table_mirror(eval_white_king_eg, 8),
             table_mirror(eval_white_queen, 8),
             table_mirror(eval_white_rook, 8),
             table_mirror(eval_white_bishop, 8),
@@ -376,6 +387,7 @@ impl Tables {
             table_mirror(eval_white_pawn, 8),
             // Black pieces have mappings mirrored to white pieces
             table_negate_i8(eval_white_king),
+            table_negate_i8(eval_white_king_eg),
             table_negate_i8(eval_white_queen),
             table_negate_i8(eval_white_rook),
             table_negate_i8(eval_white_bishop),
