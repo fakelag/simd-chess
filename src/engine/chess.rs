@@ -9,12 +9,16 @@ pub const MV_FLAGS: u16 = 0b1111 << 12;
 pub const MV_FLAG_PROMOTION: u16 = 0b1000 << 12;
 
 pub const MV_FLAG_DPP: u16 = 0b0001 << 12;
-pub const MV_FLAG_EPCAP: u16 = 0b0101 << 12;
+
+// Exclusive capture flag
+pub const MV_FLAG_CAP: u16 = 0b0100 << 12;
+pub const MV_FLAG_EPCAP: u16 = MV_FLAG_CAP | (0b0001 << 12);
 
 pub const MV_FLAGS_PR_KNIGHT: u16 = 0b1000 << 12;
 pub const MV_FLAGS_PR_BISHOP: u16 = 0b1001 << 12;
 pub const MV_FLAGS_PR_ROOK: u16 = 0b1010 << 12;
 pub const MV_FLAGS_PR_QUEEN: u16 = 0b1011 << 12;
+pub const MV_FLAGS_PR_MASK: u16 = 0b1011 << 12;
 
 pub const MV_FLAGS_CASTLE_KING: u16 = 0b0010 << 12;
 pub const MV_FLAGS_CASTLE_QUEEN: u16 = 0b0011 << 12;
@@ -110,6 +114,7 @@ impl ChessGame {
             &mut move_list[move_cursor..],
             self.board.bitboards[PieceId::WhiteRook as usize + side_cursor],
             friendly_board,
+            opponent_board,
             full_board,
         );
 
@@ -118,6 +123,7 @@ impl ChessGame {
             &mut move_list[move_cursor..],
             self.board.bitboards[PieceId::WhiteBishop as usize + side_cursor],
             friendly_board,
+            opponent_board,
             full_board,
         );
 
@@ -126,6 +132,7 @@ impl ChessGame {
             &mut move_list[move_cursor..],
             self.board.bitboards[PieceId::WhiteQueen as usize + side_cursor],
             friendly_board,
+            opponent_board,
             full_board,
         );
         move_cursor += self.gen_slider_moves::<true>(
@@ -133,16 +140,22 @@ impl ChessGame {
             &mut move_list[move_cursor..],
             self.board.bitboards[PieceId::WhiteQueen as usize + side_cursor],
             friendly_board,
+            opponent_board,
             full_board,
         );
 
-        move_cursor +=
-            self.gen_knight_moves(&mut move_list[move_cursor..], self.b_move, friendly_board);
+        move_cursor += self.gen_knight_moves(
+            &mut move_list[move_cursor..],
+            self.b_move,
+            friendly_board,
+            opponent_board,
+        );
 
         move_cursor += self.gen_king_moves(
             &mut move_list[move_cursor..],
             self.b_move,
             friendly_board,
+            opponent_board,
             full_board,
         );
 
@@ -240,12 +253,13 @@ impl ChessGame {
                         MV_FLAGS_PR_ROOK,
                         MV_FLAGS_PR_QUEEN,
                     ] {
-                        move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
+                        move_list[move_cursor] =
+                            (dst_sq << 6) | src_sq | promotion_flag | MV_FLAG_CAP;
                         move_cursor += 1;
                     }
                     continue;
                 }
-                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                move_list[move_cursor] = (dst_sq << 6) | src_sq | MV_FLAG_CAP;
                 move_cursor += 1;
             }
 
@@ -335,6 +349,7 @@ impl ChessGame {
         move_list: &mut [u16],
         piece_board: u64,
         friendly_board: u64,
+        opponent_board: u64,
         full_board: u64,
     ) -> usize {
         let mut move_cursor = 0;
@@ -358,7 +373,9 @@ impl ChessGame {
 
             loop {
                 let dst_sq = pop_ls1b!(slider_moves);
-                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                let cap_flag = (((1 << dst_sq) & opponent_board) >> dst_sq << 14) as u16;
+
+                move_list[move_cursor] = (dst_sq << 6) | src_sq | cap_flag;
                 move_cursor += 1;
             }
         }
@@ -371,6 +388,7 @@ impl ChessGame {
         move_list: &mut [u16],
         b_move: bool,
         friendly_board: u64,
+        opponent_board: u64,
     ) -> usize {
         let mut move_cursor = 0;
 
@@ -385,7 +403,9 @@ impl ChessGame {
 
             loop {
                 let dst_sq = pop_ls1b!(knight_moves_bitboard);
-                move_list[move_cursor] = (dst_sq << 6) | src_sq;
+                let cap_flag = (((1 << dst_sq) & opponent_board) >> dst_sq << 14) as u16;
+
+                move_list[move_cursor] = (dst_sq << 6) | src_sq | cap_flag;
                 move_cursor += 1;
             }
         }
@@ -398,6 +418,7 @@ impl ChessGame {
         move_list: &mut [u16],
         b_move: bool,
         friendly_board: u64,
+        opponent_board: u64,
         full_board: u64,
     ) -> usize {
         let mut move_cursor = 0;
@@ -409,7 +430,9 @@ impl ChessGame {
 
         loop {
             let dst_sq = pop_ls1b!(king_moves_bitboard);
-            move_list[move_cursor] = (dst_sq << 6) | src_sq;
+            let cap_flag: u16 = (((1 << dst_sq) & opponent_board) >> dst_sq << 14) as u16;
+
+            move_list[move_cursor] = (dst_sq << 6) | src_sq | cap_flag;
             move_cursor += 1;
         }
 
@@ -552,6 +575,7 @@ impl ChessGame {
         }
 
         if to_piece != 0 {
+            debug_assert!(mv & MV_FLAG_CAP != 0);
             self.board.bitboards[to_piece - 1] &= !to_bit;
 
             // Remove captured piece from Zobrist key
@@ -559,7 +583,12 @@ impl ChessGame {
 
             // @todo - Can be branchless since MATERIAL_TABLE[0] == 0
             self.material[!self.b_move as usize] -= MATERIAL_TABLE[to_piece];
+        } else if move_flags == MV_FLAG_EPCAP {
+            debug_assert!(move_flags != MV_FLAG_EPCAP || self.en_passant.is_some());
+        } else {
+            debug_assert!(mv & MV_FLAG_CAP == 0);
         }
+
         self.board.bitboards[from_piece] ^= to_bit | from_bit;
 
         if let Some(ep_square) = self.en_passant.take() {
@@ -603,7 +632,7 @@ impl ChessGame {
         }
 
         if move_flags & MV_FLAG_PROMOTION != 0 {
-            let promotion_piece = match move_flags {
+            let promotion_piece = match move_flags & MV_FLAGS_PR_MASK {
                 MV_FLAGS_PR_KNIGHT => PieceId::WhiteKnight as usize + 6 * self.b_move as usize,
                 MV_FLAGS_PR_BISHOP => PieceId::WhiteBishop as usize + 6 * self.b_move as usize,
                 MV_FLAGS_PR_ROOK => PieceId::WhiteRook as usize + 6 * self.b_move as usize,
@@ -659,7 +688,7 @@ impl ChessGame {
         self.half_moves += 1;
         self.full_moves += self.b_move as u32;
 
-        let is_capture = to_piece != 0 || move_flags & MV_FLAG_EPCAP != 0;
+        let is_capture = (move_flags & MV_FLAG_CAP) != 0;
         let is_pawn_move = from_piece == (PieceId::WhitePawn as usize + 6 * self.b_move as usize);
 
         if is_capture || is_pawn_move {
@@ -1123,7 +1152,7 @@ impl ChessGame {
     }
 
     // Sets move flags based on board state that can't be derived from move string
-    // double pawn push, en passant, castling
+    // double pawn push, en passant, castling, capture flag
     pub fn fix_move(&self, mv: u16) -> u16 {
         let mut mv = mv;
 
@@ -1133,7 +1162,12 @@ impl ChessGame {
         let from_rank = from_sq / 8;
         let to_rank = to_sq / 8;
 
-        let from_piece = self.piece_at_slow(1 << from_sq) - 1;
+        let from_piece = (self.spt[from_sq as usize] - 1) as usize;
+        let to_piece = self.spt[to_sq as usize] as usize;
+
+        if to_piece != 0 {
+            mv |= MV_FLAG_CAP;
+        }
 
         mv |= match (PieceId::from(from_piece), from_rank, to_rank) {
             (PieceId::WhitePawn, 1, 3) => MV_FLAG_DPP,
@@ -1203,6 +1237,11 @@ impl ChessGame {
     #[inline(always)]
     pub fn spt(&self) -> &[u8; 64] {
         &self.spt
+    }
+
+    #[inline(always)]
+    pub fn castles(&self) -> u8 {
+        self.castles
     }
 
     #[inline(always)]
@@ -1392,6 +1431,8 @@ mod tests {
             "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w - - 0 1",
             "4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1",
             "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            "k2K4/8/p7/1P6/8/8/8/8 w - - 0 1",
+            "r7/1P6/8/8/8/8/8/k1K5 w - - 0 1",
         ]
         .iter()
         .for_each(|&fen| {
