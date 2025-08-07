@@ -78,7 +78,7 @@ mod tests {
 
             let board_copy = board.clone();
 
-            if !board.make_move_slow(mv, tables) || board.in_check_slow(tables, !board.b_move) {
+            if !board.make_move_slow(mv, tables) || board.in_check_slow(tables, !board.b_move()) {
                 *board = board_copy;
                 continue;
             }
@@ -109,7 +109,8 @@ mod tests {
 
             assert!(board.make_move_slow(mv, tables));
 
-            let is_irreversible = board.half_moves == 0 || board.castles != board_copy.castles;
+            let is_irreversible =
+                board.half_moves() == 0 || board.castles() != board_copy.castles();
 
             match num_moves_to_play {
                 5 if !is_irreversible => {
@@ -167,30 +168,30 @@ mod tests {
             ("h4f3", true),
         ];
 
-        table.push_position(board.zobrist_key, true);
+        table.push_position(board.zobrist_key(), true);
 
         for (mv_string, is_repeated) in moves {
-            let mv = util::fix_move(&board, util::create_move(mv_string));
+            let mv = board.fix_move(util::create_move(mv_string));
             assert!(board.make_move_slow(mv, &tables));
 
             assert_eq!(
-                table.is_repeated(board.zobrist_key),
+                table.is_repeated(board.zobrist_key()),
                 is_repeated,
                 "Move {} should {}be repeated",
                 mv_string,
                 if is_repeated { "" } else { "not " }
             );
 
-            table.push_position(board.zobrist_key, board.half_moves == 0);
+            table.push_position(board.zobrist_key(), board.half_moves() == 0);
         }
 
         assert!(
-            table.is_repeated(board.zobrist_key),
+            table.is_repeated(board.zobrist_key()),
             "Last move should be repeated"
         );
         for i in 0..moves.len() {
             table.pop_position();
-            assert_eq!(table.is_repeated(board.zobrist_key), i <= 3);
+            assert_eq!(table.is_repeated(board.zobrist_key()), i <= 3);
         }
     }
 
@@ -209,21 +210,21 @@ mod tests {
                 let mut board = chess::ChessGame::new();
                 assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
 
-                reptable.push_position(board.zobrist_key, true);
+                reptable.push_position(board.zobrist_key(), true);
 
                 moves.clear();
                 assert!(find_moves_with_repetition(&mut board, &tables, i, moves));
 
                 for mv in moves.iter().take(i - 4) {
                     assert!(board.make_move_slow(*mv, &tables));
-                    assert!(!board.in_check_slow(&tables, !board.b_move));
-                    reptable.push_position(board.zobrist_key, board.half_moves == 0);
+                    assert!(!board.in_check_slow(&tables, !board.b_move()));
+                    reptable.push_position(board.zobrist_key(), board.half_moves() == 0);
                 }
 
                 for (index, mv) in moves.iter().enumerate().skip(i - 4) {
                     assert!(board.make_move_slow(*mv, &tables));
-                    assert!(!board.in_check_slow(&tables, !board.b_move));
-                    assert!(reptable.is_repeated(board.zobrist_key) == (index + 1 == i));
+                    assert!(!board.in_check_slow(&tables, !board.b_move()));
+                    assert!(reptable.is_repeated(board.zobrist_key()) == (index + 1 == i));
                 }
             }
         }
