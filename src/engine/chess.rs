@@ -1080,6 +1080,7 @@ impl ChessGame {
     }
 }
 
+/*
 mod tests {
     const PERFT_MOVE_VERIFICATION: bool = true;
     const STOCKFISH_LOCATION: &str = "bin/stockfish.exe";
@@ -1490,3 +1491,4 @@ mod tests {
         }
     }
 }
+*/

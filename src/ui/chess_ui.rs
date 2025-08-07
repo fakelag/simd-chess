@@ -87,12 +87,12 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v6_psquare.exe"),
+                Some("v6_psquare_eg.exe"),
                 None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v5_tt.exe"),
+                Some("v6_psquare2.exe"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(
@@ -322,10 +322,17 @@ impl ChessUi {
                     ));
 
                     ui.text(format!(
-                        "In check: {}",
+                        "in_check: {}",
                         self.matchmaking
                             .board
                             .in_check_slow(&self.matchmaking.tables, self.matchmaking.board.b_move)
+                    ));
+
+                    ui.text(format!(
+                        "is_endgame: {}",
+                        (((self.matchmaking.board.material[0] & (!1023))
+                            | (self.matchmaking.board.material[1] & (!1023)))
+                            == 0) as usize
                     ));
 
                     if ui.button("Copy FEN") {
@@ -336,26 +343,8 @@ impl ChessUi {
                     ui.separator();
 
                     // if let Some(hovering_sq_index) = hovering_sq_index {
-                    //     ui.text(format!(
-                    //         "Square: {} (index {})",
-                    //         square_name(hovering_sq_index),
-                    //         hovering_sq_index,
-                    //     ));
-                    //     let square_piece =
-                    //         self.matchmaking.board.piece_at_slow(1 << hovering_sq_index);
-
-                    //     if square_piece == 0 {
-                    //         ui.text("No piece on this square");
-                    //     } else {
-                    //         ui.text(format!(
-                    //             "Square bonus: {} (for {:?})",
-                    //             tables::Tables::EVAL_TABLES_INV[square_piece - 1]
-                    //                 [hovering_sq_index as usize],
-                    //             PieceId::from(square_piece - 1)
-                    //         ));
-                    //     }
+                    //     ui.separator();
                     // }
-                    // ui.separator();
 
                     match self.matchmaking.versus_state {
                         VersusState::Idle => {

@@ -1,5 +1,5 @@
 use crate::{
-    engine::tables::Tables,
+    engine::{chess, tables::Tables},
     pop_ls1b,
     util::{self, PieceId},
 };
@@ -49,35 +49,95 @@ pub enum GameState {
 
 #[repr(C)]
 #[repr(align(64))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct Bitboards {
     pub bitboards: [u64; 12],
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChessGame {
-    pub board: Bitboards,
-    pub b_move: bool,
-    pub castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
-    pub en_passant: Option<u8>, // @perf - Encode as 64u8
-    pub half_moves: u32,
-    pub full_moves: u32,
-    pub zobrist_key: u64,
-    pub material: [u16; 2],
+    board: Bitboards,
+    b_move: bool,
+    castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
+    en_passant: Option<u8>, // @perf - Encode as 64u8
+    half_moves: u32,
+    full_moves: u32,
+    zobrist_key: u64,
+    material: [u16; 2],
+    spt: [u8; 64],
+}
+const CHESS_GAME_SIZE_ASSERT: [u8; 256] = [0; std::mem::size_of::<ChessGame>()];
+
+// Backwards compatibility
+impl From<chess::ChessGame> for ChessGame {
+    fn from(v1: chess::ChessGame) -> Self {
+        let mut v2 = ChessGame::new();
+        v2.board.bitboards = v1.board.bitboards;
+        v2.b_move = v1.b_move;
+        v2.castles = v1.castles;
+        v2.en_passant = v1.en_passant;
+        v2.half_moves = v1.half_moves;
+        v2.full_moves = v1.full_moves;
+        v2.zobrist_key = v1.zobrist_key;
+        v2.material = v1.material;
+        v2.spt = v2.calc_spt();
+        v2
+    }
 }
 
 impl ChessGame {
     pub fn new() -> Self {
         Self {
-            board: Bitboards { bitboards: [0; 12] },
+            board: Bitboards::default(),
             b_move: false,
-            castles: 0b0000,
+            castles: 0,
             en_passant: None,
             half_moves: 0,
             full_moves: 1,
             zobrist_key: 0,
             material: [0; 2],
+            spt: [0; 64],
         }
+    }
+
+    #[inline(always)]
+    pub fn b_move(&self) -> bool {
+        self.b_move
+    }
+
+    #[inline(always)]
+    pub fn bitboards(&self) -> &[u64; 12] {
+        &self.board.bitboards
+    }
+
+    #[inline(always)]
+    pub fn bitboards_mut(&mut self) -> &mut [u64; 12] {
+        &mut self.board.bitboards
+    }
+
+    #[inline(always)]
+    pub fn ep_square(&self) -> Option<u8> {
+        self.en_passant
+    }
+
+    #[inline(always)]
+    pub fn half_moves(&self) -> u32 {
+        self.half_moves
+    }
+
+    #[inline(always)]
+    pub fn zobrist_key(&self) -> u64 {
+        self.zobrist_key
+    }
+
+    #[inline(always)]
+    pub fn material(&self) -> &[u16; 2] {
+        &self.material
+    }
+
+    #[inline(always)]
+    pub fn spt(&self) -> &[u8; 64] {
+        &self.spt
     }
 
     pub fn gen_moves_slow(&self, tables: &Tables, move_list: &mut [u16]) -> usize {
@@ -465,13 +525,14 @@ impl ChessGame {
         }
     }
 
+    // Must return false before making any changes to the game state
     pub fn make_move_slow(&mut self, mv: u16, tables: &Tables) -> bool {
         let zb_keys = &tables.zobrist_hash_keys;
 
         let from_sq = (mv & 0x3F) as u8;
         let from_bit: u64 = 1 << from_sq;
 
-        let to_sq = (mv >> 6) & 0x3F;
+        let to_sq = ((mv >> 6) & 0x3F) as u8;
         let to_bit: u64 = 1 << to_sq;
 
         let move_flags = mv & MV_FLAGS;
@@ -491,9 +552,17 @@ impl ChessGame {
                 let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
                 self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
 
+                let rook_from_sq = to_sq as usize + 1;
+                let rook_to_sq = to_sq as usize - 1;
+
+                unsafe {
+                    *self.spt.get_unchecked_mut(rook_from_sq) = 0;
+                    *self.spt.get_unchecked_mut(rook_to_sq) = (rook_piece_id + 1) as u8;
+                }
+
                 // Re-add Zobrist key for moved rook
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize + 1];
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize - 1];
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_from_sq];
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_to_sq];
             }
             MV_FLAGS_CASTLE_QUEEN => {
                 if [from_sq, from_sq - 1, from_sq - 2]
@@ -509,19 +578,35 @@ impl ChessGame {
                 let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
                 self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
 
+                let rook_from_sq = to_sq as usize - 2;
+                let rook_to_sq = to_sq as usize + 1;
+
+                unsafe {
+                    *self.spt.get_unchecked_mut(rook_from_sq) = 0;
+                    *self.spt.get_unchecked_mut(rook_to_sq) = (rook_piece_id + 1) as u8;
+                }
+
+                self.spt[rook_from_sq] = 0;
+                self.spt[rook_to_sq] = (rook_piece_id + 1) as u8;
+
                 // Re-add Zobrist key for moved rook
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize - 2];
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][to_sq as usize + 1];
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_from_sq];
+                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_to_sq];
             }
             _ => {}
         }
 
-        let from_piece = self.piece_at_slow(from_bit) - 1;
-        let to_piece = self.piece_at_slow(to_bit);
+        let from_piece = self.spt[from_sq as usize] as usize - 1;
+        let to_piece = self.spt[to_sq as usize] as usize;
 
         // Remove moved piece from from_sq and add it to to_sq
         self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][from_sq as usize];
         self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][to_sq as usize];
+
+        unsafe {
+            *self.spt.get_unchecked_mut(from_sq as usize) = 0;
+            *self.spt.get_unchecked_mut(to_sq as usize) = (from_piece + 1) as u8;
+        }
 
         if to_piece != 0 {
             self.board.bitboards[to_piece - 1] &= !to_bit;
@@ -552,6 +637,10 @@ impl ChessGame {
                 // Remove captured pawn from Zobrist key
                 self.zobrist_key ^= zb_keys.hash_piece_squares[piece_id][ep_square as usize];
 
+                unsafe {
+                    *self.spt.get_unchecked_mut(ep_square as usize) = 0;
+                };
+
                 self.material[!self.b_move as usize] -= MATERIAL_TABLE[piece_id + 1];
             }
             MV_FLAG_DPP => {
@@ -580,6 +669,10 @@ impl ChessGame {
             };
             self.board.bitboards[from_piece] &= !to_bit;
             self.board.bitboards[promotion_piece] |= to_bit;
+
+            unsafe {
+                *self.spt.get_unchecked_mut(to_sq as usize) = (promotion_piece + 1) as u8;
+            }
 
             // Remove Zobrist key for promoted pawn and add it for promoted-to piece
             self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][to_sq as usize];
@@ -663,6 +756,11 @@ impl ChessGame {
                         self.material == self.calc_material(),
                         "Material mismatch after move"
                     );
+                    assert!(
+                        self.zobrist_key == self.calc_initial_zobrist_key(tables),
+                        "Zobrist key mismatch after move"
+                    );
+                    assert!(self.spt == self.calc_spt(), "Spt mismatch after move");
                 }
                 let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None);
                 node_count += nodes;
@@ -862,6 +960,7 @@ impl ChessGame {
 
         self.zobrist_key = self.calc_initial_zobrist_key(tables);
         self.material = self.calc_material();
+        self.spt = self.calc_spt();
 
         Ok(fen_length)
     }
@@ -876,6 +975,17 @@ impl ChessGame {
         material
     }
 
+    fn calc_spt(&self) -> [u8; 64] {
+        let mut spt = [0; 64];
+
+        for sq in 0..64 {
+            let piece_id = self.piece_at_slow(1 << sq);
+            spt[sq] = piece_id as u8;
+        }
+
+        spt
+    }
+
     pub fn gen_fen(&self) -> String {
         use std::fmt::Write;
 
@@ -888,7 +998,7 @@ impl ChessGame {
         let mut fen_string = (0..8)
             .rev()
             .flat_map(|rank| (0..8).map(move |file| rank * 8 + file))
-            .map(|square_index| (square_index, self.piece_at_slow(1 << square_index)))
+            .map(|square_index| (square_index, self.spt[square_index] as usize))
             .array_chunks::<8>()
             .map(|rank_squares| {
                 let rank_content =
@@ -1069,6 +1179,44 @@ impl ChessGame {
         zobrist_hash
     }
 
+    // Sets move flags based on board state that can't be derived from move string
+    // double pawn push, en passant, castling
+    pub fn fix_move(&self, mv: u16) -> u16 {
+        let mut mv = mv;
+
+        let from_sq = (mv & 0x3F) as u8;
+        let to_sq = ((mv >> 6) & 0x3F) as u8;
+
+        let from_rank = from_sq / 8;
+        let to_rank = to_sq / 8;
+
+        let from_piece = self.piece_at_slow(1 << from_sq) - 1;
+
+        mv |= match (PieceId::from(from_piece), from_rank, to_rank) {
+            (PieceId::WhitePawn, 1, 3) => MV_FLAG_DPP,
+            (PieceId::BlackPawn, 6, 4) => MV_FLAG_DPP,
+            _ => 0,
+        };
+
+        if let Some(ep_sq) = self.en_passant {
+            let side_pawn_piece = PieceId::WhitePawn as usize + self.b_move as usize * 6;
+
+            if to_sq == ep_sq && from_piece == side_pawn_piece {
+                mv |= MV_FLAG_EPCAP;
+            }
+        }
+
+        mv |= match (PieceId::from(from_piece), from_sq, to_sq) {
+            (PieceId::WhiteKing, 4, 6) => MV_FLAGS_CASTLE_KING,
+            (PieceId::WhiteKing, 4, 2) => MV_FLAGS_CASTLE_QUEEN,
+            (PieceId::BlackKing, 60, 62) => MV_FLAGS_CASTLE_KING,
+            (PieceId::BlackKing, 60, 58) => MV_FLAGS_CASTLE_QUEEN,
+            _ => 0,
+        };
+
+        mv
+    }
+
     #[inline(always)]
     fn is_kingside_castle_allowed(&self, b_move: bool) -> bool {
         self.castles & (0b10 << (!b_move as u8 * 2)) != 0
@@ -1154,7 +1302,7 @@ mod tests {
         square_results
     }
 
-    fn perft_verification(
+    fn perft_verification<const INTEGRITY_CHECK: bool>(
         board: &mut ChessGame,
         mut moves_to_make: Vec<String>,
         depth: u8,
@@ -1166,11 +1314,11 @@ mod tests {
         let mut perft_moves = Vec::new();
 
         for mv in moves_to_make.iter() {
-            let mv = util::fix_move(board, util::create_move(mv));
+            let mv = board.fix_move(util::create_move(mv));
             assert!(board.make_move_slow(mv, &tables));
         }
 
-        let perft_result = board.perft::<true>(depth, &tables, Some(&mut perft_moves));
+        let perft_result = board.perft::<INTEGRITY_CHECK>(depth, &tables, Some(&mut perft_moves));
 
         if !PERFT_MOVE_VERIFICATION {
             return perft_result;
@@ -1239,7 +1387,7 @@ mod tests {
                     return perft_result;
                 }
                 moves_to_make.push(move_str.clone());
-                perft_verification(board, moves_to_make, depth - 1, fen, tables);
+                perft_verification::<INTEGRITY_CHECK>(board, moves_to_make, depth - 1, fen, tables);
                 return perft_result;
             }
         }
@@ -1270,15 +1418,14 @@ mod tests {
                 let mut board_copy = board.clone();
 
                 let is_legal_move = board_copy.make_move_slow(mv, &tables)
-                    && !board_copy.in_check_slow(&tables, !board_copy.b_move);
+                    && !board_copy.in_check_slow(&tables, !board_copy.b_move());
 
                 if !is_legal_move {
                     continue;
                 }
 
                 let move_string = util::move_string(mv);
-                let recreated_move =
-                    util::fix_move(&board, util::create_move(move_string.as_str()));
+                let recreated_move = board.fix_move(util::create_move(move_string.as_str()));
 
                 assert_eq!(
                     recreated_move, mv,
@@ -1334,7 +1481,7 @@ mod tests {
                     let board_copy = board.clone();
 
                     let is_legal_move = board.make_move_slow(mv, &tables)
-                        && !board.in_check_slow(&tables, !board.b_move);
+                        && !board.in_check_slow(&tables, !board.b_move());
 
                     if !is_legal_move {
                         *board = board_copy;
@@ -1344,13 +1491,13 @@ mod tests {
                     let calculated_zobrist_key = board.calc_initial_zobrist_key(&tables);
 
                     assert_eq!(
-                        board.zobrist_key,
+                        board.zobrist_key(),
                         calculated_zobrist_key,
                         "Zobrist hash mismatch for move {}. Fen: {} Expected: {:#X}, got: {:#X}",
                         util::move_string(mv),
                         fen,
                         calculated_zobrist_key,
-                        board.zobrist_key,
+                        board.zobrist_key(),
                     );
 
                     check_keys_to_depth(fen, depth - 1, board, tables);
@@ -1367,7 +1514,7 @@ mod tests {
     fn test_perft_rnbqkbnr_pppppppp_8_8_8_8_PPPPPPPP_RNBQKBNR() {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification::<true>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             119060324
         );
     }
@@ -1376,7 +1523,7 @@ mod tests {
     fn test_perft_r3k2r_p1ppqpb1_bn2pnp1_3PN3_1p2P3_2N2Q1p_PPPBBPPP_R3K2R() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             8031647685
         );
     }
@@ -1385,7 +1532,7 @@ mod tests {
     fn test_perft_8_2p5_3p4_KP5r_1R3p1k_8_4P1P1_8() {
         let fen = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 8, fen, &Tables::new()),
+            perft_verification::<true>(&mut ChessGame::new(), vec![], 8, fen, &Tables::new()),
             3009794393
         );
     }
@@ -1395,11 +1542,11 @@ mod tests {
         let fen = "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
         let mirrored = "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             706045033
         );
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 6, mirrored, &Tables::new()),
+            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, mirrored, &Tables::new()),
             706045033
         );
     }
@@ -1408,7 +1555,7 @@ mod tests {
     fn test_perft_rnbq1k1r_pp1Pbppp_2p5_8_2B5_8_PPP1NnPP_RNBQK2R() {
         let fen = "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 5, fen, &Tables::new()),
+            perft_verification::<true>(&mut ChessGame::new(), vec![], 5, fen, &Tables::new()),
             89941194
         );
     }
@@ -1417,7 +1564,7 @@ mod tests {
     fn test_perft_r4rk1_1pp1qppp_p1np1n2_2b1p1B1_2B1P1b1_P1NP1N2_1PP1QPPP_R4RK1() {
         let fen = "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             6923051137
         );
     }
@@ -1426,7 +1573,7 @@ mod tests {
     fn test_perft_8_PPP4k_8_8_8_8_4Kppp_8() {
         let fen = "8/PPP4k/8/8/8/8/4Kppp/8 w - -";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification::<true>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             34336777
         );
     }
@@ -1435,7 +1582,7 @@ mod tests {
     fn test_perft_n1n5_PPPk4_8_8_8_8_4Kppp_5N1N() {
         let fen = "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1";
         assert_eq!(
-            perft_verification(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
+            perft_verification::<true>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
             71179139
         );
     }
@@ -1463,7 +1610,13 @@ mod tests {
         .iter()
         .for_each(|(fen, depth, expected)| {
             assert_eq!(
-                perft_verification(&mut ChessGame::new(), vec![], *depth, fen, &Tables::new()),
+                perft_verification::<true>(
+                    &mut ChessGame::new(),
+                    vec![],
+                    *depth,
+                    fen,
+                    &Tables::new()
+                ),
                 *expected
             );
         });
