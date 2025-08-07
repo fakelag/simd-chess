@@ -34,11 +34,11 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
 
     let black_ms = matchmaking
         .versus_btime_ms
-        .saturating_sub(move_start_elapsed_ms * matchmaking.board.b_move as usize);
+        .saturating_sub(move_start_elapsed_ms * matchmaking.board.b_move() as usize);
 
     let white_ms = matchmaking
         .versus_wtime_ms
-        .saturating_sub(move_start_elapsed_ms * !matchmaking.board.b_move as usize);
+        .saturating_sub(move_start_elapsed_ms * !matchmaking.board.b_move() as usize);
 
     ui.text(format!(
         "Matches: {}\n{} {} wins\n{} {} wins\nDraws: {}\nwtime: {}\nbtime: {}",
@@ -294,44 +294,37 @@ impl ChessUi {
                 ui.child_window("side").border(true).build(|| {
                     ui.text(format!("is_valid: {}", self.matchmaking.board.is_valid()));
                     ui.text(format!(
-                        "ep_square: {:?}",
-                        self.matchmaking
-                            .board
-                            .en_passant
-                            .and_then(|sq| Some(square_name(sq)))
-                    ));
-                    ui.text(format!(
                         "b_move: {}",
-                        if self.matchmaking.board.b_move {
+                        if self.matchmaking.board.b_move() {
                             "black"
                         } else {
                             "white"
                         }
                     ));
 
-                    ui.text(format!("Castles: {:04b}", self.matchmaking.board.castles));
-
                     ui.text(format!(
                         "zobrist_key: {:016X}",
-                        self.matchmaking.board.zobrist_key
+                        self.matchmaking.board.zobrist_key()
                     ));
 
                     ui.text(format!(
                         "half_moves: {}, full_moves: {}",
-                        self.matchmaking.board.half_moves, self.matchmaking.board.full_moves
+                        self.matchmaking.board.half_moves(),
+                        self.matchmaking.board.full_moves()
                     ));
 
                     ui.text(format!(
                         "in_check: {}",
-                        self.matchmaking
-                            .board
-                            .in_check_slow(&self.matchmaking.tables, self.matchmaking.board.b_move)
+                        self.matchmaking.board.in_check_slow(
+                            &self.matchmaking.tables,
+                            self.matchmaking.board.b_move()
+                        )
                     ));
 
                     ui.text(format!(
                         "is_endgame: {}",
-                        (((self.matchmaking.board.material[0] & (!1023))
-                            | (self.matchmaking.board.material[1] & (!1023)))
+                        (((self.matchmaking.board.material()[0] & (!1023))
+                            | (self.matchmaking.board.material()[1] & (!1023)))
                             == 0) as usize
                     ));
 
@@ -418,7 +411,7 @@ impl ChessUi {
                     match self.matchmaking.board.check_game_state(
                         &self.matchmaking.tables,
                         self.matchmaking.legal_moves.is_empty(),
-                        self.matchmaking.board.b_move,
+                        self.matchmaking.board.b_move(),
                     ) {
                         chess::GameState::Checkmate(side) => {
                             let engine_name = self
@@ -474,7 +467,7 @@ impl ChessUi {
                     .for_each(|(i, flag)| {
                         let texture_id = ctx.textures[i
                             + PieceId::WhiteQueen as usize
-                            + self.matchmaking.board.b_move as usize * 6];
+                            + self.matchmaking.board.b_move() as usize * 6];
 
                         let [option_x, option_y] =
                             [selector_x + square_wh[0] * i as f32, selector_y];

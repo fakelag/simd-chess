@@ -164,7 +164,7 @@ impl<'a> Search<'a> {
             let board_copy = self.chess.clone();
 
             let is_valid_move = self.chess.make_move_slow(mv, self.tables)
-                && !self.chess.in_check_slow(self.tables, !self.chess.b_move);
+                && !self.chess.in_check_slow(self.tables, !self.chess.b_move());
 
             if !is_valid_move {
                 self.chess = board_copy;
@@ -215,7 +215,7 @@ impl<'a> Search<'a> {
         }
 
         if !has_legal_moves {
-            if self.chess.in_check_slow(self.tables, self.chess.b_move) {
+            if self.chess.in_check_slow(self.tables, self.chess.b_move()) {
                 return -SCORE_INF + self.ply as i32;
             }
 
@@ -227,7 +227,7 @@ impl<'a> Search<'a> {
     }
 
     fn evaluate(&self) -> i32 {
-        let boards = &self.chess.board.bitboards;
+        let boards = self.chess.bitboards();
 
         let w_q = boards[util::PieceId::WhiteQueen as usize].count_ones() as i32;
         let w_r = boards[util::PieceId::WhiteRook as usize].count_ones() as i32;
@@ -249,7 +249,7 @@ impl<'a> Search<'a> {
 
         let final_score = material_score;
 
-        final_score * if self.chess.b_move { -1 } else { 1 }
+        final_score * if self.chess.b_move() { -1 } else { 1 }
     }
 
     fn check_sigabort(&self) -> bool {

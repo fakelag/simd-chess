@@ -197,7 +197,7 @@ pub fn parse_pgn<'a>(
                             return false;
                         }
 
-                        if board_copy.in_check_slow(tables, !board_copy.b_move) {
+                        if board_copy.in_check_slow(tables, !board_copy.b_move()) {
                             return false;
                         }
 
@@ -230,7 +230,7 @@ pub fn parse_pgn<'a>(
                     ));
                 }
 
-                if board.in_check_slow(&tables, !board.b_move) {
+                if board.in_check_slow(&tables, !board.b_move()) {
                     return Err(anyhow::anyhow!(
                         "Opening move {} leaves the king in check",
                         part

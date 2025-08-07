@@ -2,7 +2,7 @@ use crossbeam::channel;
 
 use crate::{
     engine::{
-        chess_v2,
+        chess,
         search::{
             AbortSignal, SearchStrategy,
             repetition::RepetitionTable,
@@ -55,15 +55,12 @@ impl PvTable {
 
 pub struct Search<'a> {
     params: SearchParams,
-    chess: chess_v2::ChessGame,
+    chess: chess::ChessGame,
     tables: &'a tables::Tables,
     sig: &'a AbortSignal,
 
     ply: u8,
     is_stopping: bool,
-
-    nodes: u64,
-    score: i32,
 
     pv_table: Box<PvTable>,
     pv: [u16; PV_DEPTH],
@@ -72,6 +69,11 @@ pub struct Search<'a> {
 
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
+
+    score: i32,
+    b_cut_count: u64,
+    a_raise_count: u64,
+    node_count: u64,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
@@ -90,7 +92,7 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
                 break 'outer;
             }
 
-            node_count = self.nodes;
+            node_count = self.node_count;
             self.pv_length = self.pv_table.lengths[0] as usize;
             self.pv[0..self.pv_length].copy_from_slice(&self.pv_table.moves[0][0..self.pv_length]);
             self.pv_trace = self.pv_length > 0;
@@ -98,14 +100,14 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
             best_score = score;
         }
 
-        self.nodes = node_count;
+        self.node_count = node_count;
         self.score = best_score;
 
         self.pv[0]
     }
 
     fn num_nodes_searched(&self) -> u64 {
-        self.nodes
+        self.node_count
     }
 
     fn search_score(&self) -> i32 {
@@ -116,7 +118,7 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
 impl<'a> Search<'a> {
     pub fn new(
         params: SearchParams,
-        chess: chess_v2::ChessGame,
+        chess: chess::ChessGame,
         tables: &'a tables::Tables,
         tt: &'a mut TranspositionTable,
         rt: RepetitionTable,
@@ -127,7 +129,9 @@ impl<'a> Search<'a> {
             chess: (chess),
             params,
             tables,
-            nodes: 0,
+            node_count: 0,
+            a_raise_count: 0,
+            b_cut_count: 0,
             ply: 0,
             is_stopping: false,
             score: -i32::MAX,
@@ -149,21 +153,29 @@ impl<'a> Search<'a> {
     pub fn get_pv(&self) -> &[u16] {
         &self.pv[0..self.pv_length]
     }
+    pub fn b_cut_count(&self) -> u64 {
+        self.b_cut_count
+    }
+    pub fn a_raise_count(&self) -> u64 {
+        self.a_raise_count
+    }
 
     fn go(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
         // @perf - Can rust reason ply < PV_DEPTH without recursive assertions
         assert!(self.ply < PV_DEPTH as u8);
 
-        self.nodes += 1;
+        self.node_count += 1;
         self.pv_table.lengths[self.ply as usize] = 0;
 
-        if self.nodes & 0x7FF == 0 && self.check_sigabort() {
+        if self.node_count & 0x7FF == 0 && self.check_sigabort() {
             self.is_stopping = true;
             return 0;
         }
 
+        let mut pv_move = 0; // Null move
+        let mut tt_move = 0; // Null move
+
         let mut move_list = [0u16; 256];
-        let mut move_count = 0;
 
         if self.ply > 0 && !self.pv_trace {
             if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
@@ -199,8 +211,7 @@ impl<'a> Search<'a> {
                     );
                 }
 
-                move_list[0] = mv;
-                move_count += 1;
+                tt_move = mv;
             }
         }
 
@@ -218,15 +229,71 @@ impl<'a> Search<'a> {
             // This makes sure that PV is played first on subsequent searches. Though it means that the move
             // is possibly played twice for a given board position, it reduces overall nodes searched due to AB cutoffs.
             self.pv_trace = self.pv_length > (self.ply as usize + 1);
-
-            move_list[1] = move_list[0]; // Copy TT move (if any) to the second position
-            move_list[0] = self.pv[self.ply as usize];
-            move_count += 1;
+            pv_move = self.pv[self.ply as usize];
         }
 
-        move_count += self
-            .chess
-            .gen_moves_slow(self.tables, &mut move_list[move_count..]);
+        let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
+
+        move_list[0..move_count].sort_by(|a, b| {
+            if *a == pv_move {
+                return std::cmp::Ordering::Less;
+            }
+            if *b == pv_move {
+                return std::cmp::Ordering::Greater;
+            }
+            if *a == tt_move {
+                return std::cmp::Ordering::Less;
+            }
+            if *b == tt_move {
+                return std::cmp::Ordering::Greater;
+            }
+
+            let a_src_sq = a & 0x3F;
+            let b_src_sq = b & 0x3F;
+
+            let a_dst_sq = (a >> 6) & 0x3F;
+            let b_dst_sq = (b >> 6) & 0x3F;
+
+            // MVV-LVA
+            let spt = self.chess.spt();
+            let a_dst_piece = spt[a_dst_sq as usize] as i8;
+            let b_dst_piece = spt[b_dst_sq as usize] as i8;
+
+            if b_dst_piece < 1 {
+                // b is a quiet move or king capture (invalid move)
+                return std::cmp::Ordering::Less;
+            }
+
+            if a_dst_piece < 1 {
+                // a is a quiet move or king capture (invalid move)
+                return std::cmp::Ordering::Greater;
+            }
+
+            if a_dst_piece < b_dst_piece {
+                // a captures a piece of higher value than b
+                return std::cmp::Ordering::Less;
+            }
+
+            if a_dst_piece > b_dst_piece {
+                // a captures a piece of lower value than b
+                return std::cmp::Ordering::Greater;
+            }
+
+            let a_src_piece = spt[a_src_sq as usize];
+            let b_src_piece = spt[b_src_sq as usize];
+
+            if a_src_piece < b_src_piece {
+                // a moves a piece of higher value than b
+                return std::cmp::Ordering::Greater;
+            }
+
+            if a_src_piece > b_src_piece {
+                // a moves a piece of lower value than b
+                return std::cmp::Ordering::Less;
+            }
+
+            std::cmp::Ordering::Equal
+        });
 
         let mut best_score = -i32::MAX;
         let mut best_move = 0;
@@ -301,10 +368,12 @@ impl<'a> Search<'a> {
                         BoundType::LowerBound,
                     );
                     self.rt.pop_position();
+                    self.b_cut_count += 1;
                     return score;
                 }
 
                 if score > alpha {
+                    self.a_raise_count += 1;
                     bound_type = BoundType::Exact;
                     alpha = score;
                 }

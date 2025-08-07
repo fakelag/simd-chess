@@ -28,7 +28,7 @@ pub mod v7_quiesc;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{engine::chess_v2::ChessGame, util};
+    use crate::{engine::chess::ChessGame, util};
 
     fn rdtsc() -> u64 {
         unsafe { std::arch::x86_64::_rdtsc() }
@@ -77,7 +77,6 @@ mod tests {
                 let end = rdtsc();
                 (mv, end - start)
             };
-            println!("Best move: {}", util::move_string(bestmove));
 
             // search_engine.__evalstats.sort_by(|a, b| a.1.cmp(&b.1));
             // println!(
@@ -115,8 +114,12 @@ mod tests {
             //         .skip(search_engine.__evalstats.len() - 1 - 20)
             //         .collect::<Vec<_>>()
             // );
-
+            // Nodes searched: 1666414
+            // β-cutoff count: 153069
+            // α-raise count: 5747
             println!("Nodes searched: {}", search_engine.num_nodes_searched());
+            println!("β-cutoff count: {}", search_engine.b_cut_count());
+            println!("α-raise count: {}", search_engine.a_raise_count());
             println!(
                 "PV: {:?}",
                 search_engine

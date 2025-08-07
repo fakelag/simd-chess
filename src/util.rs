@@ -243,8 +243,8 @@ pub fn fix_move(board: &chess::ChessGame, mv: u16) -> u16 {
         _ => 0,
     };
 
-    if let Some(ep_sq) = board.en_passant {
-        let side_pawn_piece = PieceId::WhitePawn as usize + board.b_move as usize * 6;
+    if let Some(ep_sq) = board.ep_square() {
+        let side_pawn_piece = PieceId::WhitePawn as usize + board.b_move() as usize * 6;
 
         if to_sq == ep_sq && from_piece == side_pawn_piece {
             mv |= chess::MV_FLAG_EPCAP;
@@ -337,7 +337,7 @@ pub fn parse_position<'a>(
     };
 
     if let Some(rep_table) = &mut repetition_table {
-        rep_table.push_position(board.zobrist_key, true);
+        rep_table.push_position(board.zobrist_key(), true);
     }
 
     if let Some("moves") = moves_it.next() {
@@ -353,8 +353,8 @@ pub fn parse_position<'a>(
             }
 
             if let Some(rep_table) = &mut repetition_table {
-                let is_irreversible = board.half_moves == 0;
-                rep_table.push_position(board.zobrist_key, is_irreversible);
+                let is_irreversible = board.half_moves() == 0;
+                rep_table.push_position(board.zobrist_key(), is_irreversible);
             }
         }
     }

@@ -141,7 +141,7 @@ fn is_board_checkmated(board: &chess::ChessGame, tables: &tables::Tables) -> boo
     let mut is_checkmate = false;
 
     let mut move_list = [0u16; 256];
-    if board.in_check_slow(tables, board.b_move) {
+    if board.in_check_slow(tables, board.b_move()) {
         is_checkmate = (0..board.gen_moves_slow(tables, &mut move_list)).all(|mv_index| {
             let mv = move_list[mv_index];
 
@@ -151,7 +151,7 @@ fn is_board_checkmated(board: &chess::ChessGame, tables: &tables::Tables) -> boo
                 return true;
             }
 
-            if board_copy.in_check_slow(tables, !board_copy.b_move) {
+            if board_copy.in_check_slow(tables, !board_copy.b_move()) {
                 return true;
             }
 

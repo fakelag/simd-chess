@@ -151,11 +151,11 @@ impl<'a> Search<'a> {
         let mut move_count = 0;
 
         if self.ply > 0 && !self.pv_trace {
-            if self.chess.half_moves >= 100 || self.rt.is_repeated(self.chess.zobrist_key) {
+            if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
                 return 0;
             }
 
-            let (score, mv) = self.tt.probe(self.chess.zobrist_key, depth, alpha, beta);
+            let (score, mv) = self.tt.probe(self.chess.zobrist_key(), depth, alpha, beta);
 
             if let Some(score) = score {
                 return score;
@@ -179,7 +179,7 @@ impl<'a> Search<'a> {
                                 }
                                 let mut board_copy = self.chess.clone();
                                 board_copy.make_move_slow(mv, self.tables)
-                                    && !board_copy.in_check_slow(self.tables, !board_copy.b_move)
+                                    && !board_copy.in_check_slow(self.tables, !board_copy.b_move())
                             })
                     );
                 }
@@ -218,7 +218,7 @@ impl<'a> Search<'a> {
         let mut has_legal_moves = false;
 
         self.rt
-            .push_position(self.chess.zobrist_key, self.chess.half_moves == 0);
+            .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
 
         for i in 0..move_count {
             let mv = move_list[i];
@@ -226,7 +226,7 @@ impl<'a> Search<'a> {
             let board_copy = self.chess.clone();
 
             let is_valid_move = self.chess.make_move_slow(mv, self.tables)
-                && !self.chess.in_check_slow(self.tables, !self.chess.b_move);
+                && !self.chess.in_check_slow(self.tables, !self.chess.b_move());
 
             if !is_valid_move {
                 self.chess = board_copy;
@@ -269,7 +269,7 @@ impl<'a> Search<'a> {
 
                 if score >= beta {
                     self.tt.store(
-                        self.chess.zobrist_key,
+                        self.chess.zobrist_key(),
                         score,
                         depth,
                         mv,
@@ -288,7 +288,7 @@ impl<'a> Search<'a> {
         self.rt.pop_position();
 
         if !has_legal_moves {
-            if self.chess.in_check_slow(self.tables, self.chess.b_move) {
+            if self.chess.in_check_slow(self.tables, self.chess.b_move()) {
                 return -SCORE_INF + self.ply as i32;
             }
 
@@ -297,7 +297,7 @@ impl<'a> Search<'a> {
         }
 
         self.tt.store(
-            self.chess.zobrist_key,
+            self.chess.zobrist_key(),
             best_score,
             depth,
             best_move,
@@ -308,7 +308,7 @@ impl<'a> Search<'a> {
     }
 
     fn evaluate(&self) -> i32 {
-        let boards = &self.chess.board.bitboards;
+        let boards = self.chess.bitboards();
 
         let w_q = boards[util::PieceId::WhiteQueen as usize].count_ones() as i32;
         let w_r = boards[util::PieceId::WhiteRook as usize].count_ones() as i32;
@@ -330,7 +330,7 @@ impl<'a> Search<'a> {
 
         let final_score = material_score;
 
-        final_score * if self.chess.b_move { -1 } else { 1 }
+        final_score * if self.chess.b_move() { -1 } else { 1 }
     }
 
     fn check_sigabort(&self) -> bool {

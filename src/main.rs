@@ -8,7 +8,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::{
     engine::{
-        chess, chess_v2,
+        chess,
         search::{self, AbortSignal, SearchStrategy, SigAbort, search_params, transposition},
         tables,
     },
@@ -56,7 +56,7 @@ fn search_thread(
             Ok(go) => {
                 let mut search_engine = search::v7_quiesc::Search::new(
                     go.params,
-                    chess_v2::ChessGame::from(go.chess),
+                    go.chess,
                     tables,
                     tt,
                     go.repetition_table,

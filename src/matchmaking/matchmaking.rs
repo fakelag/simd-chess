@@ -109,7 +109,7 @@ impl Matchmaking {
             let mut board_copy = self.board.clone();
 
             if board_copy.make_move_slow(mv, &self.tables)
-                && !board_copy.in_check_slow(&self.tables, !board_copy.b_move)
+                && !board_copy.in_check_slow(&self.tables, !board_copy.b_move())
             {
                 self.legal_moves.push(mv);
             }
@@ -205,14 +205,14 @@ impl Matchmaking {
     fn versus_check_game_over(&mut self, start_paused: bool) -> bool {
         if self.check_versus_timer() {
             let engine = self
-                .get_engine_for_side_mut(util::Side::from(!self.board.b_move))
+                .get_engine_for_side_mut(util::Side::from(!self.board.b_move()))
                 .unwrap();
             engine.versus_wins += 1;
         } else {
             match self.board.check_game_state(
                 &self.tables,
                 self.legal_moves.is_empty(),
-                self.board.b_move,
+                self.board.b_move(),
             ) {
                 chess::GameState::Checkmate(side) => {
                     let engine = self.get_engine_for_side_mut(side).unwrap();
@@ -469,7 +469,7 @@ impl Matchmaking {
             return false;
         }
 
-        let side_timer = if self.board.b_move {
+        let side_timer = if self.board.b_move() {
             self.versus_btime_ms
         } else {
             self.versus_wtime_ms
@@ -489,7 +489,7 @@ impl Matchmaking {
             return false;
         }
 
-        let side_timer = if self.board.b_move {
+        let side_timer = if self.board.b_move() {
             &mut self.versus_btime_ms
         } else {
             &mut self.versus_wtime_ms
@@ -506,7 +506,7 @@ impl Matchmaking {
     }
 
     fn uci_nextmove(&mut self) {
-        let engine_index = self.engine_index(util::Side::from(self.board.b_move));
+        let engine_index = self.engine_index(util::Side::from(self.board.b_move()));
 
         let engine = self.engines[engine_index]
             .as_mut()
@@ -552,7 +552,7 @@ impl Matchmaking {
     }
 
     fn uci_poll(&mut self) -> EnginePollResult {
-        let engine_index = self.engine_index(util::Side::from(self.board.b_move));
+        let engine_index = self.engine_index(util::Side::from(self.board.b_move()));
 
         let engine = match self.engines[engine_index].as_mut() {
             Some(engine) => engine,
@@ -565,7 +565,7 @@ impl Matchmaking {
             return EnginePollResult::NoAction;
         };
 
-        let mv = util::fix_move(&self.board, util::create_move(&bestmove));
+        let mv = self.board.fix_move(util::create_move(&bestmove));
 
         match self.make_move_with_validation(mv) {
             Ok(true) => return EnginePollResult::MoveMade,
