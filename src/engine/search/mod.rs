@@ -23,11 +23,12 @@ pub mod v3_itdep;
 pub mod v4_pv;
 pub mod v5_tt;
 pub mod v6_psquare;
+pub mod v7_quiesc;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{engine::chess::ChessGame, util};
+    use crate::{engine::chess_v2::ChessGame, util};
 
     fn rdtsc() -> u64 {
         unsafe { std::arch::x86_64::_rdtsc() }
@@ -57,7 +58,7 @@ mod tests {
             params.depth = Some(std::hint::black_box(7));
 
             let mut search_engine =
-                v6_psquare::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+                v7_quiesc::Search::new(params, chess, &tables, &mut tt, rt, &rx);
 
             // let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
