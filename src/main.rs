@@ -54,7 +54,7 @@ fn search_thread(
     loop {
         match rx_search.recv() {
             Ok(go) => {
-                let mut search_engine = search::v7_quiesc::Search::new(
+                let mut search_engine = search::v7_mvvlva::Search::new(
                     go.params,
                     go.chess,
                     tables,

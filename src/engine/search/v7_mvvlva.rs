@@ -11,7 +11,7 @@ use crate::{
         },
         tables::{self},
     },
-    util::PieceId,
+    util::{self, PieceId},
 };
 
 const SCORE_INF: i32 = i32::MAX - 1;
@@ -189,28 +189,6 @@ impl<'a> Search<'a> {
             }
 
             if let Some(mv) = mv {
-                // @todo correctness - Zobrist keys can clash, which could generate an invalid move
-                // for the current position. Move insertion is done now for perf, but if sorting is added
-                // we can also remove the move in case its not valid for the current position.
-                #[cfg(debug_assertions)]
-                {
-                    let mut verify_move_list = [0u16; 256];
-
-                    debug_assert!(
-                        (0..self
-                            .chess
-                            .gen_moves_slow(self.tables, &mut verify_move_list))
-                            .any(|mv_index| {
-                                if verify_move_list[mv_index] != mv {
-                                    return false;
-                                }
-                                let mut board_copy = self.chess.clone();
-                                board_copy.make_move_slow(mv, self.tables)
-                                    && !board_copy.in_check_slow(self.tables, !board_copy.b_move())
-                            })
-                    );
-                }
-
                 tt_move = mv;
             }
         }
@@ -225,75 +203,13 @@ impl<'a> Search<'a> {
         let mut alpha = alpha;
 
         if self.pv_trace {
-            // PV Tracing: Generate the PV-move from the last iteration as an extra first move to play.
-            // This makes sure that PV is played first on subsequent searches. Though it means that the move
-            // is possibly played twice for a given board position, it reduces overall nodes searched due to AB cutoffs.
             self.pv_trace = self.pv_length > (self.ply as usize + 1);
             pv_move = self.pv[self.ply as usize];
         }
 
         let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
 
-        move_list[0..move_count].sort_by(|a, b| {
-            if *a == pv_move {
-                return std::cmp::Ordering::Less;
-            }
-            if *b == pv_move {
-                return std::cmp::Ordering::Greater;
-            }
-            if *a == tt_move {
-                return std::cmp::Ordering::Less;
-            }
-            if *b == tt_move {
-                return std::cmp::Ordering::Greater;
-            }
-
-            let a_src_sq = a & 0x3F;
-            let b_src_sq = b & 0x3F;
-
-            let a_dst_sq = (a >> 6) & 0x3F;
-            let b_dst_sq = (b >> 6) & 0x3F;
-
-            // MVV-LVA
-            let spt = self.chess.spt();
-            let a_dst_piece = spt[a_dst_sq as usize] as i8;
-            let b_dst_piece = spt[b_dst_sq as usize] as i8;
-
-            if b_dst_piece < 1 {
-                // b is a quiet move or king capture (invalid move)
-                return std::cmp::Ordering::Less;
-            }
-
-            if a_dst_piece < 1 {
-                // a is a quiet move or king capture (invalid move)
-                return std::cmp::Ordering::Greater;
-            }
-
-            if a_dst_piece < b_dst_piece {
-                // a captures a piece of higher value than b
-                return std::cmp::Ordering::Less;
-            }
-
-            if a_dst_piece > b_dst_piece {
-                // a captures a piece of lower value than b
-                return std::cmp::Ordering::Greater;
-            }
-
-            let a_src_piece = spt[a_src_sq as usize];
-            let b_src_piece = spt[b_src_sq as usize];
-
-            if a_src_piece < b_src_piece {
-                // a moves a piece of higher value than b
-                return std::cmp::Ordering::Greater;
-            }
-
-            if a_src_piece > b_src_piece {
-                // a moves a piece of lower value than b
-                return std::cmp::Ordering::Less;
-            }
-
-            std::cmp::Ordering::Equal
-        });
+        move_list[0..move_count].sort_by(|a, b| self.sort_moves(a, b, pv_move, tt_move));
 
         let mut best_score = -i32::MAX;
         let mut best_move = 0;
@@ -301,16 +217,6 @@ impl<'a> Search<'a> {
 
         self.rt
             .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
-
-        // +~200 Mcycles
-        // for i in 0..move_count {
-        //     // let src_piece = self.chess.piece_at_slow(1 << (move_list[i] & 0x3F));
-        //     // let dst_piece = self.chess.piece_at_slow(1 << ((move_list[i] >> 6) & 0x3F));
-        //     let src_piece = self.chess.spt()[(move_list[i] & 0x3F) as usize];
-        //     let dst_piece = self.chess.spt()[((move_list[i] >> 6) & 0x3F) as usize];
-        //     std::hint::black_box(src_piece);
-        //     std::hint::black_box(dst_piece);
-        // }
 
         let board_copy = self.chess.clone();
 
@@ -399,6 +305,87 @@ impl<'a> Search<'a> {
         );
 
         best_score
+    }
+
+    #[inline(always)]
+    pub fn sort_moves(
+        &mut self,
+        a: &u16,
+        b: &u16,
+        pv_move: u16,
+        tt_move: u16,
+    ) -> std::cmp::Ordering {
+        debug_assert!(*a != 0, "a should not be a null move");
+        debug_assert!(*b != 0, "b should not be a null move");
+
+        if *a == pv_move {
+            return std::cmp::Ordering::Less;
+        }
+        if *b == pv_move {
+            return std::cmp::Ordering::Greater;
+        }
+        if *a == tt_move {
+            return std::cmp::Ordering::Less;
+        }
+        if *b == tt_move {
+            return std::cmp::Ordering::Greater;
+        }
+
+        if (*a & chess::MV_FLAG_CAP) == 0 {
+            // a is a quiet move
+            return std::cmp::Ordering::Greater;
+        }
+
+        if (*b & chess::MV_FLAG_CAP) == 0 {
+            // b is a quiet move
+            return std::cmp::Ordering::Less;
+        }
+
+        let a_src_sq = a & 0x3F;
+        let b_src_sq = b & 0x3F;
+
+        let a_dst_sq = (a >> 6) & 0x3F;
+        let b_dst_sq = (b >> 6) & 0x3F;
+
+        // MVV-LVA
+        let spt = self.chess.spt();
+        let a_dst_piece = spt[a_dst_sq as usize] as i8;
+        let b_dst_piece = spt[b_dst_sq as usize] as i8;
+
+        if a_dst_piece == 0 {
+            // a is an en passant capture
+            return std::cmp::Ordering::Greater;
+        }
+
+        if b_dst_piece == 0 {
+            // b is an en passant capture
+            return std::cmp::Ordering::Less;
+        }
+
+        if a_dst_piece < b_dst_piece {
+            // a captures a piece of higher value than b
+            return std::cmp::Ordering::Less;
+        }
+
+        if a_dst_piece > b_dst_piece {
+            // a captures a piece of lower value than b
+            return std::cmp::Ordering::Greater;
+        }
+
+        let a_src_piece = spt[a_src_sq as usize];
+        let b_src_piece = spt[b_src_sq as usize];
+
+        if a_src_piece < b_src_piece {
+            // a moves a piece of higher value than b
+            return std::cmp::Ordering::Greater;
+        }
+
+        if a_src_piece > b_src_piece {
+            // a moves a piece of lower value than b
+            return std::cmp::Ordering::Less;
+        }
+
+        std::cmp::Ordering::Equal
     }
 
     #[inline(always)]

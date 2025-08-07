@@ -23,7 +23,7 @@ pub mod v3_itdep;
 pub mod v4_pv;
 pub mod v5_tt;
 pub mod v6_psquare;
-pub mod v7_quiesc;
+pub mod v7_mvvlva;
 
 #[cfg(test)]
 mod tests {
@@ -55,10 +55,10 @@ mod tests {
             );
 
             let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(7));
+            params.depth = Some(std::hint::black_box(8));
 
             let mut search_engine =
-                v7_quiesc::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+                v7_mvvlva::Search::new(params, chess, &tables, &mut tt, rt, &rx);
 
             // let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
@@ -77,43 +77,6 @@ mod tests {
                 let end = rdtsc();
                 (mv, end - start)
             };
-
-            // search_engine.__evalstats.sort_by(|a, b| a.1.cmp(&b.1));
-            // println!(
-            //     "eval iterations median: {}",
-            //     search_engine.__evalstats[search_engine.__evalstats.len() / 2].1
-            // );
-            // println!(
-            //     "eval iterations average: {}",
-            //     search_engine
-            //         .__evalstats
-            //         .iter()
-            //         .map(|&x| x.1 as i64)
-            //         .sum::<i64>() as f64
-            //         / search_engine.__evalstats.len() as f64
-            // );
-
-            // for i in 0..6 {
-            //     println!(
-            //         "eval average position has {} pieces of type {:?} (unsided)",
-            //         search_engine
-            //             .__evalstats
-            //             .iter()
-            //             .map(|x| x.0[i] as u64)
-            //             .sum::<u64>()
-            //             / search_engine.__evalstats.len() as u64,
-            //         util::PieceId::from(i)
-            //     )
-            // }
-
-            // println!(
-            //     "eval stats max: {:?}",
-            //     search_engine
-            //         .__evalstats
-            //         .iter()
-            //         .skip(search_engine.__evalstats.len() - 1 - 20)
-            //         .collect::<Vec<_>>()
-            // );
             // Nodes searched: 1666414
             // β-cutoff count: 153069
             // α-raise count: 5747
