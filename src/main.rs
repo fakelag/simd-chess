@@ -54,7 +54,7 @@ fn search_thread(
         match rx_search.recv() {
             Ok(go) => {
                 let debug = go.params.debug;
-                let mut search_engine = search::v8_quiesc::Search::new(
+                let mut search_engine = search::v9_prune::Search::new(
                     go.params,
                     go.chess,
                     tables,
@@ -62,6 +62,14 @@ fn search_thread(
                     go.repetition_table,
                     &go.sig,
                 );
+                // let mut search_engine = search::v8_quiesc::Search::new(
+                //     go.params,
+                //     go.chess,
+                //     tables,
+                //     tt,
+                //     go.repetition_table,
+                //     &go.sig,
+                // );
                 // let mut search_engine = search::v7_mvvlva::Search::new(
                 //     go.params,
                 //     go.chess,

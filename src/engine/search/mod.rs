@@ -25,6 +25,7 @@ pub mod v5_tt;
 pub mod v6_psquare;
 pub mod v7_mvvlva;
 pub mod v8_quiesc;
+pub mod v9_prune;
 
 #[cfg(test)]
 mod tests {
@@ -58,8 +59,7 @@ mod tests {
             let mut params = SearchParams::new();
             params.depth = Some(std::hint::black_box(9));
 
-            let mut search_engine =
-                v8_quiesc::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+            let mut search_engine = v9_prune::Search::new(params, chess, &tables, &mut tt, rt, &rx);
 
             // let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
