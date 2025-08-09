@@ -3,7 +3,7 @@ use crate::{
     matchmaking::matchmaking::{Matchmaking, NEXT_MATCH_DELAY_SECONDS, VersusState},
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
-    util::{self, PieceId, square_name},
+    util::{self, PieceId},
     window,
 };
 
@@ -22,7 +22,10 @@ pub struct ChessUi {
 }
 
 fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
-    let stats = matchmaking.versus_stats();
+    if matchmaking.versus_state == VersusState::Idle {
+        ui.text("Idle... Waiting for something to happen?");
+        return;
+    }
     let white_engine = matchmaking.get_engine_for_side(util::Side::White).unwrap();
     let black_engine = matchmaking.get_engine_for_side(util::Side::Black).unwrap();
 
@@ -41,20 +44,11 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
         .saturating_sub(move_start_elapsed_ms * !matchmaking.board.b_move() as usize);
 
     ui.text(format!(
-        "Matches: {}\n{} {} wins\n{} {} wins\nDraws: {}\nwtime: {}\nbtime: {}",
-        stats.draws + stats.engine1_wins + stats.engine2_wins,
-        stats.engine1_name,
-        stats.engine1_wins,
-        stats.engine2_name,
-        stats.engine2_wins,
-        stats.draws,
+        "wtime: {} ({})\nbtime: {} ({})",
         util::time_format(white_ms as u64),
+        white_engine.path,
         util::time_format(black_ms as u64),
-    ));
-
-    ui.text(format!(
-        "White Engine: {}\nBlack Engine: {}",
-        white_engine.path, black_engine.path
+        black_engine.path
     ));
 
     if let Some(opening) = &matchmaking.versus_current_opening {
@@ -62,6 +56,136 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
     } else {
         ui.text_wrapped("Opening: None");
     }
+
+    ui.separator();
+
+    let matchlist_height = ui.content_region_avail()[1]
+        - unsafe { ui.style().window_padding[1] } * 2.0
+        - unsafe { ui.style().item_spacing[1] } * 4.0;
+
+    ui.child_window("versus_matchlist")
+        .size([-1.0, matchlist_height])
+        .border(false)
+        .build(|| {
+            const DRAW_CLR: [f32; 4] = util::hex_to_f4_color(0xfcfefd, 0.65);
+            const ENG1_WINS_CLR: [f32; 4] = util::hex_to_f4_color(0x2cd376, 1.0);
+            const ENG2_WINS_CLR: [f32; 4] = util::hex_to_f4_color(0xd3762c, 1.0);
+
+            let content_region_avail = ui.content_region_avail();
+            for versus_match in matchmaking.versus_matches.iter() {
+                let stats = &versus_match.stats;
+
+                let engine1_wins = stats.engine1_wins;
+                let draws = stats.draws;
+                let engine2_wins = stats.engine2_wins;
+                let games_played = (engine1_wins + engine2_wins + draws).max(1) as f32;
+
+                let engine_name_pos = ui.cursor_pos();
+
+                ui.text(format!("{}", stats.engine1_name));
+                ui.text_colored(ENG1_WINS_CLR, format!("{}", engine1_wins));
+
+                let engine2_name_length = ui.calc_text_size(&stats.engine2_name)[0];
+                ui.set_cursor_pos([
+                    content_region_avail[0] - engine2_name_length,
+                    engine_name_pos[1],
+                ]);
+
+                ui.text(format!("{}", stats.engine2_name));
+
+                let status_text = format!(
+                    "{} ({}/{})",
+                    if versus_match.is_ongoing {
+                        "In Progress"
+                    } else {
+                        "Done"
+                    },
+                    games_played,
+                    versus_match.num_matches
+                );
+                ui.set_cursor_pos([
+                    content_region_avail[0] / 2.0 - ui.calc_text_size(&status_text)[0] / 2.0,
+                    engine_name_pos[1],
+                ]);
+                ui.text(status_text);
+
+                ui.new_line();
+
+                let engine2_wins_text = format!("{}", engine2_wins);
+                let engine2_wins_length = ui.calc_text_size(&engine2_wins_text)[0];
+                ui.same_line_with_pos(content_region_avail[0] - engine2_wins_length);
+                ui.text_colored(ENG2_WINS_CLR, engine2_wins_text);
+
+                let draws_text = format!("{}", draws);
+                let draws_text_length = ui.calc_text_size(&draws_text)[0];
+                ui.same_line_with_pos(content_region_avail[0] / 2.0 - draws_text_length / 2.0);
+                ui.text_colored(DRAW_CLR, draws_text);
+
+                let engine1_wins_length =
+                    (engine1_wins as f32 / games_played) * content_region_avail[0];
+
+                let engine2_wins_length =
+                    (engine2_wins as f32 / games_played) * content_region_avail[0];
+
+                let draw_list = ui.get_window_draw_list();
+
+                let cursor_pos = ui.cursor_screen_pos();
+
+                // Background / draw bar
+                draw_list
+                    .add_rect(
+                        cursor_pos,
+                        [
+                            cursor_pos[0] + content_region_avail[0],
+                            cursor_pos[1] + 12.0,
+                        ],
+                        DRAW_CLR,
+                    )
+                    .filled(true)
+                    .build();
+
+                draw_list
+                    .add_rect(
+                        cursor_pos,
+                        [cursor_pos[0] + engine1_wins_length, cursor_pos[1] + 12.0],
+                        ENG1_WINS_CLR,
+                    )
+                    .filled(true)
+                    .build();
+
+                draw_list
+                    .add_rect(
+                        [
+                            cursor_pos[0] + (content_region_avail[0] - engine2_wins_length),
+                            cursor_pos[1],
+                        ],
+                        [
+                            cursor_pos[0] + content_region_avail[0],
+                            cursor_pos[1] + 12.0,
+                        ],
+                        ENG2_WINS_CLR,
+                    )
+                    .filled(true)
+                    .build();
+
+                ui.set_cursor_screen_pos([cursor_pos[0], cursor_pos[1] + 12.0]);
+                ui.new_line();
+            }
+
+            if !matchmaking.versus_queue.is_empty() {
+                ui.separator();
+                ui.text("Upcoming Matches:");
+                for (index, match_info) in matchmaking.versus_queue.iter().enumerate() {
+                    ui.text(format!(
+                        "{}. {} vs {} ({} games)",
+                        index + 1,
+                        match_info.stats.engine1_name,
+                        match_info.stats.engine2_name,
+                        match_info.num_matches
+                    ));
+                }
+            }
+        });
 }
 
 impl ChessUi {
@@ -87,12 +211,12 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v6_psquare_eg.exe"),
+                Some("v8_quiesc_v1.exe"),
                 None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v6_psquare2.exe"),
+                Some("v7_mvvlva.exe"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(
@@ -121,7 +245,7 @@ impl ChessUi {
             .size([display_w, display_h], imgui::Condition::Always)
             .build(|| {
                 let [size_w, _] = ui.content_region_avail();
-                let board_size = 0.7;
+                let board_size = 0.65;
 
                 let var_window_padding =
                     ui.push_style_var(imgui::StyleVar::WindowPadding([0.0, 0.0]));
@@ -335,78 +459,86 @@ impl ChessUi {
 
                     ui.separator();
 
+                    self.draw_match_queue_ui(&ui);
+
+                    ui.separator();
+
                     // if let Some(hovering_sq_index) = hovering_sq_index {
                     //     ui.separator();
                     // }
 
                     match self.matchmaking.versus_state {
-                        VersusState::Idle => {
-                            self.input_white_engine
-                                .draw(Some("White Engine"), ui, "w_engine_inp");
-                            self.input_black_engine
-                                .draw(Some("Black Engine"), ui, "b_engine_inp");
-                            self.input_num_games
-                                .draw(Some("Number of games"), ui, "num_games_inp");
-
-                            ui.checkbox("Start paused", &mut self.input_start_paused);
-                            ui.checkbox("Use opening book", &mut self.input_use_opening_book);
-
-                            if ui.button("Start new Versus") {
-                                if let Err(err) = self.matchmaking.versus_start(
-                                    &self.input_white_engine.buf,
-                                    &self.input_black_engine.buf,
-                                    self.input_num_games.buf.parse().unwrap_or(1),
-                                    self.input_start_paused,
-                                    self.input_use_opening_book,
-                                ) {
-                                    eprintln!("Failed to spawn engines: {}", err);
-                                }
-                            }
-                        }
+                        VersusState::Idle => {}
                         VersusState::InProgress => {
-                            ui.text("Versus match in progress");
-                            draw_versus_stats(&ui, &self.matchmaking);
-
+                            let stats = self.matchmaking.versus_stats();
+                            ui.text(format!(
+                                "Versus match in progress (game {} of {})",
+                                (stats.stats.engine1_wins
+                                    + stats.stats.engine2_wins
+                                    + stats.stats.draws)
+                                    + 1,
+                                stats.num_matches
+                            ));
+                            if ui.button("End Versus") {
+                                self.matchmaking.versus_reset();
+                            }
+                            ui.same_line();
                             if ui.button("Pause Versus") {
                                 self.matchmaking.versus_pause();
                             }
+                        }
+                        VersusState::Paused => {
+                            let stats = self.matchmaking.versus_stats();
+                            ui.text(format!(
+                                "Versus match paused (game {} of {})",
+                                (stats.stats.engine1_wins
+                                    + stats.stats.engine2_wins
+                                    + stats.stats.draws)
+                                    + 1,
+                                stats.num_matches
+                            ));
                             if ui.button("End Versus") {
                                 self.matchmaking.versus_reset();
                             }
-                        }
-                        VersusState::Paused => {
-                            ui.text("Versus match paused");
-                            draw_versus_stats(&ui, &self.matchmaking);
-
+                            ui.same_line();
                             if ui.button("Resume Versus") {
                                 self.matchmaking.versus_resume();
                             }
+                            ui.same_line();
                             if ui.button("Next Move") {
                                 self.matchmaking.versus_step();
                             }
-                            if ui.button("End Versus") {
-                                self.matchmaking.versus_reset();
-                            }
                         }
                         VersusState::Done => {
-                            ui.text("Versus match done");
-                            draw_versus_stats(&ui, &self.matchmaking);
+                            let stats = self.matchmaking.versus_stats();
+                            ui.text(format!(
+                                "Versus match done (game {} of {})",
+                                stats.stats.engine1_wins
+                                    + stats.stats.engine2_wins
+                                    + stats.stats.draws,
+                                stats.num_matches
+                            ));
                             if ui.button("Reset Versus") {
                                 self.matchmaking.versus_reset();
                             }
                         }
                         VersusState::NextMatch(ended_at, _) => {
-                            draw_versus_stats(&ui, &self.matchmaking);
-                            ui.separator();
                             ui.text(format!(
                                 "Next match starting in {} seconds",
                                 NEXT_MATCH_DELAY_SECONDS
                                     .saturating_sub(ended_at.elapsed().as_secs())
                             ));
+                            if ui.button("End Versus") {
+                                self.matchmaking.versus_reset();
+                            }
+                            ui.same_line();
+                            if ui.button("Pause Versus") {
+                                self.matchmaking.versus_pause();
+                            }
                         }
                     }
 
-                    ui.separator();
+                    draw_versus_stats(&ui, &self.matchmaking);
 
                     match self.matchmaking.board.check_game_state(
                         &self.matchmaking.tables,
@@ -512,5 +644,37 @@ impl ChessUi {
                     });
                 }
             });
+    }
+
+    fn draw_match_queue_ui(&mut self, ui: &&mut imgui::Ui) {
+        ui.group(|| {
+            self.input_white_engine
+                .draw(Some("White Engine"), ui, "w_engine_inp");
+            self.input_black_engine
+                .draw(Some("Black Engine"), ui, "b_engine_inp");
+            self.input_num_games
+                .draw(Some("Number of games"), ui, "num_games_inp");
+
+            ui.checkbox("Use opening book", &mut self.input_use_opening_book);
+            ui.checkbox("Start paused", &mut self.input_start_paused);
+
+            if ui.button("Queue Versus Match") {
+                if let Err(err) = self.matchmaking.versus_start(
+                    &self.input_white_engine.buf,
+                    &self.input_black_engine.buf,
+                    self.input_num_games.buf.parse().unwrap_or(1),
+                    self.input_start_paused,
+                    self.input_use_opening_book,
+                ) {
+                    eprintln!("Failed to spawn engines: {}", err);
+                }
+            }
+            ui.same_line();
+            if ui.button("Clear Matches") {
+                self.matchmaking.versus_reset();
+                self.matchmaking.versus_queue.clear();
+                self.matchmaking.versus_matches.clear();
+            }
+        });
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::matchmaking::openings::OpeningBook;
 use crate::matchmaking::openings::OpeningMoves;
 use crate::matchmaking::openings::load_openings_from_dir;
@@ -25,6 +27,7 @@ enum EnginePollResult {
     OutOfTime,
 }
 
+#[derive(Debug, Clone)]
 pub struct VersusStats {
     pub engine1_name: String,
     pub engine2_name: String,
@@ -33,21 +36,29 @@ pub struct VersusStats {
     pub draws: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct VersusMatch {
+    pub stats: VersusStats,
+    pub num_matches: usize,
+    pub start_paused: bool,
+    pub use_opening_book: bool,
+    pub is_ongoing: bool,
+}
+
 pub struct Matchmaking {
     pub fen: String,
     pub board: chess::ChessGame,
     pub tables: tables::Tables,
     pub legal_moves: Vec<u16>,
+
     moves: Vec<String>,
     engines: [Option<EngineProcess>; 2],
     engine_white: usize,
     is_startpos: bool,
     engine_command_buf: String,
-
     opening_book: OpeningBook,
 
     pub versus_current_opening: Option<OpeningMoves>,
-
     pub versus_state: VersusState,
     pub versus_matches_left: usize,
     pub versus_draws: usize,
@@ -55,6 +66,9 @@ pub struct Matchmaking {
     pub versus_wtime_ms: usize,
     pub versus_move_start_time: Option<std::time::Instant>,
     pub versus_opening_book_after_matches: Option<u8>,
+
+    pub versus_queue: VecDeque<VersusMatch>,
+    pub versus_matches: VecDeque<VersusMatch>,
 }
 
 impl Matchmaking {
@@ -79,6 +93,9 @@ impl Matchmaking {
             versus_wtime_ms: 0,
             versus_move_start_time: None,
             versus_opening_book_after_matches: None,
+
+            versus_queue: VecDeque::new(),
+            versus_matches: VecDeque::new(),
         };
 
         mm.load_fen(fen)?;
@@ -230,26 +247,30 @@ impl Matchmaking {
             }
         }
 
-        self.versus_matches_left -= 1;
         self.reset_timers();
+        self.versus_matches_left -= 1;
 
-        if self.versus_matches_left == 0 {
-            self.versus_state = VersusState::Done;
-            let engine1 = self.engines[0].as_ref().unwrap();
-            let engine2 = self.engines[1].as_ref().unwrap();
+        let engine1 = self.engines[0].as_ref().unwrap();
+        let engine2 = self.engines[1].as_ref().unwrap();
 
-            println!(
-                "Versus match ended: {} {} wins, {} {} wins, {} draws",
-                engine1.versus_wins,
-                engine1.path,
-                engine2.versus_wins,
-                engine2.path,
-                self.versus_draws
-            );
+        let current_match = self.versus_matches.front_mut().unwrap();
+        current_match.stats.engine1_wins = engine1.versus_wins;
+        current_match.stats.engine2_wins = engine2.versus_wins;
+        current_match.stats.draws = self.versus_draws;
+
+        if self.versus_matches_left > 0 {
+            self.versus_state = VersusState::NextMatch(std::time::Instant::now(), start_paused);
             return true;
         }
 
-        self.versus_state = VersusState::NextMatch(std::time::Instant::now(), start_paused);
+        self.versus_state = VersusState::Done;
+        println!(
+            "Versus match ended: {} {} wins, {} {} wins, {} draws",
+            engine1.versus_wins, engine1.path, engine2.versus_wins, engine2.path, self.versus_draws
+        );
+
+        self.next_versus().unwrap();
+
         return true;
     }
 
@@ -261,27 +282,69 @@ impl Matchmaking {
         start_paused: bool,
         use_opening_book: bool,
     ) -> anyhow::Result<()> {
-        if self.versus_state != VersusState::Idle {
-            panic!("Cannot start versus mode when already in progress");
+        self.versus_queue.push_back(VersusMatch {
+            stats: VersusStats {
+                engine1_name: engine_white.to_string(),
+                engine2_name: engine_black.to_string(),
+                engine1_wins: 0,
+                engine2_wins: 0,
+                draws: 0,
+            },
+            num_matches,
+            start_paused,
+            use_opening_book,
+            is_ongoing: false,
+        });
+
+        if self.versus_state == VersusState::Idle || self.versus_state == VersusState::Done {
+            self.next_versus()?;
+        } else {
+            println!("Versus match {} vs {} queued", engine_white, engine_black);
         }
+
+        Ok(())
+    }
+
+    pub fn next_versus(&mut self) -> anyhow::Result<()> {
+        let mut next_versus = match self.versus_queue.pop_front() {
+            Some(v) => v,
+            None => {
+                self.versus_matches.front_mut().and_then(|m| {
+                    m.is_ongoing = false;
+                    Some(m)
+                });
+                println!("No more matches in the queue");
+                return Ok(());
+            }
+        };
 
         self.versus_reset();
 
-        self.engines[0] = Some(EngineProcess::new(engine_white)?);
-        self.engines[1] = Some(EngineProcess::new(engine_black)?);
+        self.engines[0] = Some(EngineProcess::new(&next_versus.stats.engine1_name)?);
+        self.engines[1] = Some(EngineProcess::new(&next_versus.stats.engine2_name)?);
         self.engine_white = 0;
-        self.versus_opening_book_after_matches = if use_opening_book && self.is_startpos {
+        self.versus_opening_book_after_matches = if next_versus.use_opening_book && self.is_startpos
+        {
             // Use openings after playing 2 games from startpos
             Some(2)
         } else {
             None
         };
-        self.versus_matches_left = num_matches;
+        self.versus_matches_left = next_versus.num_matches;
 
         self.load_openings()?;
 
+        let start_paused = next_versus.start_paused;
+        next_versus.is_ongoing = true;
+        self.versus_matches.front_mut().and_then(|m| {
+            m.is_ongoing = false;
+            Some(m)
+        });
+        self.versus_matches.push_front(next_versus);
+
         if !self.on_new_match() {
             self.versus_matches_left = 0;
+            self.versus_matches[0].is_ongoing = false;
             self.versus_state = VersusState::Done;
         } else {
             if start_paused {
@@ -380,17 +443,23 @@ impl Matchmaking {
         self.engines[engine_white_index].as_mut()
     }
 
-    pub fn versus_stats(&self) -> VersusStats {
-        let engine1 = self.engines[0].as_ref().unwrap();
-        let engine2 = self.engines[1].as_ref().unwrap();
-
-        VersusStats {
-            engine1_name: engine1.path.clone(),
-            engine2_name: engine2.path.clone(),
-            engine1_wins: engine1.versus_wins,
-            engine2_wins: engine2.versus_wins,
-            draws: self.versus_draws,
-        }
+    pub fn versus_stats(&self) -> VersusMatch {
+        self.versus_matches.front().map_or(
+            VersusMatch {
+                stats: VersusStats {
+                    engine1_name: "<none>".to_string(),
+                    engine2_name: "<none>".to_string(),
+                    engine1_wins: 0,
+                    engine2_wins: 0,
+                    draws: 0,
+                },
+                num_matches: 0,
+                start_paused: false,
+                use_opening_book: false,
+                is_ongoing: false,
+            },
+            |match_info| match_info.clone(),
+        )
     }
 
     fn load_openings(&mut self) -> anyhow::Result<()> {
@@ -411,16 +480,11 @@ impl Matchmaking {
     }
 
     fn on_new_match(&mut self) -> bool {
-        let stats = self.versus_stats();
-        let match_num = stats.draws + stats.engine1_wins + stats.engine2_wins + 1;
+        let current_match = self.versus_matches.front().unwrap();
+
         println!(
-            "Starting match {}: {} {} wins, {} {} wins, draws: {}",
-            match_num,
-            stats.engine1_name,
-            stats.engine1_wins,
-            stats.engine2_name,
-            stats.engine2_wins,
-            stats.draws
+            "Starting a new match match between {} vs {}",
+            current_match.stats.engine1_name, current_match.stats.engine2_name,
         );
 
         match self.versus_opening_book_after_matches {

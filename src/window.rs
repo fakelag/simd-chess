@@ -53,7 +53,7 @@ impl AppWindow {
             ..Default::default()
         });
 
-        let window_size = LogicalSize::new(900.0, 700.0);
+        let window_size = LogicalSize::new(1224.0, 840.0);
 
         let window = {
             let attributes = Window::default_attributes().with_inner_size(window_size);
