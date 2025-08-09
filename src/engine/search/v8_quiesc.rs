@@ -210,19 +210,22 @@ impl<'a> Search<'a> {
             }
         }
 
+        let mut bound_type = BoundType::UpperBound;
+        let mut alpha = alpha;
+        let mut depth = depth;
+
         if depth == 0 {
             debug_assert!(!self.pv_trace);
             return self.quiescence(alpha, beta, self.ply as u32);
         }
 
-        let mut bound_type = BoundType::UpperBound;
-
-        let mut alpha = alpha;
-
         if self.pv_trace {
             self.pv_trace = self.pv_length > (self.ply as usize + 1);
             pv_move = self.pv[self.ply as usize];
         }
+
+        let in_check = self.chess.in_check_slow(self.tables, self.chess.b_move());
+        depth += in_check as u8;
 
         let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
 
@@ -305,7 +308,7 @@ impl<'a> Search<'a> {
         self.rt.pop_position();
 
         if !has_legal_moves {
-            if self.chess.in_check_slow(self.tables, self.chess.b_move()) {
+            if in_check {
                 return -SCORE_INF + self.ply as i32;
             }
 
@@ -363,9 +366,6 @@ impl<'a> Search<'a> {
 
         let mut best_score = static_eval;
 
-        // @todo - Handling checks in quiesc search
-        // let mut has_legal_moves = false;
-
         let board_copy = self.chess.clone();
 
         for i in 0..move_count {
@@ -382,8 +382,6 @@ impl<'a> Search<'a> {
                 self.chess = board_copy;
                 continue;
             }
-
-            // has_legal_moves = true;
 
             self.ply += 1;
 
@@ -411,15 +409,6 @@ impl<'a> Search<'a> {
                 }
             }
         }
-
-        // if !has_legal_moves {
-        //     if self.chess.in_check_slow(self.tables, self.chess.b_move()) {
-        //         return -SCORE_INF + self.ply as i32;
-        //     }
-
-        //     // Stalemate
-        //     return 0;
-        // }
 
         best_score
     }
