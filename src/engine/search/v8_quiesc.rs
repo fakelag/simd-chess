@@ -54,7 +54,6 @@ impl PvTable {
 }
 
 pub struct Search<'a> {
-    params: SearchParams,
     chess: chess::ChessGame,
     tables: &'a tables::Tables,
     sig: &'a AbortSignal,
@@ -70,16 +69,21 @@ pub struct Search<'a> {
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
 
+    params: Box<SearchParams>,
+
     score: i32,
     b_cut_count: u64,
     a_raise_count: u64,
     node_count: u64,
+    quiet_nodes: u64,
+    quiet_depth: u32,
+    depth: u8,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
     fn search(&mut self) -> u16 {
-        let mut best_score = -i32::MAX;
         let mut node_count = 0;
+        let mut quiet_nodes = 0;
 
         let max_depth = self.params.depth.unwrap_or(63);
 
@@ -92,16 +96,17 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
                 break 'outer;
             }
 
+            quiet_nodes = self.quiet_nodes;
             node_count = self.node_count;
             self.pv_length = self.pv_table.lengths[0] as usize;
             self.pv[0..self.pv_length].copy_from_slice(&self.pv_table.moves[0][0..self.pv_length]);
             self.pv_trace = self.pv_length > 0;
-
-            best_score = score;
+            self.depth = depth;
+            self.score = score;
         }
 
         self.node_count = node_count;
-        self.score = best_score;
+        self.quiet_nodes = quiet_nodes;
 
         self.pv[0]
     }
@@ -126,9 +131,11 @@ impl<'a> Search<'a> {
     ) -> Search<'a> {
         let mut s = Search {
             sig,
-            chess: (chess),
-            params,
+            chess: chess,
+            params: Box::new(params),
             tables,
+            quiet_nodes: 0,
+            quiet_depth: 0,
             node_count: 0,
             a_raise_count: 0,
             b_cut_count: 0,
@@ -140,6 +147,7 @@ impl<'a> Search<'a> {
                 pv_table.write(PvTable::new());
                 pv_table.assume_init()
             },
+            depth: 0,
             pv: [0; PV_DEPTH],
             pv_length: 0,
             pv_trace: false,
@@ -158,6 +166,15 @@ impl<'a> Search<'a> {
     }
     pub fn a_raise_count(&self) -> u64 {
         self.a_raise_count
+    }
+    pub fn get_depth(&self) -> u8 {
+        self.depth
+    }
+    pub fn get_quiet_depth(&self) -> u32 {
+        self.quiet_depth
+    }
+    pub fn get_quiet_nodes(&self) -> u64 {
+        self.quiet_nodes
     }
 
     fn go(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
@@ -195,7 +212,7 @@ impl<'a> Search<'a> {
 
         if depth == 0 {
             debug_assert!(!self.pv_trace);
-            return self.evaluate();
+            return self.quiescence(alpha, beta, self.ply as u32);
         }
 
         let mut bound_type = BoundType::UpperBound;
@@ -209,7 +226,7 @@ impl<'a> Search<'a> {
 
         let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
 
-        move_list[0..move_count].sort_by(|a, b| self.sort_moves(a, b, pv_move, tt_move));
+        move_list[0..move_count].sort_by(|a, b| self.sort_moves_mvvlva(a, b, pv_move, tt_move));
 
         let mut best_score = -i32::MAX;
         let mut best_move = 0;
@@ -307,8 +324,108 @@ impl<'a> Search<'a> {
         best_score
     }
 
+    fn quiescence(&mut self, alpha: i32, beta: i32, start_ply: u32) -> i32 {
+        debug_assert!(self.ply > 0);
+
+        self.node_count += 1;
+        self.quiet_nodes += 1;
+        self.quiet_depth = self.quiet_depth.max(self.ply as u32 - start_ply);
+
+        if self.node_count & 0x7FF == 0 && self.check_sigabort() {
+            self.is_stopping = true;
+            return 0;
+        }
+
+        let static_eval = self.evaluate();
+
+        let mut alpha = alpha;
+
+        // If the current board position is bad enough to cause a
+        // cutoff higher up, save the time and return it immediately
+        if static_eval >= beta {
+            return static_eval;
+        }
+
+        // If it is better than alpha, update alpha bound to it to cause more cuts, assuming
+        // that making any move in this position will either be the same or better for the
+        // playing side
+        if static_eval > alpha {
+            alpha = static_eval;
+        }
+
+        let mut move_list = [0u16; 256];
+
+        let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
+        move_list[0..move_count].sort_by(|a, b| {
+            // Moves are sorted by MVV-LVA, meaning that all captures are placed at the start of the list
+            self.sort_moves_mvvlva(a, b, 0, 0)
+        });
+
+        let mut best_score = static_eval;
+
+        // @todo - Handling checks in quiesc search
+        // let mut has_legal_moves = false;
+
+        let board_copy = self.chess.clone();
+
+        for i in 0..move_count {
+            let mv = move_list[i];
+
+            if (mv & chess::MV_FLAG_CAP) == 0 {
+                break;
+            }
+
+            let is_valid_move = self.chess.make_move_slow(mv, self.tables)
+                && !self.chess.in_check_slow(self.tables, !self.chess.b_move());
+
+            if !is_valid_move {
+                self.chess = board_copy;
+                continue;
+            }
+
+            // has_legal_moves = true;
+
+            self.ply += 1;
+
+            let score = -self.quiescence(-beta, -alpha, start_ply);
+
+            self.ply -= 1;
+
+            self.chess = board_copy;
+
+            if self.is_stopping {
+                return 0;
+            }
+
+            if score > best_score {
+                best_score = score;
+
+                if score >= beta {
+                    // self.b_cut_count += 1;
+                    return score;
+                }
+
+                if score > alpha {
+                    // self.a_raise_count += 1;
+                    alpha = score;
+                }
+            }
+        }
+
+        // if !has_legal_moves {
+        //     if self.chess.in_check_slow(self.tables, self.chess.b_move()) {
+        //         return -SCORE_INF + self.ply as i32;
+        //     }
+
+        //     // Stalemate
+        //     return 0;
+        // }
+
+        best_score
+    }
+
     #[inline(always)]
-    pub fn sort_moves(
+    pub fn sort_moves_mvvlva(
         &mut self,
         a: &u16,
         b: &u16,

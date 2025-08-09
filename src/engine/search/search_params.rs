@@ -10,6 +10,7 @@ pub struct SearchParams {
     pub mate: Option<u32>,
     pub movetime: Option<u32>,
     pub infinite: bool,
+    pub debug: bool,
 }
 
 impl SearchParams {
@@ -25,6 +26,7 @@ impl SearchParams {
             mate: None,
             movetime: None,
             infinite: false,
+            debug: false,
         }
     }
 }

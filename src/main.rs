@@ -29,7 +29,6 @@ struct GoCommand {
     chess: chess::ChessGame,
     sig: AbortSignal,
     repetition_table: search::repetition::RepetitionTable,
-    debug: bool,
 }
 
 fn chess_ui() -> anyhow::Result<()> {
@@ -54,7 +53,8 @@ fn search_thread(
     loop {
         match rx_search.recv() {
             Ok(go) => {
-                let mut search_engine = search::v7_mvvlva::Search::new(
+                let debug = go.params.debug;
+                let mut search_engine = search::v8_quiesc::Search::new(
                     go.params,
                     go.chess,
                     tables,
@@ -62,6 +62,14 @@ fn search_thread(
                     go.repetition_table,
                     &go.sig,
                 );
+                // let mut search_engine = search::v7_mvvlva::Search::new(
+                //     go.params,
+                //     go.chess,
+                //     tables,
+                //     tt,
+                //     go.repetition_table,
+                //     &go.sig,
+                // );
 
                 // let mut search_engine = search::v6_psquare::Search::new(
                 //     go.params,
@@ -92,12 +100,13 @@ fn search_thread(
 
                 let best_move = search_engine.search();
 
-                if go.debug {
+                if debug {
                     let elapsed = go.start_time.elapsed();
                     println!(
-                        "info searched {} nodes in {} with bestmove {} ({:016b}) score {}",
+                        "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {}",
                         search_engine.num_nodes_searched(),
                         util::time_format(elapsed.as_millis() as u64),
+                        search_engine.get_depth(),
                         util::move_string(best_move),
                         best_move,
                         search_engine.search_score()
@@ -210,7 +219,8 @@ fn chess_uci(
                     timeout_handle: None,
                 };
 
-                let search_params = search_params::SearchParams::from_iter(input);
+                let mut search_params = search_params::SearchParams::from_iter(input);
+                search_params.debug = debug;
 
                 tx_search.send(GoCommand {
                     start_time,
@@ -222,7 +232,6 @@ fn chess_uci(
                         .take()
                         .expect("Expected position command to be sent before go"),
                     sig: rx_abort,
-                    debug,
                 })?;
 
                 // @todo - Calc thinking time

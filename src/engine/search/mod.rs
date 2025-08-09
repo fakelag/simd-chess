@@ -24,6 +24,7 @@ pub mod v4_pv;
 pub mod v5_tt;
 pub mod v6_psquare;
 pub mod v7_mvvlva;
+pub mod v8_quiesc;
 
 #[cfg(test)]
 mod tests {
@@ -55,10 +56,10 @@ mod tests {
             );
 
             let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(8));
+            params.depth = Some(std::hint::black_box(9));
 
             let mut search_engine =
-                v7_mvvlva::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+                v8_quiesc::Search::new(params, chess, &tables, &mut tt, rt, &rx);
 
             // let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
@@ -80,9 +81,18 @@ mod tests {
             // Nodes searched: 1666414
             // β-cutoff count: 153069
             // α-raise count: 5747
-            println!("Nodes searched: {}", search_engine.num_nodes_searched());
+            println!(
+                "Nodes searched: {} ({} quiescence / {:.02}%)",
+                search_engine.num_nodes_searched(),
+                search_engine.get_quiet_nodes(),
+                (search_engine.get_quiet_nodes() as f64
+                    / search_engine.num_nodes_searched() as f64)
+                    * 100.0
+            );
             println!("β-cutoff count: {}", search_engine.b_cut_count());
             println!("α-raise count: {}", search_engine.a_raise_count());
+            println!("depth: {}", search_engine.get_depth());
+            println!("q-depth: {}", search_engine.get_quiet_depth());
             println!(
                 "PV: {:?}",
                 search_engine
