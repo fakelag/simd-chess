@@ -228,7 +228,6 @@ impl<'a> Search<'a> {
         depth += in_check as u8;
 
         let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
-
         move_list[0..move_count].sort_by(|a, b| self.sort_moves_mvvlva(a, b, pv_move, tt_move));
 
         let mut best_score = -i32::MAX;
@@ -455,8 +454,10 @@ impl<'a> Search<'a> {
 
         // MVV-LVA
         let spt = self.chess.spt();
-        let a_dst_piece = spt[a_dst_sq as usize] as i8;
-        let b_dst_piece = spt[b_dst_sq as usize] as i8;
+        let a_dst_piece = spt[a_dst_sq as usize];
+        let b_dst_piece = spt[b_dst_sq as usize];
+        let a_src_piece = spt[a_src_sq as usize];
+        let b_src_piece = spt[b_src_sq as usize];
 
         if a_dst_piece == 0 {
             // a is an en passant capture
@@ -477,9 +478,6 @@ impl<'a> Search<'a> {
             // a captures a piece of lower value than b
             return std::cmp::Ordering::Greater;
         }
-
-        let a_src_piece = spt[a_src_sq as usize];
-        let b_src_piece = spt[b_src_sq as usize];
 
         if a_src_piece < b_src_piece {
             // a moves a piece of higher value than b
