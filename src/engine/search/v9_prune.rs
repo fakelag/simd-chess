@@ -178,16 +178,18 @@ impl<'a> Search<'a> {
     }
 
     fn go(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
-        // @perf - Can rust reason ply < PV_DEPTH without recursive assertions
-        assert!(self.ply < PV_DEPTH as u8);
-
         self.node_count += 1;
-        self.pv_table.lengths[self.ply as usize] = 0;
 
         if self.node_count & 0x7FF == 0 && self.check_sigabort() {
             self.is_stopping = true;
             return 0;
         }
+
+        if self.ply >= PV_DEPTH as u8 - 1 {
+            return self.quiescence(alpha, beta, self.ply as u32);
+        }
+
+        self.pv_table.lengths[self.ply as usize] = 0;
 
         let mut pv_move = 0; // Null move
         let mut tt_move = 0; // Null move
@@ -327,8 +329,6 @@ impl<'a> Search<'a> {
     }
 
     fn quiescence(&mut self, alpha: i32, beta: i32, start_ply: u32) -> i32 {
-        debug_assert!(self.ply > 0);
-
         self.node_count += 1;
         self.quiet_nodes += 1;
         self.quiet_depth = self.quiet_depth.max(self.ply as u32 - start_ply);
