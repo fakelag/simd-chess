@@ -726,48 +726,16 @@ impl<'a> Search<'a> {
             let a_src_piece = *spt.get_unchecked(a_src_sq as usize);
             let b_src_piece = *spt.get_unchecked(b_src_sq as usize);
 
-            //     let a_score = *MVV_LVA_SCORES
-            //         .get_unchecked(a_dst_piece as usize)
-            //         .get_unchecked(a_src_piece as usize);
+            let a_score = *MVV_LVA_SCORES
+                .get_unchecked(a_dst_piece as usize)
+                .get_unchecked(a_src_piece as usize);
 
-            //     let b_score = *MVV_LVA_SCORES
-            //         .get_unchecked(a_dst_piece as usize)
-            //         .get_unchecked(a_src_piece as usize);
+            let b_score = *MVV_LVA_SCORES
+                .get_unchecked(b_dst_piece as usize)
+                .get_unchecked(b_src_piece as usize);
 
-            //     return b_score.cmp(&a_score);
-
-            if a_dst_piece == 0 {
-                // a is an en passant capture
-                return std::cmp::Ordering::Greater;
-            }
-
-            if b_dst_piece == 0 {
-                // b is an en passant capture
-                return std::cmp::Ordering::Less;
-            }
-
-            if a_dst_piece < b_dst_piece {
-                // a captures a piece of higher value than b
-                return std::cmp::Ordering::Less;
-            }
-
-            if a_dst_piece > b_dst_piece {
-                // a captures a piece of lower value than b
-                return std::cmp::Ordering::Greater;
-            }
-
-            if a_src_piece < b_src_piece {
-                // a moves a piece of higher value than b
-                return std::cmp::Ordering::Greater;
-            }
-
-            if a_src_piece > b_src_piece {
-                // a moves a piece of lower value than b
-                return std::cmp::Ordering::Less;
-            }
+            return a_score.cmp(&b_score);
         }
-
-        std::cmp::Ordering::Equal
     }
 
     #[inline(always)]
