@@ -54,7 +54,7 @@ fn search_thread(
         match rx_search.recv() {
             Ok(go) => {
                 let debug = go.params.debug;
-                let mut search_engine = search::v9_prune::Search::new(
+                let mut search_engine = search::v10_mvcache::Search::new(
                     go.params,
                     go.chess,
                     tables,
@@ -62,6 +62,14 @@ fn search_thread(
                     go.repetition_table,
                     &go.sig,
                 );
+                // let mut search_engine = search::v9_prune::Search::new(
+                //     go.params,
+                //     go.chess,
+                //     tables,
+                //     tt,
+                //     go.repetition_table,
+                //     &go.sig,
+                // );
                 // let mut search_engine = search::v8_quiesc::Search::new(
                 //     go.params,
                 //     go.chess,
@@ -110,14 +118,21 @@ fn search_thread(
 
                 if debug {
                     let elapsed = go.start_time.elapsed();
+                    let search_nodes = search_engine.num_nodes_searched();
+                    let search_depth = search_engine.get_depth();
+                    let search_score = search_engine.search_score();
+
+                    let tt_stats = tt.calc_stats();
+
                     println!(
-                        "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {}",
-                        search_engine.num_nodes_searched(),
+                        "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy)",
+                        search_nodes,
                         util::time_format(elapsed.as_millis() as u64),
-                        search_engine.get_depth(),
+                        search_depth,
                         util::move_string(best_move),
                         best_move,
-                        search_engine.search_score()
+                        search_score,
+                        (tt_stats.1 + tt_stats.2 + tt_stats.3) as f64 / (tt_stats.0 as f64) * 100.0
                     );
                 }
 

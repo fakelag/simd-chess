@@ -17,6 +17,8 @@ pub trait SearchStrategy<'a> {
 pub mod repetition;
 pub mod search_params;
 pub mod transposition;
+
+pub mod v10_mvcache;
 pub mod v1_negamax;
 pub mod v2_alphabeta;
 pub mod v3_itdep;
@@ -41,8 +43,8 @@ mod tests {
         let tables = tables::Tables::new();
 
         let (tx, rx) = crossbeam::channel::unbounded();
-        // let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
-        let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
+        let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
+        // let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
         // let test_fen = util::FEN_STARTPOS;
 
         let bench = || {
@@ -57,9 +59,16 @@ mod tests {
             );
 
             let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(9));
+            params.depth = Some(std::hint::black_box(10));
 
-            let mut search_engine = v9_prune::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+            let mut search_engine =
+                v10_mvcache::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+
+            // let tx = tx.clone();
+            // std::thread::spawn(move || {
+            //     std::thread::sleep(std::time::Duration::from_millis(100));
+            //     tx.send(SigAbort {}).unwrap();
+            // });
 
             // let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
@@ -78,9 +87,7 @@ mod tests {
                 let end = rdtsc();
                 (mv, end - start)
             };
-            // Nodes searched: 1666414
-            // β-cutoff count: 153069
-            // α-raise count: 5747
+
             println!(
                 "Nodes searched: {} ({} quiescence / {:.02}%)",
                 search_engine.num_nodes_searched(),
@@ -90,6 +97,10 @@ mod tests {
                     * 100.0
             );
             println!("β-cutoff count: {}", search_engine.b_cut_count());
+            // println!(
+            //     "β-cutoff null move count: {}",
+            //     search_engine.b_cut_null_count()
+            // );
             println!("α-raise count: {}", search_engine.a_raise_count());
             println!("depth: {}", search_engine.get_depth());
             println!("q-depth: {}", search_engine.get_quiet_depth());
