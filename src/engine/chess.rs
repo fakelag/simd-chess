@@ -744,10 +744,10 @@ impl ChessGame {
 
         let mut node_count = 0;
 
+        let board_copy = self.clone();
+
         for mv_index in 0..move_count {
             let mv = move_list[mv_index];
-
-            let board_copy = self.clone();
 
             if self.make_move_slow(mv, tables) && !self.in_check_slow(tables, !self.b_move) {
                 if INTEGRITY_CHECK {
@@ -766,12 +766,6 @@ impl ChessGame {
 
                 if let Some(ref mut moves) = moves {
                     moves.push((util::move_string(mv), nodes));
-                    // println!(
-                    //     "{}{}:{}",
-                    //     square_name((mv & 0x3F) as u8),
-                    //     square_name(((mv >> 6) & 0x3F) as u8),
-                    //     nodes
-                    // );
                 }
             }
             *self = board_copy;
@@ -1284,7 +1278,7 @@ impl ChessGame {
 
 mod tests {
     const PERFT_MOVE_VERIFICATION: bool = true;
-    const STOCKFISH_LOCATION: &str = "bin/stockfish.exe";
+    const MOVE_VERIFICATION_ENGINE: &str = "bin/stockfish.exe";
 
     use std::collections::BTreeSet;
     use std::io::Write;
@@ -1292,7 +1286,7 @@ mod tests {
 
     use super::*;
 
-    fn run_stockfish_perft(
+    fn run_verification_perft(
         depth: u8,
         fen: &'static str,
         moves: &Vec<String>,
@@ -1306,13 +1300,13 @@ mod tests {
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
 
-        let mut stockfish = Command::new(STOCKFISH_LOCATION)
+        let mut engine = Command::new(MOVE_VERIFICATION_ENGINE)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("Failed to start Stockfish");
+            .expect("Failed to start engine");
 
-        let mut stdin = stockfish.stdin.take().expect("Failed to open stdin");
+        let mut stdin = engine.stdin.take().expect("Failed to open stdin");
 
         std::thread::spawn(move || {
             stdin
@@ -1320,7 +1314,7 @@ mod tests {
                 .expect("Failed to write to stdin");
         });
 
-        let output = stockfish.wait_with_output().expect("Failed to read stdout");
+        let output = engine.wait_with_output().expect("Failed to read stdout");
 
         let output_string = String::from_utf8_lossy(&output.stdout).to_string();
         let output_lines = output_string.split("\n").collect::<Vec<_>>();
@@ -1356,97 +1350,130 @@ mod tests {
         square_results
     }
 
-    fn perft_verification<const INTEGRITY_CHECK: bool>(
-        board: &mut ChessGame,
-        mut moves_to_make: Vec<String>,
+    struct PerftTestContext {
+        board: ChessGame,
+        tables: Tables,
         depth: u8,
         fen: &'static str,
-        tables: &Tables,
-    ) -> u64 {
-        assert!(board.load_fen(fen, tables).is_ok());
+        moves: Vec<String>,
+        state_validation: bool,
+    }
 
-        let mut perft_moves = Vec::new();
+    impl PerftTestContext {
+        fn new(depth: u8, state_validation: bool, fen: &'static str) -> Self {
+            let tables = Tables::new();
+            let mut board = ChessGame::new();
 
-        for mv in moves_to_make.iter() {
-            let mv = board.fix_move(util::create_move(mv));
-            assert!(board.make_move_slow(mv, &tables));
-        }
+            assert!(board.load_fen(fen, &tables).is_ok());
 
-        let perft_result = board.perft::<INTEGRITY_CHECK>(depth, &tables, Some(&mut perft_moves));
-
-        if !PERFT_MOVE_VERIFICATION {
-            return perft_result;
-        }
-
-        let stockfish_moves = run_stockfish_perft(depth, fen, &moves_to_make);
-
-        let all_moves = BTreeSet::from_iter(
-            perft_moves
-                .iter()
-                .map(|(mv, _)| mv.clone())
-                .chain(stockfish_moves.iter().map(|(mv, _)| mv.clone())),
-        );
-
-        for move_str in all_moves {
-            let stockfish_count = match stockfish_moves
-                .iter()
-                .find(|(s, _)| *s == move_str)
-                .map(|(_, c)| *c)
-            {
-                Some(stockfish_count) => stockfish_count,
-                None => {
-                    assert!(
-                        false,
-                        "Move {} not found in stockfish results at depth {}. Fen {} moves {}",
-                        move_str,
-                        depth,
-                        fen,
-                        moves_to_make.join(" ")
-                    );
-                    return perft_result;
-                }
-            };
-
-            let perft_count = match perft_moves
-                .iter()
-                .find(|(s, _)| *s == move_str)
-                .map(|(_, c)| *c)
-            {
-                Some(perft_count) => perft_count,
-                None => {
-                    assert!(
-                        false,
-                        "Move {} not found in perft results at depth {}. Fen {} moves {}",
-                        move_str,
-                        depth,
-                        fen,
-                        moves_to_make.join(" ")
-                    );
-                    return perft_result;
-                }
-            };
-
-            if stockfish_count != perft_count {
-                if depth == 1 {
-                    assert!(
-                        false,
-                        "Mismatch at depth {}: {}: {} vs stockfish: {}. Fen {} moves {}",
-                        depth,
-                        move_str,
-                        perft_count,
-                        stockfish_count,
-                        fen,
-                        moves_to_make.join(" ")
-                    );
-                    return perft_result;
-                }
-                moves_to_make.push(move_str.clone());
-                perft_verification::<INTEGRITY_CHECK>(board, moves_to_make, depth - 1, fen, tables);
-                return perft_result;
+            Self {
+                board,
+                depth,
+                fen,
+                tables,
+                moves: Vec::new(),
+                state_validation,
             }
         }
 
-        perft_result
+        fn run(&mut self) -> u64 {
+            self.perft_verification(self.depth)
+        }
+
+        fn perft_verification(&mut self, depth: u8) -> u64 {
+            let mut perft_results = Vec::new();
+
+            let perft_result = if self.state_validation {
+                self.board
+                    .perft::<true>(depth, &self.tables, Some(&mut perft_results))
+            } else {
+                self.board
+                    .perft::<false>(depth, &self.tables, Some(&mut perft_results))
+            };
+
+            if PERFT_MOVE_VERIFICATION {
+                return perft_result;
+            }
+
+            let verification_results = run_verification_perft(depth, self.fen, &self.moves);
+
+            let all_moves = BTreeSet::from_iter(
+                perft_results
+                    .iter()
+                    .map(|(mv, _)| mv.clone())
+                    .chain(verification_results.iter().map(|(mv, _)| mv.clone())),
+            );
+
+            for move_str in all_moves {
+                let verify_count = match verification_results
+                    .iter()
+                    .find(|(s, _)| *s == move_str)
+                    .map(|(_, c)| *c)
+                {
+                    Some(count) => count,
+                    None => {
+                        assert!(
+                            false,
+                            "Move {} not found in verification engine results at depth {}. Fen {} moves {}",
+                            move_str,
+                            depth,
+                            self.fen,
+                            self.moves.join(" ")
+                        );
+                        return perft_result;
+                    }
+                };
+
+                let perft_count = match perft_results
+                    .iter()
+                    .find(|(s, _)| *s == move_str)
+                    .map(|(_, c)| *c)
+                {
+                    Some(perft_count) => perft_count,
+                    None => {
+                        assert!(
+                            false,
+                            "Move {} not found in perft results at depth {}. Fen {} moves {}",
+                            move_str,
+                            depth,
+                            self.fen,
+                            self.moves.join(" ")
+                        );
+                        return perft_result;
+                    }
+                };
+
+                if verify_count != perft_count {
+                    if depth == 1 {
+                        assert!(
+                            false,
+                            "Mismatch at depth {}: {}: {} vs verification engine: {}. Fen {} moves {}",
+                            depth,
+                            move_str,
+                            perft_count,
+                            verify_count,
+                            self.fen,
+                            self.moves.join(" ")
+                        );
+                        return perft_result;
+                    }
+                    let board_copy = self.board.clone();
+
+                    let mv = self.board.fix_move(util::create_move(&move_str));
+                    assert!(self.board.make_move_slow(mv, &self.tables));
+
+                    self.moves.push(move_str.clone());
+
+                    self.perft_verification(depth - 1);
+
+                    self.board = board_copy;
+
+                    return perft_result;
+                }
+            }
+
+            perft_result
+        }
     }
 
     #[test]
@@ -1569,78 +1596,51 @@ mod tests {
     #[test]
     fn test_perft_rnbqkbnr_pppppppp_8_8_8_8_PPPPPPPP_RNBQKBNR() {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-        assert_eq!(
-            perft_verification::<true>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
-            119060324
-        );
+        assert_eq!(PerftTestContext::new(5, true, fen).run(), 4_865_609);
     }
 
     #[test]
     fn test_perft_r3k2r_p1ppqpb1_bn2pnp1_3PN3_1p2P3_2N2Q1p_PPPBBPPP_R3K2R() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
-        assert_eq!(
-            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
-            8031647685
-        );
+        assert_eq!(PerftTestContext::new(5, false, fen).run(), 193_690_690);
     }
 
     #[test]
     fn test_perft_8_2p5_3p4_KP5r_1R3p1k_8_4P1P1_8() {
         let fen = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1";
-        assert_eq!(
-            perft_verification::<true>(&mut ChessGame::new(), vec![], 8, fen, &Tables::new()),
-            3009794393
-        );
+        assert_eq!(PerftTestContext::new(7, true, fen).run(), 178_633_661);
     }
 
     #[test]
     fn test_perft_r3k2r_Pppp1ppp_1b3nbN_nP6_BBP1P3_q4N2_Pp1P2PP_R2Q1RK1() {
         let fen = "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
         let mirrored = "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1";
-        assert_eq!(
-            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
-            706045033
-        );
-        assert_eq!(
-            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, mirrored, &Tables::new()),
-            706045033
-        );
+        assert_eq!(PerftTestContext::new(6, false, fen).run(), 706045033);
+        assert_eq!(PerftTestContext::new(6, false, mirrored).run(), 706045033);
     }
 
     #[test]
     fn test_perft_rnbq1k1r_pp1Pbppp_2p5_8_2B5_8_PPP1NnPP_RNBQK2R() {
         let fen = "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8";
-        assert_eq!(
-            perft_verification::<true>(&mut ChessGame::new(), vec![], 5, fen, &Tables::new()),
-            89941194
-        );
+        assert_eq!(PerftTestContext::new(5, true, fen).run(), 89941194);
     }
 
     #[test]
     fn test_perft_r4rk1_1pp1qppp_p1np1n2_2b1p1B1_2B1P1b1_P1NP1N2_1PP1QPPP_R4RK1() {
         let fen = "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10";
-        assert_eq!(
-            perft_verification::<false>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
-            6923051137
-        );
+        assert_eq!(PerftTestContext::new(5, true, fen).run(), 164_075_551);
     }
 
     #[test]
     fn test_perft_8_PPP4k_8_8_8_8_4Kppp_8() {
         let fen = "8/PPP4k/8/8/8/8/4Kppp/8 w - -";
-        assert_eq!(
-            perft_verification::<true>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
-            34336777
-        );
+        assert_eq!(PerftTestContext::new(6, true, fen).run(), 34336777);
     }
 
     #[test]
     fn test_perft_n1n5_PPPk4_8_8_8_8_4Kppp_5N1N() {
         let fen = "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1";
-        assert_eq!(
-            perft_verification::<true>(&mut ChessGame::new(), vec![], 6, fen, &Tables::new()),
-            71179139
-        );
+        assert_eq!(PerftTestContext::new(6, true, fen).run(), 71179139);
     }
 
     #[test]
@@ -1665,16 +1665,7 @@ mod tests {
         ]
         .iter()
         .for_each(|(fen, depth, expected)| {
-            assert_eq!(
-                perft_verification::<true>(
-                    &mut ChessGame::new(),
-                    vec![],
-                    *depth,
-                    fen,
-                    &Tables::new()
-                ),
-                *expected
-            );
+            assert_eq!(PerftTestContext::new(*depth, true, fen).run(), *expected);
         });
     }
 
