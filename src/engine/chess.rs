@@ -702,6 +702,33 @@ impl ChessGame {
         true
     }
 
+    pub fn make_null_move(&mut self, tables: &Tables) -> Option<u8> {
+        let zb_keys = &tables.zobrist_hash_keys;
+
+        self.b_move = !self.b_move;
+        self.zobrist_key ^= zb_keys.hash_side_to_move;
+
+        if let Some(ep_square) = self.en_passant.take() {
+            self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
+            return Some(ep_square);
+        }
+
+        None
+    }
+
+    pub fn rollback_null_move(&mut self, ep_square: Option<u8>, tables: &Tables) {
+        let zb_keys = &tables.zobrist_hash_keys;
+
+        if let Some(ep_square) = ep_square {
+            self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
+        }
+
+        self.b_move = !self.b_move;
+        self.zobrist_key ^= zb_keys.hash_side_to_move;
+
+        self.en_passant = ep_square;
+    }
+
     pub fn perft<const INTEGRITY_CHECK: bool>(
         &mut self,
         depth: u8,

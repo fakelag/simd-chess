@@ -73,6 +73,7 @@ pub struct Search<'a> {
 
     score: i32,
     b_cut_count: u64,
+    b_cut_null_count: u64,
     a_raise_count: u64,
     node_count: u64,
     quiet_nodes: u64,
@@ -139,6 +140,7 @@ impl<'a> Search<'a> {
             node_count: 0,
             a_raise_count: 0,
             b_cut_count: 0,
+            b_cut_null_count: 0,
             ply: 0,
             is_stopping: false,
             score: -i32::MAX,
@@ -163,6 +165,9 @@ impl<'a> Search<'a> {
     }
     pub fn b_cut_count(&self) -> u64 {
         self.b_cut_count
+    }
+    pub fn b_cut_null_count(&self) -> u64 {
+        self.b_cut_null_count
     }
     pub fn a_raise_count(&self) -> u64 {
         self.a_raise_count
@@ -221,25 +226,47 @@ impl<'a> Search<'a> {
             return self.quiescence(alpha, beta, self.ply as u32);
         }
 
+        let in_check = self.chess.in_check_slow(self.tables, self.chess.b_move());
+        depth += in_check as u8;
+
+        self.rt
+            .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
+
         if self.pv_trace {
             self.pv_trace = self.pv_length > (self.ply as usize + 1);
             pv_move = self.pv[self.ply as usize];
         }
 
-        let in_check = self.chess.in_check_slow(self.tables, self.chess.b_move());
-        depth += in_check as u8;
+        // Null move pruning
+        if !self.pv_trace && self.ply > 0 && depth >= 3 && !in_check && !self.is_endgame() {
+            let ep_square = self.chess.make_null_move(self.tables);
+
+            self.ply += 1;
+            let score = -self.go(-beta, -beta + 1, depth - 3);
+            self.ply -= 1;
+
+            self.chess.rollback_null_move(ep_square, self.tables);
+
+            if self.is_stopping {
+                return 0;
+            }
+
+            if score >= beta {
+                self.rt.pop_position();
+                self.b_cut_null_count += 1;
+                return score;
+            }
+        }
 
         let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
         move_list[0..move_count].sort_by(|a, b| self.sort_moves_mvvlva(a, b, pv_move, tt_move));
 
-        let mut best_score = -i32::MAX;
         let mut best_move = 0;
         let mut has_legal_moves = false;
 
-        self.rt
-            .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
-
         let board_copy = self.chess.clone();
+
+        let mut moves_searched = 0;
 
         for i in 0..move_count {
             let mv = move_list[i];
@@ -252,58 +279,75 @@ impl<'a> Search<'a> {
                 continue;
             }
 
+            let late_move_reduction = moves_searched > 3
+                && !in_check
+                && depth >= 3
+                && (mv & (chess::MV_FLAG_CAP | chess::MV_FLAG_PROMOTION) == 0);
+
             has_legal_moves = true;
 
             self.ply += 1;
 
-            let score = -self.go(-beta, -alpha, depth - 1);
+            let score = if late_move_reduction {
+                // Late move, apply a small reduction of 1 ply and
+                // search with window [-alpha - 1, -alpha] with the goal of
+                // proving that the move is not good enough to be played
+                let reduced_score = -self.go(-alpha - 1, -alpha, depth - 2);
+                if reduced_score > alpha {
+                    // The move might be good, search it again with full depth
+                    -self.go(-beta, -alpha, depth - 1)
+                } else {
+                    reduced_score
+                }
+            } else {
+                -self.go(-beta, -alpha, depth - 1)
+            };
+            // let score = -self.go(-beta, -alpha, depth - 1);
 
             self.ply -= 1;
-
             self.chess = board_copy;
+            moves_searched += 1;
 
             if self.is_stopping {
                 return 0;
             }
 
-            if score > best_score {
-                best_score = score;
-                best_move = mv;
+            if score <= alpha {
+                continue;
+            }
 
-                // Update PV
-                let child_pv_length = self.pv_table.lengths[self.ply as usize + 1];
+            self.a_raise_count += 1;
+            bound_type = BoundType::Exact;
+            alpha = score;
+            best_move = mv;
 
-                self.pv_table.moves[self.ply as usize][0] = mv;
-                self.pv_table.lengths[self.ply as usize] = child_pv_length + 1;
+            // Update PV
+            let child_pv_length = self.pv_table.lengths[self.ply as usize + 1];
 
-                // @perf - use disjoint unchecked
-                let [root_pv_moves, child_pv_moves] = self
-                    .pv_table
-                    .moves
-                    .get_disjoint_mut([self.ply as usize, self.ply as usize + 1])
-                    .unwrap();
+            self.pv_table.moves[self.ply as usize][0] = mv;
+            self.pv_table.lengths[self.ply as usize] = child_pv_length + 1;
 
-                root_pv_moves[1..child_pv_length as usize + 1]
-                    .copy_from_slice(&child_pv_moves[0..child_pv_length as usize]);
+            // @perf - use disjoint unchecked
+            let [root_pv_moves, child_pv_moves] = self
+                .pv_table
+                .moves
+                .get_disjoint_mut([self.ply as usize, self.ply as usize + 1])
+                .unwrap();
 
-                if score >= beta {
-                    self.tt.store(
-                        self.chess.zobrist_key(),
-                        score,
-                        depth,
-                        mv,
-                        BoundType::LowerBound,
-                    );
-                    self.rt.pop_position();
-                    self.b_cut_count += 1;
-                    return score;
-                }
+            root_pv_moves[1..child_pv_length as usize + 1]
+                .copy_from_slice(&child_pv_moves[0..child_pv_length as usize]);
 
-                if score > alpha {
-                    self.a_raise_count += 1;
-                    bound_type = BoundType::Exact;
-                    alpha = score;
-                }
+            if score >= beta {
+                self.tt.store(
+                    self.chess.zobrist_key(),
+                    score,
+                    depth,
+                    mv,
+                    BoundType::LowerBound,
+                );
+                self.rt.pop_position();
+                self.b_cut_count += 1;
+                return score;
             }
         }
         self.rt.pop_position();
@@ -319,13 +363,13 @@ impl<'a> Search<'a> {
 
         self.tt.store(
             self.chess.zobrist_key(),
-            best_score,
+            alpha,
             depth,
             best_move,
             bound_type,
         );
 
-        best_score
+        alpha
     }
 
     fn quiescence(&mut self, alpha: i32, beta: i32, start_ply: u32) -> i32 {
@@ -493,6 +537,12 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
+    pub fn is_endgame(&self) -> bool {
+        let material = self.chess.material();
+        ((material[0] & (!1023)) | (material[1] & (!1023))) == 0
+    }
+
+    #[inline(always)]
     pub fn evaluate(&mut self) -> i32 {
         use std::arch::x86_64::*;
 
@@ -503,9 +553,8 @@ impl<'a> Search<'a> {
         const PST: &[[i8; 64]; 14] = &tables::Tables::EVAL_TABLES_INV_I8;
 
         unsafe {
-            let material = self.chess.material();
-            let is_endgame = ((material[0] & (!1023)) | (material[1] & (!1023))) == 0;
-            let endgame_offset = (is_endgame as usize) << 6;
+            let is_endgame = self.is_endgame() as usize;
+            let endgame_offset = is_endgame << 6;
 
             let mut bonuses_vec = _mm512_setzero_si512();
 
