@@ -1,7 +1,7 @@
 use crate::{
     engine::tables::Tables,
     pop_ls1b,
-    util::{self, PieceId},
+    util::{self},
 };
 use std::arch::x86_64::*;
 
@@ -28,20 +28,34 @@ const MATERIAL_ROOK: i32 = 350;
 const MATERIAL_BISHOP: i32 = 210;
 const MATERIAL_KNIGHT: i32 = 210;
 const MATERIAL_PAWN: i32 = 70;
-const MATERIAL_TABLE: [u16; 13] = [
-    0, // No piece
+const MATERIAL_TABLE: [u16; 16] = [
+    0, // NullPieceWhite
     0, // King has no material value
     MATERIAL_QUEEN as u16,
     MATERIAL_ROOK as u16,
     MATERIAL_BISHOP as u16,
     MATERIAL_KNIGHT as u16,
     MATERIAL_PAWN as u16,
+    0, // Pad
+    0, // NullPieceBlack
     0, // King has no material value
     MATERIAL_QUEEN as u16,
     MATERIAL_ROOK as u16,
     MATERIAL_BISHOP as u16,
     MATERIAL_KNIGHT as u16,
     MATERIAL_PAWN as u16,
+    0, // Pad
+];
+
+const CASTLES_SQUARES: [u8; 64] = [
+    0b1011, 0b1111, 0b1111, 0b1111, 0b0011, 0b1111, 0b1111, 0b0111, //
+    0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
+    0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
+    0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
+    0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
+    0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
+    0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
+    0b1110, 0b1111, 0b1111, 0b1111, 0b1100, 0b1111, 0b1111, 0b1101, //
 ];
 
 pub enum GameState {
@@ -51,19 +65,135 @@ pub enum GameState {
     DrawByFiftyMoveRule,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PieceIndex {
+    WhiteNullPiece = 0,
+    WhiteKing = 1,
+    WhiteQueen = 2,
+    WhiteRook = 3,
+    WhiteBishop = 4,
+    WhiteKnight = 5,
+    WhitePawn = 6,
+    WhitePad = 7,
+
+    BlackNullPiece = 8,
+    BlackKing = 9,
+    BlackQueen = 10,
+    BlackRook = 11,
+    BlackBishop = 12,
+    BlackKnight = 13,
+    BlackPawn = 14,
+    BlackPad = 15,
+
+    PieceIndexMax = 16,
+}
+
+impl From<usize> for PieceIndex {
+    // @todo perf - mem transmute
+    fn from(value: usize) -> Self {
+        match value {
+            0 => PieceIndex::WhiteNullPiece,
+            1 => PieceIndex::WhiteKing,
+            2 => PieceIndex::WhiteQueen,
+            3 => PieceIndex::WhiteRook,
+            4 => PieceIndex::WhiteBishop,
+            5 => PieceIndex::WhiteKnight,
+            6 => PieceIndex::WhitePawn,
+            // 7 => PieceIndex::WhitePad,
+            8 => PieceIndex::BlackNullPiece,
+            9 => PieceIndex::BlackKing,
+            10 => PieceIndex::BlackQueen,
+            11 => PieceIndex::BlackRook,
+            12 => PieceIndex::BlackBishop,
+            13 => PieceIndex::BlackKnight,
+            14 => PieceIndex::BlackPawn,
+            // 15 => PieceIndex::BlackPad,
+            _ => panic!("Invalid PieceIndex for from conversion {}", value),
+        }
+    }
+}
+
+impl From<util::PieceId> for PieceIndex {
+    fn from(value: util::PieceId) -> Self {
+        match value {
+            util::PieceId::WhiteKing => PieceIndex::WhiteKing,
+            util::PieceId::WhiteQueen => PieceIndex::WhiteQueen,
+            util::PieceId::WhiteRook => PieceIndex::WhiteRook,
+            util::PieceId::WhiteBishop => PieceIndex::WhiteBishop,
+            util::PieceId::WhiteKnight => PieceIndex::WhiteKnight,
+            util::PieceId::WhitePawn => PieceIndex::WhitePawn,
+            util::PieceId::BlackKing => PieceIndex::BlackKing,
+            util::PieceId::BlackQueen => PieceIndex::BlackQueen,
+            util::PieceId::BlackRook => PieceIndex::BlackRook,
+            util::PieceId::BlackBishop => PieceIndex::BlackBishop,
+            util::PieceId::BlackKnight => PieceIndex::BlackKnight,
+            util::PieceId::BlackPawn => PieceIndex::BlackPawn,
+            _ => panic!("Invalid PieceIndex for from conversion: {:?}", value),
+        }
+    }
+}
+
+impl Into<usize> for PieceIndex {
+    fn into(self) -> usize {
+        // self as usize
+        match self {
+            PieceIndex::WhiteNullPiece => 0,
+            PieceIndex::WhiteKing => 1,
+            PieceIndex::WhiteQueen => 2,
+            PieceIndex::WhiteRook => 3,
+            PieceIndex::WhiteBishop => 4,
+            PieceIndex::WhiteKnight => 5,
+            PieceIndex::WhitePawn => 6,
+            // PieceIndex::WhitePad => 7,
+            PieceIndex::BlackNullPiece => 8,
+            PieceIndex::BlackKing => 9,
+            PieceIndex::BlackQueen => 10,
+            PieceIndex::BlackRook => 11,
+            PieceIndex::BlackBishop => 12,
+            PieceIndex::BlackKnight => 13,
+            PieceIndex::BlackPawn => 14,
+            // PieceIndex::BlackPad => 15,
+            _ => panic!("Invalid PieceIndex for usize conversion: {:?}", self),
+        }
+    }
+}
+
+impl Into<char> for PieceIndex {
+    fn into(self) -> char {
+        match self {
+            PieceIndex::WhiteKing => 'K',
+            PieceIndex::WhiteQueen => 'Q',
+            PieceIndex::WhiteRook => 'R',
+            PieceIndex::WhiteBishop => 'B',
+            PieceIndex::WhiteKnight => 'N',
+            PieceIndex::WhitePawn => 'P',
+            PieceIndex::BlackKing => 'k',
+            PieceIndex::BlackQueen => 'q',
+            PieceIndex::BlackRook => 'r',
+            PieceIndex::BlackBishop => 'b',
+            PieceIndex::BlackKnight => 'n',
+            PieceIndex::BlackPawn => 'p',
+            _ => panic!("Invalid PieceIndex for char conversion: {:?}", self),
+        }
+    }
+}
+
 #[repr(C)]
 #[repr(align(64))]
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Bitboards {
-    pub bitboards: [u64; 12],
+    // bitboards in format
+    // [0, K, Q, R, B, N, P, 0, 0, k, q, r, b, n, p, 0]
+    pub bitboards: [u64; 16],
 }
+const BITBOARDS_SIZE_ASSERT: [u8; 128] = [0; std::mem::size_of::<Bitboards>()];
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChessGame {
     board: Bitboards,
     b_move: bool,
     castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
-    en_passant: Option<u8>, // @perf - Encode as 64u8
+    en_passant: u8, // ep square (or 0 if none)
     half_moves: u32,
     full_moves: u32,
     zobrist_key: u64,
@@ -78,7 +208,7 @@ impl ChessGame {
             board: Bitboards::default(),
             b_move: false,
             castles: 0,
-            en_passant: None,
+            en_passant: 0,
             half_moves: 0,
             full_moves: 1,
             zobrist_key: 0,
@@ -89,14 +219,16 @@ impl ChessGame {
 
     pub fn gen_moves_slow(&self, tables: &Tables, move_list: &mut [u16]) -> usize {
         let mut move_cursor = 0;
-        let side_cursor = 6 * self.b_move as usize;
-        let opponent_cursor = 6 * !self.b_move as usize;
 
-        let friendly_board = self.board.bitboards[side_cursor..side_cursor + 6]
+        let bitboards = &self.board.bitboards;
+        let friendly_offset = (self.b_move as usize) << 3;
+        let opponent_offset = (!self.b_move as usize) << 3;
+
+        let friendly_board = bitboards[friendly_offset..friendly_offset + 8]
             .iter()
             .fold(0, |acc, &bb| acc | bb);
 
-        let opponent_board = self.board.bitboards[opponent_cursor..opponent_cursor + 6]
+        let opponent_board = bitboards[opponent_offset..opponent_offset + 8]
             .iter()
             .fold(0, |acc, &bb| acc | bb);
 
@@ -112,7 +244,7 @@ impl ChessGame {
         move_cursor += self.gen_slider_moves::<true>(
             tables,
             &mut move_list[move_cursor..],
-            self.board.bitboards[PieceId::WhiteRook as usize + side_cursor],
+            bitboards[PieceIndex::WhiteRook as usize + friendly_offset],
             friendly_board,
             opponent_board,
             full_board,
@@ -121,7 +253,7 @@ impl ChessGame {
         move_cursor += self.gen_slider_moves::<false>(
             tables,
             &mut move_list[move_cursor..],
-            self.board.bitboards[PieceId::WhiteBishop as usize + side_cursor],
+            bitboards[PieceIndex::WhiteBishop as usize + friendly_offset],
             friendly_board,
             opponent_board,
             full_board,
@@ -130,7 +262,7 @@ impl ChessGame {
         move_cursor += self.gen_slider_moves::<false>(
             tables,
             &mut move_list[move_cursor..],
-            self.board.bitboards[PieceId::WhiteQueen as usize + side_cursor],
+            bitboards[PieceIndex::WhiteQueen as usize + friendly_offset],
             friendly_board,
             opponent_board,
             full_board,
@@ -138,7 +270,7 @@ impl ChessGame {
         move_cursor += self.gen_slider_moves::<true>(
             tables,
             &mut move_list[move_cursor..],
-            self.board.bitboards[PieceId::WhiteQueen as usize + side_cursor],
+            bitboards[PieceIndex::WhiteQueen as usize + friendly_offset],
             friendly_board,
             opponent_board,
             full_board,
@@ -162,66 +294,58 @@ impl ChessGame {
         move_cursor
     }
 
+    #[inline(always)]
     pub fn in_check_slow(&self, tables: &Tables, b_move: bool) -> bool {
-        let king_sq = self.board.bitboards[PieceId::WhiteKing as usize + 6 * b_move as usize]
+        let king_sq = self.board.bitboards
+            [PieceIndex::WhiteKing as usize + ((b_move as usize) << 3)]
             .trailing_zeros() as u8;
 
-        self.is_square_attacked(king_sq, b_move, tables)
+        self.is_king_square_attacked(king_sq, b_move, tables)
     }
 
-    pub fn is_square_attacked(&self, sq_index: u8, b_move: bool, tables: &Tables) -> bool {
-        let pawn_attack_mask = Tables::LT_PAWN_CAPTURE_MASKS[b_move as usize][sq_index as usize];
-        if self.board.bitboards[PieceId::WhitePawn as usize + 6 * !b_move as usize]
-            & pawn_attack_mask
-            != 0
-        {
-            return true;
+    pub fn is_king_square_attacked(&self, sq_index: u8, b_move: bool, tables: &Tables) -> bool {
+        let opponent_bitboards = &self.board.bitboards[((!b_move as usize) << 3)..];
+
+        let mut is_attacked = 0u64;
+
+        unsafe {
+            let pawn_attack_mask =
+                *Tables::LT_PAWN_CAPTURE_MASKS[b_move as usize].get_unchecked(sq_index as usize);
+
+            is_attacked |= opponent_bitboards[PieceIndex::WhitePawn as usize] & pawn_attack_mask;
+
+            let knight_attack_mask = *Tables::LT_KNIGHT_MOVE_MASKS.get_unchecked(sq_index as usize);
+            is_attacked |=
+                opponent_bitboards[PieceIndex::WhiteKnight as usize] & knight_attack_mask;
+
+            // @todo - King might not be able to attack all squares if pinned -
+            // but this does not matter for castling check
+            let king_attack_mask = *Tables::LT_KING_MOVE_MASKS.get_unchecked(sq_index as usize);
+            is_attacked |= opponent_bitboards[PieceIndex::WhiteKing as usize] & king_attack_mask;
+
+            let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+
+            let opponent_rook_board = opponent_bitboards[PieceIndex::WhiteRook as usize];
+            let opponent_bishop_board = opponent_bitboards[PieceIndex::WhiteBishop as usize];
+            let opponent_queen_board = opponent_bitboards[PieceIndex::WhiteQueen as usize];
+
+            let rook_occupancy_mask =
+                *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+            let rook_blockers = full_board & rook_occupancy_mask;
+            let rook_moves =
+                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers);
+
+            let bishop_occupancy_mask =
+                *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+            let bishop_blockers = full_board & bishop_occupancy_mask;
+            let bishop_moves =
+                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers);
+
+            is_attacked |= (opponent_rook_board | opponent_queen_board) & rook_moves;
+            is_attacked |= (opponent_bishop_board | opponent_queen_board) & bishop_moves;
+
+            is_attacked != 0
         }
-
-        // @todo - En passant check
-
-        let knight_attack_mask = Tables::LT_KNIGHT_MOVE_MASKS[sq_index as usize];
-        if self.board.bitboards[PieceId::WhiteKnight as usize + 6 * !b_move as usize]
-            & knight_attack_mask
-            != 0
-        {
-            return true;
-        }
-
-        // @todo - King might not be able to attack all squares if pinned -
-        // but this does not matter for castling check
-        let king_attack_mask = Tables::LT_KING_MOVE_MASKS[sq_index as usize];
-        if self.board.bitboards[PieceId::WhiteKing as usize + 6 * !b_move as usize]
-            & king_attack_mask
-            != 0
-        {
-            return true;
-        }
-
-        let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
-
-        let opponent_rook_board =
-            self.board.bitboards[PieceId::WhiteRook as usize + 6 * !b_move as usize];
-        let opponent_bishop_board =
-            self.board.bitboards[PieceId::WhiteBishop as usize + 6 * !b_move as usize];
-        let opponent_queen_board =
-            self.board.bitboards[PieceId::WhiteQueen as usize + 6 * !b_move as usize];
-
-        let rook_occupancy_mask = Tables::LT_ROOK_OCCUPANCY_MASKS[sq_index as usize];
-        let rook_blockers = full_board & rook_occupancy_mask;
-        let rook_moves = tables.get_slider_move_mask::<true>(sq_index as usize, rook_blockers);
-        if (opponent_rook_board | opponent_queen_board) & rook_moves != 0 {
-            return true;
-        }
-
-        let bishop_occupancy_mask = Tables::LT_BISHOP_OCCUPANCY_MASKS[sq_index as usize];
-        let bishop_blockers = full_board & bishop_occupancy_mask;
-        let bishop_moves = tables.get_slider_move_mask::<false>(sq_index as usize, bishop_blockers);
-        if (opponent_bishop_board | opponent_queen_board) & bishop_moves != 0 {
-            return true;
-        }
-
-        false
     }
 
     pub fn gen_pawn_moves(
@@ -233,7 +357,7 @@ impl ChessGame {
     ) -> usize {
         let mut move_cursor = 0;
         let mut pawn_bitboard =
-            self.board.bitboards[PieceId::WhitePawn as usize + 6 * b_move as usize];
+            self.board.bitboards[PieceIndex::WhitePawn as usize + ((b_move as usize) << 3)];
 
         loop {
             let src_sq = pop_ls1b!(pawn_bitboard);
@@ -264,9 +388,11 @@ impl ChessGame {
             }
 
             // En passant
-            if let Some(ep_target) = self.en_passant {
-                if pawn_cap_mask & (1 << ep_target) != 0 {
-                    move_list[move_cursor] = ((ep_target as u16) << 6) | src_sq | MV_FLAG_EPCAP;
+            // @todo - could be branchless
+            if self.en_passant != 0 {
+                if pawn_cap_mask & (1 << self.en_passant) != 0 {
+                    move_list[move_cursor] =
+                        ((self.en_passant as u16) << 6) | src_sq | MV_FLAG_EPCAP;
                     move_cursor += 1;
                 }
             }
@@ -393,7 +519,7 @@ impl ChessGame {
         let mut move_cursor = 0;
 
         let mut knight_bitboard =
-            self.board.bitboards[PieceId::WhiteKnight as usize + 6 * b_move as usize];
+            self.board.bitboards[PieceIndex::WhiteKnight as usize + ((b_move as usize) << 3)];
 
         loop {
             let src_sq = pop_ls1b!(knight_bitboard);
@@ -423,7 +549,8 @@ impl ChessGame {
     ) -> usize {
         let mut move_cursor = 0;
 
-        let king_bitboard = self.board.bitboards[PieceId::WhiteKing as usize + 6 * b_move as usize];
+        let king_bitboard =
+            self.board.bitboards[PieceIndex::WhiteKing as usize + ((b_move as usize) << 3)];
         let src_sq = king_bitboard.trailing_zeros() as u16;
 
         let mut king_moves_bitboard = Tables::LT_KING_MOVE_MASKS[src_sq as usize] & !friendly_board;
@@ -455,11 +582,11 @@ impl ChessGame {
         move_cursor
     }
 
-    // Returns 0 if there is no piece, PieceId+1 otherwise
+    // Returns a PieceIndex as usize
     pub fn piece_at_slow(&self, sq_bit: u64) -> usize {
-        for i in PieceId::WhiteKing as usize..PieceId::PieceMax as usize {
+        for i in PieceIndex::WhiteNullPiece as usize..PieceIndex::PieceIndexMax as usize {
             if self.board.bitboards[i] & sq_bit != 0 {
-                return i + 1;
+                return i;
             }
         }
 
@@ -467,32 +594,37 @@ impl ChessGame {
     }
 
     // Returns 0 if there is no piece, PieceId+1 otherwise
-    // Cost estimate: 7 cycles on Skylake-X
-    #[inline(always)]
-    fn piece_at_avx512(&mut self, sq_bit: u64) -> usize {
-        unsafe {
-            let select_vec = _mm512_set1_epi64(sq_bit as i64);
-            let index_vec = _mm512_set_epi32(12, 11, 10, 9, 8, 7, 6, 5, 8, 7, 6, 5, 4, 3, 2, 1);
+    // Cost estimate: ~7 cycles
+    // #[inline(always)]
+    // fn piece_at_avx512(&mut self, sq_bit: u64) -> usize {
+    //     unsafe {
+    //         let select_vec = _mm512_set1_epi64(sq_bit as i64);
+    //         let index_vec = _mm512_set_epi32(12, 11, 10, 9, 8, 7, 6, 5, 8, 7, 6, 5, 4, 3, 2, 1);
 
-            let white_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr() as *const _);
-            let rest_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr().add(4) as *const _);
+    //         let white_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr().add(1) as *const _);
+    //         let rest_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr().add(5) as *const _);
 
-            let from_mask_white = _mm512_test_epi64_mask(white_vec, select_vec) as u16;
-            let from_mask_rest = _mm512_test_epi64_mask(rest_vec, select_vec) as u16;
+    //         let from_mask_white = _mm512_test_epi64_mask(white_vec, select_vec) as u16;
+    //         let from_mask_rest = _mm512_test_epi64_mask(rest_vec, select_vec) as u16;
 
-            let piece_vec = _mm512_mask_compress_epi32(
-                _mm512_setzero_si512(),
-                _mm512_kunpackb(from_mask_rest, from_mask_white),
-                index_vec,
-            );
-            let piece_idx = _mm_cvtsi128_si32(_mm512_castsi512_si128(piece_vec)) as usize;
+    //         let piece_vec = _mm512_mask_compress_epi32(
+    //             _mm512_setzero_si512(),
+    //             _mm512_kunpackb(from_mask_rest, from_mask_white),
+    //             index_vec,
+    //         );
+    //         let piece_idx = _mm_cvtsi128_si32(_mm512_castsi512_si128(piece_vec)) as usize;
 
-            piece_idx
-        }
-    }
+    //         piece_idx
+    //     }
+    // }
 
-    // Make move must return false before making any changes to the game state
-    pub fn make_move_slow(&mut self, mv: u16, tables: &Tables) -> bool {
+    /// Makes a move on the board. If it returns true, the move was made, otherwise it was not and
+    /// no state was changed.
+    ///
+    /// Safety: the given move must always be pseudovalid, e.g a move that must be valid on the chess board, with
+    /// the exception of leaving the king in check or castling without checking threats to the passed squares. In
+    /// the latter case, the function returns false. The former case must be handled by the caller.
+    pub unsafe fn make_move(&mut self, mv: u16, tables: &Tables) -> bool {
         let zb_keys = &tables.zobrist_hash_keys;
 
         let from_sq = (mv & 0x3F) as u8;
@@ -502,228 +634,244 @@ impl ChessGame {
         let to_bit: u64 = 1 << to_sq;
 
         let move_flags = mv & MV_FLAGS;
+        let mut next_ep_square = 0;
+
+        let friendly_offset = (self.b_move as usize) << 3;
 
         match move_flags {
-            MV_FLAGS_CASTLE_KING => {
-                if [from_sq, from_sq + 1, from_sq + 2]
-                    .iter()
-                    .any(|&square| self.is_square_attacked(square, self.b_move, tables))
+            MV_FLAGS_CASTLE_KING | MV_FLAGS_CASTLE_QUEEN => {
+                const CASTLING_OFFSETS: [[i8; 4]; 4] = [
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    [1, 2, 1, -1],   // king
+                    [-1, -2, -2, 1], // queen
+                ];
+
+                let square_offsets =
+                    unsafe { *CASTLING_OFFSETS.get_unchecked((move_flags >> 12) as usize) };
+
+                if [
+                    from_sq,
+                    from_sq + square_offsets[0] as u8,
+                    from_sq + square_offsets[1] as u8,
+                ]
+                .iter()
+                .any(|&square| self.is_king_square_attacked(square, self.b_move, tables))
                 {
                     return false;
                 }
 
-                let rook_from_bit = to_bit << 1;
-                let rook_to_bit = to_bit >> 1;
+                let rook_from_sq = to_sq as usize + square_offsets[2] as usize;
+                let rook_to_sq = to_sq as usize + square_offsets[3] as usize;
 
-                let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
+                let rook_from_bit = 1 << rook_from_sq;
+                let rook_to_bit = 1 << rook_to_sq;
+
+                let rook_piece_id = PieceIndex::WhiteRook as usize + friendly_offset;
                 self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
-
-                let rook_from_sq = to_sq as usize + 1;
-                let rook_to_sq = to_sq as usize - 1;
 
                 unsafe {
                     *self.spt.get_unchecked_mut(rook_from_sq) = 0;
-                    *self.spt.get_unchecked_mut(rook_to_sq) = (rook_piece_id + 1) as u8;
+                    *self.spt.get_unchecked_mut(rook_to_sq) = rook_piece_id as u8;
                 }
 
                 // Re-add Zobrist key for moved rook
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_from_sq];
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_to_sq];
-            }
-            MV_FLAGS_CASTLE_QUEEN => {
-                if [from_sq, from_sq - 1, from_sq - 2]
-                    .iter()
-                    .any(|&square| self.is_square_attacked(square, self.b_move, tables))
-                {
-                    return false;
-                }
-
-                let rook_from_bit = to_bit >> 2;
-                let rook_to_bit = to_bit << 1;
-
-                let rook_piece_id = PieceId::WhiteRook as usize + 6 * self.b_move as usize;
-                self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
-
-                let rook_from_sq = to_sq as usize - 2;
-                let rook_to_sq = to_sq as usize + 1;
-
                 unsafe {
-                    *self.spt.get_unchecked_mut(rook_from_sq) = 0;
-                    *self.spt.get_unchecked_mut(rook_to_sq) = (rook_piece_id + 1) as u8;
+                    // Safety:
+                    //  - rook_piece_id is a valid piece id
+                    //  - rook_from_sq and rook_to_sq are guaranteed to be in board range [0, =63]
+                    let rook_keys = zb_keys.hash_piece_squares_new.get_unchecked(rook_piece_id);
+
+                    self.zobrist_key ^= rook_keys.get_unchecked(rook_from_sq);
+                    self.zobrist_key ^= rook_keys.get_unchecked(rook_to_sq);
                 }
-
-                self.spt[rook_from_sq] = 0;
-                self.spt[rook_to_sq] = (rook_piece_id + 1) as u8;
-
-                // Re-add Zobrist key for moved rook
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_from_sq];
-                self.zobrist_key ^= zb_keys.hash_piece_squares[rook_piece_id][rook_to_sq];
             }
-            _ => {}
-        }
-
-        let from_piece = self.spt[from_sq as usize] as usize - 1;
-        let to_piece = self.spt[to_sq as usize] as usize;
-
-        // Remove moved piece from from_sq and add it to to_sq
-        self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][from_sq as usize];
-        self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][to_sq as usize];
-
-        unsafe {
-            *self.spt.get_unchecked_mut(from_sq as usize) = 0;
-            *self.spt.get_unchecked_mut(to_sq as usize) = (from_piece + 1) as u8;
-        }
-
-        if to_piece != 0 {
-            debug_assert!(mv & MV_FLAG_CAP != 0);
-            self.board.bitboards[to_piece - 1] &= !to_bit;
-
-            // Remove captured piece from Zobrist key
-            self.zobrist_key ^= zb_keys.hash_piece_squares[to_piece - 1][to_sq as usize];
-
-            // @todo - Can be branchless since MATERIAL_TABLE[0] == 0
-            self.material[!self.b_move as usize] -= MATERIAL_TABLE[to_piece];
-        } else if move_flags == MV_FLAG_EPCAP {
-            debug_assert!(move_flags != MV_FLAG_EPCAP || self.en_passant.is_some());
-        } else {
-            debug_assert!(mv & MV_FLAG_CAP == 0);
-        }
-
-        self.board.bitboards[from_piece] ^= to_bit | from_bit;
-
-        if let Some(ep_square) = self.en_passant.take() {
-            // Remove en passant square from Zobrist key
-            self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
-        }
-
-        match move_flags {
             MV_FLAG_EPCAP => {
-                let (piece_id, ep_square) = if self.b_move {
-                    (PieceId::WhitePawn as usize, to_sq + 8)
+                let (piece_id, cap_pawn_sq) = if self.b_move {
+                    (PieceIndex::WhitePawn as usize, to_sq + 8)
                 } else {
-                    (PieceId::BlackPawn as usize, to_sq - 8)
+                    (PieceIndex::BlackPawn as usize, to_sq - 8)
                 };
 
-                self.board.bitboards[piece_id] &= !(1 << ep_square);
+                debug_assert!(cap_pawn_sq != from_sq);
+
+                self.board.bitboards[piece_id] &= !(1 << cap_pawn_sq);
+
+                unsafe {
+                    // Safety: cap_pawn_sq is guaranteed to be in board range [0, =63]
+                    *self.spt.get_unchecked_mut(cap_pawn_sq as usize) = 0;
+                };
 
                 // Remove captured pawn from Zobrist key
-                self.zobrist_key ^= zb_keys.hash_piece_squares[piece_id][ep_square as usize];
-
                 unsafe {
-                    *self.spt.get_unchecked_mut(ep_square as usize) = 0;
-                };
+                    // Safety: cap_pawn_sq is guaranteed to be in board range [0, =63]
+                    self.zobrist_key ^= zb_keys
+                        .hash_piece_squares_new
+                        .get_unchecked(piece_id)
+                        .get_unchecked(cap_pawn_sq as usize);
+                }
 
-                self.material[!self.b_move as usize] -= MATERIAL_TABLE[piece_id + 1];
+                self.material[!self.b_move as usize] -= MATERIAL_TABLE[piece_id];
             }
             MV_FLAG_DPP => {
-                let from_sq = ((mv >> 6) & 0x3F) as u8;
-                let en_passant = if self.b_move {
-                    from_sq + 8
-                } else {
-                    from_sq - 8
-                };
+                let new_ep_square = if self.b_move { to_sq + 8 } else { to_sq - 8 };
 
-                self.en_passant = Some(en_passant);
+                debug_assert!(new_ep_square != 0);
+                next_ep_square = new_ep_square;
 
                 // Add new en passant square to Zobrist key
-                self.zobrist_key ^= zb_keys.hash_en_passant_squares[en_passant as usize];
+                unsafe {
+                    // Safety: Any pseudovalid move guarantees ep_square to be in range [8, =15] | [48, =55]
+                    self.zobrist_key ^= zb_keys
+                        .hash_en_passant_squares
+                        .get_unchecked(new_ep_square as usize);
+                }
             }
             _ => {}
+        }
+
+        let from_piece = self.spt[from_sq as usize] as usize;
+        let to_piece = self.spt[to_sq as usize] as usize;
+
+        debug_assert!(to_piece == 0 || (mv & MV_FLAG_CAP != 0));
+
+        self.spt[from_sq as usize] = 0;
+        self.spt[to_sq as usize] = from_piece as u8;
+
+        unsafe {
+            // Safety:
+            //  - piece_from is guaranteed to be valid piece id
+            //  - piece_to is guaranteed to be a valid piece id OR 0
+
+            // to_piece will write to the white null-piece slot, but due to & it will remain zeros
+            *self.board.bitboards.get_unchecked_mut(to_piece) &= !to_bit;
+            *self.board.bitboards.get_unchecked_mut(from_piece) ^= to_bit | from_bit;
+
+            self.material[!self.b_move as usize] -= MATERIAL_TABLE.get_unchecked(to_piece);
+
+            // Remove moved piece from from_sq and add it to to_sq
+            self.zobrist_key ^=
+                zb_keys.hash_piece_squares_new.get_unchecked(from_piece)[from_sq as usize];
+            self.zobrist_key ^=
+                zb_keys.hash_piece_squares_new.get_unchecked(from_piece)[to_sq as usize];
+
+            // Remove captured piece from Zobrist key
+            self.zobrist_key ^=
+                zb_keys.hash_piece_squares_new.get_unchecked(to_piece)[to_sq as usize];
+
+            // Remove en passant square from Zobrist key
+            self.zobrist_key ^= zb_keys
+                .hash_en_passant_squares
+                .get_unchecked(self.en_passant as usize);
         }
 
         if move_flags & MV_FLAG_PROMOTION != 0 {
             let promotion_piece = match move_flags & MV_FLAGS_PR_MASK {
-                MV_FLAGS_PR_KNIGHT => PieceId::WhiteKnight as usize + 6 * self.b_move as usize,
-                MV_FLAGS_PR_BISHOP => PieceId::WhiteBishop as usize + 6 * self.b_move as usize,
-                MV_FLAGS_PR_ROOK => PieceId::WhiteRook as usize + 6 * self.b_move as usize,
-                MV_FLAGS_PR_QUEEN => PieceId::WhiteQueen as usize + 6 * self.b_move as usize,
+                MV_FLAGS_PR_KNIGHT => PieceIndex::WhiteKnight as usize + friendly_offset,
+                MV_FLAGS_PR_BISHOP => PieceIndex::WhiteBishop as usize + friendly_offset,
+                MV_FLAGS_PR_ROOK => PieceIndex::WhiteRook as usize + friendly_offset,
+                MV_FLAGS_PR_QUEEN => PieceIndex::WhiteQueen as usize + friendly_offset,
                 _ => unreachable!(),
             };
-            self.board.bitboards[from_piece] &= !to_bit;
-            self.board.bitboards[promotion_piece] |= to_bit;
 
             unsafe {
-                *self.spt.get_unchecked_mut(to_sq as usize) = (promotion_piece + 1) as u8;
+                // Safety: from_piece and promotion_piece are guaranteed to be valid piece ids
+                *self.board.bitboards.get_unchecked_mut(from_piece) &= !to_bit;
+                *self.board.bitboards.get_unchecked_mut(promotion_piece) |= to_bit;
+
+                // Safety: to_sq is guaranteed to be in board range [0, =63]
+                *self.spt.get_unchecked_mut(to_sq as usize) = promotion_piece as u8;
+
+                // Remove Zobrist key for promoted pawn and add it for promoted-to piece
+                self.zobrist_key ^= zb_keys
+                    .hash_piece_squares_new
+                    .get_unchecked(from_piece)
+                    .get_unchecked(to_sq as usize);
+                self.zobrist_key ^= zb_keys
+                    .hash_piece_squares_new
+                    .get_unchecked(promotion_piece)
+                    .get_unchecked(to_sq as usize);
+
+                self.material[self.b_move as usize] += MATERIAL_TABLE
+                    .get_unchecked(promotion_piece)
+                    - MATERIAL_TABLE.get_unchecked(from_piece);
             }
-
-            // Remove Zobrist key for promoted pawn and add it for promoted-to piece
-            self.zobrist_key ^= zb_keys.hash_piece_squares[from_piece][to_sq as usize];
-            self.zobrist_key ^= zb_keys.hash_piece_squares[promotion_piece][to_sq as usize];
-
-            self.material[self.b_move as usize] +=
-                MATERIAL_TABLE[promotion_piece + 1] - MATERIAL_TABLE[from_piece + 1];
         }
 
         // Remove Zobrist key for castling rights
-        self.zobrist_key ^= zb_keys.hash_castling_rights[self.castles as usize];
-
-        // @perf - Castling rights could be encoded into a table to avoid branches
-        if to_piece != 0 {
-            if (to_piece - 1) == PieceId::WhiteRook as usize + 6 * !self.b_move as usize {
-                match to_bit.trailing_zeros() {
-                    0 => self.castles &= !0b0100,
-                    7 => self.castles &= !0b1000,
-                    56 => self.castles &= !0b0001,
-                    63 => self.castles &= !0b0010,
-                    _ => {}
-                }
-            }
+        unsafe {
+            // Safety: self.castles is guaranteed to be in range [0, =15]
+            self.zobrist_key ^= zb_keys
+                .hash_castling_rights
+                .get_unchecked(self.castles as usize);
         }
 
-        if from_piece == PieceId::WhiteKing as usize + 6 * self.b_move as usize {
-            self.castles &= !(0b11 << (!self.b_move as u8 * 2));
-        } else if from_piece == PieceId::WhiteRook as usize + 6 * self.b_move as usize {
-            match from_bit.trailing_zeros() {
-                0 => self.castles &= !0b0100,
-                7 => self.castles &= !0b1000,
-                56 => self.castles &= !0b0001,
-                63 => self.castles &= !0b0010,
-                _ => {}
-            }
-        }
+        self.castles &= CASTLES_SQUARES[from_sq as usize];
+        self.castles &= CASTLES_SQUARES[to_sq as usize];
 
         // Add Zobrist key for castling rights
-        self.zobrist_key ^= zb_keys.hash_castling_rights[self.castles as usize];
+        unsafe {
+            // Safety: self.castles is guaranteed to be in range [0, =15]
+            self.zobrist_key ^= zb_keys
+                .hash_castling_rights
+                .get_unchecked(self.castles as usize);
+        }
 
-        self.half_moves += 1;
         self.full_moves += self.b_move as u32;
+        self.en_passant = next_ep_square;
 
         let is_capture = (move_flags & MV_FLAG_CAP) != 0;
-        let is_pawn_move = from_piece == (PieceId::WhitePawn as usize + 6 * self.b_move as usize);
+        let is_pawn_move = from_piece == (PieceIndex::WhitePawn as usize + friendly_offset);
 
-        if is_capture || is_pawn_move {
-            self.half_moves = 0;
-        }
+        self.half_moves = if is_capture || is_pawn_move {
+            0
+        } else {
+            self.half_moves + 1
+        };
 
         self.b_move = !self.b_move;
         self.zobrist_key ^= zb_keys.hash_side_to_move;
 
+        // println!(
+        //     "played move {} ({}), b_move: {}, zobrist_key: {:x}",
+        //     util::move_string(mv),
+        //     mv,
+        //     self.b_move,
+        //     self.zobrist_key
+        // );
+
         // debug_assert!(self.is_valid(), "Board is invalid after move");
+        debug_assert!(
+            (self.board.bitboards[PieceIndex::WhiteNullPiece as usize]
+                | self.board.bitboards[PieceIndex::BlackNullPiece as usize]
+                | self.board.bitboards[PieceIndex::WhitePad as usize]
+                | self.board.bitboards[PieceIndex::BlackPad as usize])
+                == 0,
+            "Empty bitboards are not zero after move {}",
+            util::move_string(mv)
+        );
+
         true
     }
 
-    pub fn make_null_move(&mut self, tables: &Tables) -> Option<u8> {
+    pub fn make_null_move(&mut self, tables: &Tables) -> u8 {
         let zb_keys = &tables.zobrist_hash_keys;
 
         self.b_move = !self.b_move;
         self.zobrist_key ^= zb_keys.hash_side_to_move;
+        self.zobrist_key ^= zb_keys.hash_en_passant_squares[self.en_passant as usize];
 
-        if let Some(ep_square) = self.en_passant.take() {
-            self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
-            return Some(ep_square);
-        }
+        let old_ep = self.en_passant;
+        self.en_passant = 0;
 
-        None
+        old_ep
     }
 
-    pub fn rollback_null_move(&mut self, ep_square: Option<u8>, tables: &Tables) {
+    pub fn rollback_null_move(&mut self, ep_square: u8, tables: &Tables) {
         let zb_keys = &tables.zobrist_hash_keys;
 
-        if let Some(ep_square) = ep_square {
-            self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
-        }
-
         self.b_move = !self.b_move;
+        self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
         self.zobrist_key ^= zb_keys.hash_side_to_move;
 
         self.en_passant = ep_square;
@@ -749,17 +897,21 @@ impl ChessGame {
         for mv_index in 0..move_count {
             let mv = move_list[mv_index];
 
-            if self.make_move_slow(mv, tables) && !self.in_check_slow(tables, !self.b_move) {
+            if unsafe { self.make_move(mv, tables) } && !self.in_check_slow(tables, !self.b_move) {
                 if INTEGRITY_CHECK {
                     assert!(
-                        self.material == self.calc_material(),
-                        "Material mismatch after move"
-                    );
-                    assert!(
                         self.zobrist_key == self.calc_initial_zobrist_key(tables),
-                        "Zobrist key mismatch after move"
+                        "Zobrist key mismatch after move {}",
+                        util::move_string(mv),
                     );
                     assert!(self.spt == self.calc_spt(), "Spt mismatch after move");
+                    assert!(
+                        self.material == self.calc_material(),
+                        "Material mismatch after move {}: {:?} vs {:?}",
+                        util::move_string(mv),
+                        self.material,
+                        self.calc_material(),
+                    );
                 }
                 let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None);
                 node_count += nodes;
@@ -808,44 +960,21 @@ impl ChessGame {
                         state = FenState::Turn;
                         continue;
                     }
+                    let b = 1u64.wrapping_shl(pos);
 
                     match (c, file < 8) {
-                        ('r', true) => {
-                            self.board.bitboards[PieceId::BlackRook as usize] |= 1 << pos
-                        }
-                        ('n', true) => {
-                            self.board.bitboards[PieceId::BlackKnight as usize] |= 1 << pos
-                        }
-                        ('b', true) => {
-                            self.board.bitboards[PieceId::BlackBishop as usize] |= 1 << pos
-                        }
-                        ('q', true) => {
-                            self.board.bitboards[PieceId::BlackQueen as usize] |= 1 << pos
-                        }
-                        ('k', true) => {
-                            self.board.bitboards[PieceId::BlackKing as usize] |= 1 << pos
-                        }
-                        ('p', true) => {
-                            self.board.bitboards[PieceId::BlackPawn as usize] |= 1 << pos
-                        }
-                        ('R', true) => {
-                            self.board.bitboards[PieceId::WhiteRook as usize] |= 1 << pos
-                        }
-                        ('N', true) => {
-                            self.board.bitboards[PieceId::WhiteKnight as usize] |= 1 << pos
-                        }
-                        ('B', true) => {
-                            self.board.bitboards[PieceId::WhiteBishop as usize] |= 1 << pos
-                        }
-                        ('Q', true) => {
-                            self.board.bitboards[PieceId::WhiteQueen as usize] |= 1 << pos
-                        }
-                        ('K', true) => {
-                            self.board.bitboards[PieceId::WhiteKing as usize] |= 1 << pos
-                        }
-                        ('P', true) => {
-                            self.board.bitboards[PieceId::WhitePawn as usize] |= 1 << pos
-                        }
+                        ('r', true) => self.board.bitboards[PieceIndex::BlackRook as usize] |= b,
+                        ('n', true) => self.board.bitboards[PieceIndex::BlackKnight as usize] |= b,
+                        ('b', true) => self.board.bitboards[PieceIndex::BlackBishop as usize] |= b,
+                        ('q', true) => self.board.bitboards[PieceIndex::BlackQueen as usize] |= b,
+                        ('k', true) => self.board.bitboards[PieceIndex::BlackKing as usize] |= b,
+                        ('p', true) => self.board.bitboards[PieceIndex::BlackPawn as usize] |= b,
+                        ('R', true) => self.board.bitboards[PieceIndex::WhiteRook as usize] |= b,
+                        ('N', true) => self.board.bitboards[PieceIndex::WhiteKnight as usize] |= b,
+                        ('B', true) => self.board.bitboards[PieceIndex::WhiteBishop as usize] |= b,
+                        ('Q', true) => self.board.bitboards[PieceIndex::WhiteQueen as usize] |= b,
+                        ('K', true) => self.board.bitboards[PieceIndex::WhiteKing as usize] |= b,
+                        ('P', true) => self.board.bitboards[PieceIndex::WhitePawn as usize] |= b,
                         ('1'..='8', true) => {
                             let empty_squares = c.to_digit(10).unwrap();
                             file += empty_squares;
@@ -894,7 +1023,7 @@ impl ChessGame {
                 },
                 FenState::EnPassant => match c {
                     '-' => {
-                        self.en_passant = None;
+                        self.en_passant = 0;
                         continue;
                     }
                     'a'..='h' => {
@@ -904,10 +1033,10 @@ impl ChessGame {
                             return Err(format!("Invalid en passant file '{}'", c));
                         }
 
-                        self.en_passant = Some(file_index);
+                        self.en_passant = file_index;
                     }
                     '1'..='8' => {
-                        if self.en_passant.is_none() {
+                        if self.en_passant == 0 {
                             return Err("En passant square specified without file".into());
                         }
 
@@ -917,11 +1046,7 @@ impl ChessGame {
                             return Err(format!("Invalid en passant rank '{}'", c));
                         }
 
-                        if let Some(file_index) = self.en_passant {
-                            self.en_passant = Some((rank_index * 8) | file_index);
-                        } else {
-                            return Err("En passant square specified without file".into());
-                        }
+                        self.en_passant = (rank_index * 8) | self.en_passant;
                     }
                     ' ' => {
                         state = FenState::MovesHalf;
@@ -960,9 +1085,9 @@ impl ChessGame {
 
     pub fn calc_material(&self) -> [u16; 2] {
         let mut material = [0; 2];
-        for i in PieceId::WhiteKing as usize..PieceId::BlackKing as usize {
-            material[0] += self.board.bitboards[i].count_ones() as u16 * MATERIAL_TABLE[i + 1];
-            material[1] += self.board.bitboards[i + 6].count_ones() as u16 * MATERIAL_TABLE[i + 1];
+        for i in PieceIndex::WhiteNullPiece as usize..PieceIndex::BlackNullPiece as usize {
+            material[0] += self.board.bitboards[i].count_ones() as u16 * MATERIAL_TABLE[i];
+            material[1] += self.board.bitboards[i + 8].count_ones() as u16 * MATERIAL_TABLE[i];
         }
 
         material
@@ -984,7 +1109,7 @@ impl ChessGame {
 
         #[derive(Debug, Clone, Copy)]
         enum RankContent {
-            Piece(PieceId),
+            Piece(PieceIndex),
             Empty(u8),
         }
 
@@ -1013,7 +1138,7 @@ impl ChessGame {
                                     acc.0[acc.1] = if piece_id == 0 {
                                         Some(RankContent::Empty(1))
                                     } else {
-                                        Some(RankContent::Piece(PieceId::from(piece_id - 1)))
+                                        Some(RankContent::Piece(PieceIndex::from(piece_id)))
                                     }
                                 }
                             }
@@ -1032,9 +1157,7 @@ impl ChessGame {
                         None => None,
                     })
                     .map(|square_content| match square_content {
-                        RankContent::Piece(piece_id) => {
-                            Into::<char>::into(PieceId::from(*piece_id))
-                        }
+                        RankContent::Piece(piece_id) => Into::<char>::into(*piece_id),
                         RankContent::Empty(empty_squares) => (b'0' + *empty_squares as u8) as char,
                     })
                     .collect::<String>();
@@ -1074,9 +1197,9 @@ impl ChessGame {
 
         fen_string.push(' ');
 
-        if let Some(ep_square) = self.en_passant {
-            let file = (ep_square % 8) as u8;
-            let rank = (ep_square / 8) as u8;
+        if self.en_passant != 0 {
+            let file = (self.en_passant % 8) as u8;
+            let rank = (self.en_passant / 8) as u8;
             fen_string.push((b'a' + file) as char);
             fen_string.push((b'1' + rank) as char);
         } else {
@@ -1116,8 +1239,8 @@ impl ChessGame {
     }
 
     pub fn is_valid(&self) -> bool {
-        if self.board.bitboards[PieceId::WhiteKing as usize].count_ones() != 1
-            || self.board.bitboards[PieceId::BlackKing as usize].count_ones() != 1
+        if self.board.bitboards[PieceIndex::WhiteKing as usize].count_ones() != 1
+            || self.board.bitboards[PieceIndex::BlackKing as usize].count_ones() != 1
         {
             return false;
         }
@@ -1126,7 +1249,8 @@ impl ChessGame {
             let mut sum = 0;
             let bit = 1 << bit_pos;
 
-            for piece_id in PieceId::WhiteKing as usize..PieceId::PieceMax as usize {
+            for piece_id in PieceIndex::WhiteNullPiece as usize..PieceIndex::PieceIndexMax as usize
+            {
                 sum += if self.board.bitboards[piece_id] & bit != 0 {
                     1
                 } else {
@@ -1139,6 +1263,15 @@ impl ChessGame {
             }
         }
 
+        if self.board.bitboards[PieceIndex::WhiteNullPiece as usize]
+            | self.board.bitboards[PieceIndex::BlackNullPiece as usize]
+            | self.board.bitboards[PieceIndex::WhitePad as usize]
+            | self.board.bitboards[PieceIndex::BlackPad as usize]
+            != 0
+        {
+            return false;
+        }
+
         true
     }
 
@@ -1148,18 +1281,10 @@ impl ChessGame {
 
         for square in 0..64 {
             let piece_id = self.piece_at_slow(1 << square);
-
-            if piece_id == 0 {
-                continue;
-            }
-
-            let piece_id = piece_id - 1;
-            zobrist_hash ^= zb_keys.hash_piece_squares[piece_id][square as usize];
+            zobrist_hash ^= zb_keys.hash_piece_squares_new[piece_id][square as usize];
         }
 
-        if let Some(ep_square) = self.en_passant {
-            zobrist_hash ^= zb_keys.hash_en_passant_squares[ep_square as usize];
-        }
+        zobrist_hash ^= zb_keys.hash_en_passant_squares[self.en_passant as usize];
 
         zobrist_hash ^= zb_keys.hash_castling_rights[self.castles as usize];
 
@@ -1183,32 +1308,32 @@ impl ChessGame {
         let from_rank = from_sq / 8;
         let to_rank = to_sq / 8;
 
-        let from_piece = (self.spt[from_sq as usize] - 1) as usize;
+        let from_piece = self.spt[from_sq as usize] as usize;
         let to_piece = self.spt[to_sq as usize] as usize;
 
         if to_piece != 0 {
             mv |= MV_FLAG_CAP;
         }
 
-        mv |= match (PieceId::from(from_piece), from_rank, to_rank) {
-            (PieceId::WhitePawn, 1, 3) => MV_FLAG_DPP,
-            (PieceId::BlackPawn, 6, 4) => MV_FLAG_DPP,
+        mv |= match (PieceIndex::from(from_piece), from_rank, to_rank) {
+            (PieceIndex::WhitePawn, 1, 3) => MV_FLAG_DPP,
+            (PieceIndex::BlackPawn, 6, 4) => MV_FLAG_DPP,
             _ => 0,
         };
 
-        if let Some(ep_sq) = self.en_passant {
-            let side_pawn_piece = PieceId::WhitePawn as usize + self.b_move as usize * 6;
+        if self.en_passant != 0 {
+            let side_pawn_piece = PieceIndex::WhitePawn as usize + ((self.b_move as usize) << 3);
 
-            if to_sq == ep_sq && from_piece == side_pawn_piece {
+            if to_sq == self.en_passant && from_piece == side_pawn_piece {
                 mv |= MV_FLAG_EPCAP;
             }
         }
 
-        mv |= match (PieceId::from(from_piece), from_sq, to_sq) {
-            (PieceId::WhiteKing, 4, 6) => MV_FLAGS_CASTLE_KING,
-            (PieceId::WhiteKing, 4, 2) => MV_FLAGS_CASTLE_QUEEN,
-            (PieceId::BlackKing, 60, 62) => MV_FLAGS_CASTLE_KING,
-            (PieceId::BlackKing, 60, 58) => MV_FLAGS_CASTLE_QUEEN,
+        mv |= match (PieceIndex::from(from_piece), from_sq, to_sq) {
+            (PieceIndex::WhiteKing, 4, 6) => MV_FLAGS_CASTLE_KING,
+            (PieceIndex::WhiteKing, 4, 2) => MV_FLAGS_CASTLE_QUEEN,
+            (PieceIndex::BlackKing, 60, 62) => MV_FLAGS_CASTLE_KING,
+            (PieceIndex::BlackKing, 60, 58) => MV_FLAGS_CASTLE_QUEEN,
             _ => 0,
         };
 
@@ -1221,17 +1346,17 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn bitboards(&self) -> &[u64; 12] {
+    pub fn bitboards_new(&self) -> &[u64; 16] {
         &self.board.bitboards
     }
 
     #[inline(always)]
-    pub fn bitboards_mut(&mut self) -> &mut [u64; 12] {
+    pub fn bitboards_new_mut(&mut self) -> &mut [u64; 16] {
         &mut self.board.bitboards
     }
 
     #[inline(always)]
-    pub fn ep_square(&self) -> Option<u8> {
+    pub fn ep_square(&self) -> u8 {
         self.en_passant
     }
 
@@ -1280,11 +1405,19 @@ mod tests {
     const PERFT_MOVE_VERIFICATION: bool = true;
     const MOVE_VERIFICATION_ENGINE: &str = "bin/stockfish.exe";
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, LinkedList};
     use std::io::Write;
     use std::process::{Command, Stdio};
 
     use super::*;
+
+    fn rdtsc() -> u64 {
+        unsafe { std::arch::x86_64::_rdtsc() }
+    }
+
+    fn rdtscp() -> u64 {
+        unsafe { std::arch::x86_64::__rdtscp(&mut 0u32) }
+    }
 
     fn run_verification_perft(
         depth: u8,
@@ -1391,7 +1524,7 @@ mod tests {
                     .perft::<false>(depth, &self.tables, Some(&mut perft_results))
             };
 
-            if PERFT_MOVE_VERIFICATION {
+            if !PERFT_MOVE_VERIFICATION {
                 return perft_result;
             }
 
@@ -1460,7 +1593,7 @@ mod tests {
                     let board_copy = self.board.clone();
 
                     let mv = self.board.fix_move(util::create_move(&move_str));
-                    assert!(self.board.make_move_slow(mv, &self.tables));
+                    assert!(unsafe { self.board.make_move(mv, &self.tables) });
 
                     self.moves.push(move_str.clone());
 
@@ -1500,7 +1633,7 @@ mod tests {
 
                 let mut board_copy = board.clone();
 
-                let is_legal_move = board_copy.make_move_slow(mv, &tables)
+                let is_legal_move = unsafe { board_copy.make_move(mv, &tables) }
                     && !board_copy.in_check_slow(&tables, !board_copy.b_move());
 
                 if !is_legal_move {
@@ -1563,7 +1696,7 @@ mod tests {
 
                     let board_copy = board.clone();
 
-                    let is_legal_move = board.make_move_slow(mv, &tables)
+                    let is_legal_move = unsafe { board.make_move(mv, &tables) }
                         && !board.in_check_slow(&tables, !board.b_move());
 
                     if !is_legal_move {
@@ -1688,5 +1821,139 @@ mod tests {
             let generated_fen = board.gen_fen();
             assert_eq!(generated_fen, fen);
         }
+    }
+
+    // #[test]
+    fn bench_perft() {
+        let fens = [
+            ("StartPos", 6, util::FEN_STARTPOS),
+            (
+                "MidGame",
+                5,
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            ),
+            ("EndGame", 5, "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"),
+        ];
+        let tables = Tables::new();
+
+        let bench = |fen: &'static str, depth: u8, it: usize| {
+            let mut board = ChessGame::new();
+            assert!(board.load_fen(std::hint::black_box(fen), &tables).is_ok());
+
+            let start = rdtscp();
+
+            let perft_result = board.perft::<false>(depth, &tables, None);
+
+            let end = rdtscp();
+
+            std::hint::black_box(perft_result);
+
+            let cycles = end - start;
+
+            println!("It#{} took {} Mcycles", it, cycles / 1_000_000);
+
+            cycles
+        };
+
+        const ITERATIONS: usize = 5;
+        let mut total_cycles = 0;
+
+        for fen in fens.iter() {
+            println!("{}:", fen.0);
+            for it in 0..ITERATIONS {
+                total_cycles += bench(fen.2, fen.1, it);
+            }
+            println!();
+        }
+
+        println!(
+            "Average search time over {} iterations: {} Mcycles",
+            ITERATIONS,
+            total_cycles / ITERATIONS as u64 / 1_000_000
+        );
+    }
+
+    // #[test]
+    fn bench_makemove() {
+        use rand::{Rng, SeedableRng};
+
+        let fen = "1r2k2r/p1P1qpb1/b3pnp1/n2pP3/1p4N1/2N2Q1p/PPPBBPPP/R3K2R w KQk d6 0 5";
+        let tables = Tables::new();
+        let mut board = ChessGame::new();
+        assert!(board.load_fen(std::hint::black_box(fen), &tables).is_ok());
+        let board_copy = board.clone();
+
+        let moves = [
+            "d2h6",  // Bishop quiet
+            "f3d5",  // Queen cap
+            "c7b8q", // Promotion+Cap
+            "c7c8",  // Promotion
+            "e5f6",  // Pawn cap
+            "e5d6",  // EpCap
+            "e1g1",  // Kingside castle
+            "e1c1",  // Queenside castle
+        ];
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(std::hint::black_box(42));
+
+        let mvs = moves
+            .iter()
+            .enumerate()
+            .map(|(i, mv)| board.fix_move(util::create_move(mv)))
+            .collect::<Vec<_>>();
+
+        let mut bench = |mv_string: &str, mv: u16, b: bool, it: usize| {
+            //let mut move_list = [0u16; 256];
+            let start = rdtscp();
+
+            std::hint::black_box(unsafe { board.make_move(mv, &tables) });
+            std::hint::black_box(board.in_check_slow(&tables, b));
+            // std::hint::black_box(board.gen_moves_slow(&tables, &mut move_list));
+
+            let end = rdtscp();
+
+            board = board_copy; // Reset the board state
+
+            let cycles = end - start;
+
+            cycles
+        };
+
+        const ITERATIONS: usize = 10000;
+
+        // Warmup
+        for it in 0..ITERATIONS {
+            for (index, mv_string) in moves.iter().enumerate() {
+                bench(mv_string, mvs[index], false, it);
+            }
+        }
+
+        let mut total_cycles = 0;
+        let mut cycle_total_vec = Vec::with_capacity(ITERATIONS);
+
+        let mut min = u64::MAX;
+        let mut max = 0;
+
+        for it in 0..ITERATIONS {
+            let index = rng.random_range(0..moves.len());
+            let b = rng.random_bool(0.5);
+            let cycles = bench(moves[index], mvs[index], b, it);
+
+            total_cycles += cycles;
+            cycle_total_vec.push(cycles);
+
+            min = min.min(cycles);
+            max = max.max(cycles);
+        }
+
+        cycle_total_vec.sort();
+
+        let avg = total_cycles / ITERATIONS as u64;
+        let median = cycle_total_vec[cycle_total_vec.len() / 2];
+
+        println!(
+            "Average cycles: {} (median {}), min: {}, max: {}",
+            avg, median, min, max
+        );
     }
 }

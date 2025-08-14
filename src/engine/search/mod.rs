@@ -1,9 +1,3 @@
-use crate::engine::{
-    chess,
-    search::{search_params::SearchParams, transposition::TranspositionTable},
-    tables,
-};
-
 pub struct SigAbort {}
 
 pub type AbortSignal = crossbeam::channel::Receiver<SigAbort>;
@@ -32,7 +26,10 @@ pub mod v9_prune;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{engine::chess::ChessGame, util};
+    use crate::{
+        engine::{chess_v2, search::search_params::SearchParams, tables},
+        util,
+    };
 
     fn rdtsc() -> u64 {
         unsafe { std::arch::x86_64::_rdtsc() }
@@ -43,15 +40,15 @@ mod tests {
         let tables = tables::Tables::new();
 
         let (tx, rx) = crossbeam::channel::unbounded();
-        let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
-        // let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
+        // let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
+        let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
         // let test_fen = util::FEN_STARTPOS;
 
         let bench = || {
             let mut tt = transposition::TranspositionTable::new(4);
             let mut rt = repetition::RepetitionTable::new();
 
-            let mut chess = ChessGame::new();
+            let mut chess = chess_v2::ChessGame::new();
             assert!(
                 chess
                     .load_fen(std::hint::black_box(test_fen), &tables)
@@ -63,6 +60,14 @@ mod tests {
 
             let mut search_engine =
                 v10_mvcache::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+            // Average search time over 10 iterations: 5089 Mcycles
+            // Average search time over 10 iterations: 5116 Mcycles
+            // Average search time over 10 iterations: 5225 Mcycles
+            // Average search time over 10 iterations: 5213 Mcycles
+
+            // Average search time over 10 iterations: 5055 Mcycles
+            // Average search time over 10 iterations: 5043 Mcycles
+            // Average search time over 10 iterations: 5050 Mcycles
 
             // let tx = tx.clone();
             // std::thread::spawn(move || {
