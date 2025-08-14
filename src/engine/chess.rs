@@ -1286,6 +1286,10 @@ mod tests {
 
     use super::*;
 
+    fn rdtscp() -> u64 {
+        unsafe { std::arch::x86_64::__rdtscp(&mut 0u32) }
+    }
+
     fn run_verification_perft(
         depth: u8,
         fen: &'static str,
@@ -1688,5 +1692,137 @@ mod tests {
             let generated_fen = board.gen_fen();
             assert_eq!(generated_fen, fen);
         }
+    }
+
+    // #[test]
+    fn bench_perft() {
+        let fens = [
+            ("StartPos", 6, util::FEN_STARTPOS),
+            (
+                "MidGame",
+                5,
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            ),
+            ("EndGame", 5, "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"),
+        ];
+        let tables = Tables::new();
+
+        let bench = |fen: &'static str, depth: u8, it: usize| {
+            let mut board = ChessGame::new();
+            assert!(board.load_fen(std::hint::black_box(fen), &tables).is_ok());
+
+            let start = rdtscp();
+
+            let perft_result = board.perft::<false>(depth, &tables, None);
+
+            let end = rdtscp();
+
+            std::hint::black_box(perft_result);
+
+            let cycles = end - start;
+
+            println!("It#{} took {} Mcycles", it, cycles / 1_000_000);
+
+            cycles
+        };
+
+        const ITERATIONS: usize = 5;
+        let mut total_cycles = 0;
+
+        for fen in fens.iter() {
+            println!("{}:", fen.0);
+            for it in 0..ITERATIONS {
+                total_cycles += bench(fen.2, fen.1, it);
+            }
+            println!();
+        }
+
+        println!(
+            "Average search time over {} iterations: {} Mcycles",
+            ITERATIONS,
+            total_cycles / ITERATIONS as u64 / 1_000_000
+        );
+    }
+
+    // #[test]
+    fn bench_makemove() {
+        use rand::{Rng, SeedableRng};
+
+        let fen = "1r2k2r/p1P1qpb1/b3pnp1/n2pP3/1p4N1/2N2Q1p/PPPBBPPP/R3K2R w KQk d6 0 5";
+        let tables = Tables::new();
+        let mut board = ChessGame::new();
+        assert!(board.load_fen(std::hint::black_box(fen), &tables).is_ok());
+        let board_copy = board.clone();
+
+        let moves = [
+            "d2h6",  // Bishop quiet
+            "f3d5",  // Queen cap
+            "c7b8q", // Promotion+Cap
+            "c7c8",  // Promotion
+            "e5f6",  // Pawn cap
+            "e5d6",  // EpCap
+            "e1g1",  // Kingside castle
+            "e1c1",  // Queenside castle
+        ];
+
+        let mvs = moves
+            .iter()
+            .enumerate()
+            .map(|(i, mv)| board.fix_move(util::create_move(mv)))
+            .collect::<Vec<_>>();
+
+        let mut bench = |mv_string: &str, mv: u16, it: usize| {
+            //let mut move_list = [0u16; 256];
+            let start = rdtscp();
+
+            std::hint::black_box(board.make_move_slow(mv, &tables));
+            // std::hint::black_box(board.gen_moves_slow(&tables, &mut move_list));
+
+            let end = rdtscp();
+
+            board = board_copy; // Reset the board state
+
+            let cycles = end - start;
+
+            cycles
+        };
+
+        const ITERATIONS: usize = 10000;
+
+        // Warmup
+        for it in 0..ITERATIONS {
+            for (index, mv_string) in moves.iter().enumerate() {
+                bench(mv_string, mvs[index], it);
+            }
+        }
+
+        let mut total_cycles = 0;
+        let mut cycle_total_vec = Vec::with_capacity(ITERATIONS);
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(std::hint::black_box(42));
+
+        let mut min = u64::MAX;
+        let mut max = 0;
+
+        for it in 0..ITERATIONS {
+            let index = rng.random_range(0..moves.len());
+            let cycles = bench(moves[index], mvs[index], it);
+
+            total_cycles += cycles;
+            cycle_total_vec.push(cycles);
+
+            min = min.min(cycles);
+            max = max.max(cycles);
+        }
+
+        cycle_total_vec.sort();
+
+        let avg = total_cycles / ITERATIONS as u64;
+        let median = cycle_total_vec[cycle_total_vec.len() / 2];
+
+        println!(
+            "Average cycles: {} (median {}), min: {}, max: {}",
+            avg, median, min, max
+        );
     }
 }
