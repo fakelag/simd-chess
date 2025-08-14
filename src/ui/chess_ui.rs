@@ -627,14 +627,15 @@ impl ChessUi {
                                 [option_x + square_wh[0], option_y + square_wh[1]],
                             )
                         {
-                            if let Err(err) = self.matchmaking.make_move_with_validation(
-                                (from_sq as u16) | ((to_sq as u16) << 6) | *flag,
-                            ) {
+                            let mv = self
+                                .matchmaking
+                                .board
+                                .fix_move((from_sq as u16) | ((to_sq as u16) << 6) | *flag);
+
+                            if let Err(err) = self.matchmaking.make_move_with_validation(mv) {
                                 panic!(
                                     "Invalid promotion move: {}: {}",
-                                    util::move_string(
-                                        (from_sq as u16) | ((to_sq as u16) << 6) | *flag
-                                    ),
+                                    util::move_string(mv),
                                     err
                                 );
                             }
