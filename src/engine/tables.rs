@@ -1,6 +1,9 @@
 use rand::{Rng, SeedableRng};
 
-use crate::util::{self, Side, table_mirror, table_negate_i8};
+use crate::{
+    engine::chess_v2,
+    util::{self, Align64, Side, table_mirror, table_negate_i8},
+};
 use std::arch::x86_64::*;
 
 enum File {
@@ -68,6 +71,7 @@ const EX_OUTER: u64 = const {
 
 pub struct ZobristKeys {
     pub hash_piece_squares: [[u64; 64]; 12],
+    pub hash_piece_squares_new: [[u64; 64]; 16],
     pub hash_side_to_move: u64,
     pub hash_castling_rights: [u64; 16],
     pub hash_en_passant_squares: [u64; 64],
@@ -82,7 +86,8 @@ pub struct Tables {
 impl Tables {
     pub fn new() -> Self {
         let (
-            zobrist_hash_squares,
+            zobrist_hash_squares_new,
+            zobrist_hash_squares_old,
             zobrist_side_to_move,
             zobrist_castling_rights,
             zobrist_en_passant_squares,
@@ -92,7 +97,8 @@ impl Tables {
             rook_move_mask: Self::gen_rook_move_table(),
             bishop_move_mask: Self::gen_bishop_move_table(),
             zobrist_hash_keys: Box::new(ZobristKeys {
-                hash_piece_squares: zobrist_hash_squares,
+                hash_piece_squares: zobrist_hash_squares_old[1..].try_into().unwrap(),
+                hash_piece_squares_new: zobrist_hash_squares_new,
                 hash_side_to_move: zobrist_side_to_move,
                 hash_castling_rights: zobrist_castling_rights,
                 hash_en_passant_squares: zobrist_en_passant_squares,
@@ -291,8 +297,37 @@ impl Tables {
         shifts
     };
 
+    // pub const LT_CAPTURE_OCCUPANCY_MASKS_AGGREGATE: [[u64; 16]; 64] = const {
+    //     let mut masks = [[0u64; 16]; 64];
+
+    //     let mut square = 0;
+
+    //     loop {
+    //         if square == 64 {
+    //             break;
+    //         }
+
+    //         masks[square][1] = Self::LT_KING_MOVE_MASKS[square];
+    //         // masks[square][2] = queen
+    //         masks[square][3] = Self::LT_ROOK_OCCUPANCY_MASKS[square];
+    //         masks[square][4] = Self::LT_BISHOP_OCCUPANCY_MASKS[square];
+    //         masks[square][5] = Self::LT_KNIGHT_MOVE_MASKS[square];
+    //         masks[square][6] = Self::LT_PAWN_CAPTURE_MASKS[Side::White as usize][square];
+
+    //         masks[square][9] = Self::LT_KING_MOVE_MASKS[square];
+    //         masks[square][11] = Self::LT_ROOK_OCCUPANCY_MASKS[square];
+    //         masks[square][12] = Self::LT_BISHOP_OCCUPANCY_MASKS[square];
+    //         masks[square][13] = Self::LT_KNIGHT_MOVE_MASKS[square];
+    //         masks[square][14] = Self::LT_PAWN_CAPTURE_MASKS[Side::Black as usize][square];
+
+    //         square += 1;
+    //     }
+
+    //     masks
+    // };
+
     #[cfg_attr(any(), rustfmt::skip)]
-    pub const EVAL_TABLES_INV_I8: [[i8; 64]; util::PieceId::PieceMax as usize + 2] = const {
+    pub const EVAL_TABLES_INV_I8_OLD: [[i8; 64]; util::PieceId::PieceMax as usize + 2] = const {
         /*
             Evals for white pieces in square format. Black pieces are mirrored
             and inverted for quick negative scoring.
@@ -396,6 +431,124 @@ impl Tables {
         ]
     };
 
+    #[cfg_attr(any(), rustfmt::skip)]
+    pub const EVAL_TABLES_INV_I8: Align64<[[i8; 64]; chess_v2::PieceIndex::PieceIndexMax as usize]> = const {
+        /*
+            Evals for white pieces in square format. Black pieces are mirrored
+            and inverted for quick negative scoring.
+            [a8, b8, c8, d8, e8, f8, g8, h8,
+            a7, b7, c7, d7, e7, f7, g7, h7,
+            a6, b6, c6, d6, e6, f6, g6, h6,
+            a5, b5, c5, d5, e5, f5, g5, h5,
+            a4, b4, c4, d4, e4, f4, g4, h4,
+            a3, b3, c3, d3, e3, f3, g3, h3,
+            a2, b2, c2, d2, e2, f2, g2, h2,
+            a1, b1, c1, d1, e1, f1, g1, h1]
+        */
+        let eval_white_king = [
+            -30,-40,-40,-50,-50,-40,-40,-30,
+            -30,-40,-40,-50,-50,-40,-40,-30,
+            -30,-40,-40,-50,-50,-40,-40,-30,
+            -30,-40,-40,-50,-50,-40,-40,-30,
+            -20,-30,-30,-40,-40,-30,-30,-20,
+            -10,-20,-20,-20,-20,-20,-20,-10,
+            20, 20,  0,  0,  0,  0, 20, 20,
+            20, 30, 10,  0,  0, 10, 30, 20
+        ];
+        let eval_white_king_eg = [
+            -50,-40,-30,-20,-20,-30,-40,-50,
+            -30,-20,-10,  0,  0,-10,-20,-30,
+            -30,-10, 20, 30, 30, 20,-10,-30,
+            -30,-10, 30, 40, 40, 30,-10,-30,
+            -30,-10, 30, 40, 40, 30,-10,-30,
+            -30,-10, 20, 30, 30, 20,-10,-30,
+            -30,-30,  0,  0,  0,  0,-30,-30,
+            -50,-30,-30,-30,-30,-30,-30,-50
+        ];
+        let eval_white_queen = [
+            -20,-10,-10, -5, -5,-10,-10,-20,
+            -10,  0,  0,  0,  0,  0,  0,-10,
+            -10,  0,  5,  5,  5,  5,  0,-10,
+            -5,  0,  5,  5,  5,  5,  0, -5,
+            0,  0,  5,  5,  5,  5,  0, -5,
+            -10,  5,  5,  5,  5,  5,  0,-10,
+            -10,  0,  5,  0,  0,  0,  0,-10,
+            -20,-10,-10, -5, -5,-10,-10,-20
+        ];
+        let eval_white_rook = [
+            0,  0,  0,  0,  0,  0,  0,  0,
+            5, 10, 10, 10, 10, 10, 10,  5,
+            -5,  0,  0,  0,  0,  0,  0, -5,
+            -5,  0,  0,  0,  0,  0,  0, -5,
+            -5,  0,  0,  0,  0,  0,  0, -5,
+            -5,  0,  0,  0,  0,  0,  0, -5,
+            -5,  0,  0,  0,  0,  0,  0, -5,
+            0,  0,  0,  5,  5,  0,  0,  0
+        ];
+        let eval_white_bishop = [
+            -20,-10,-10,-10,-10,-10,-10,-20,
+            -10,  0,  0,  0,  0,  0,  0,-10,
+            -10,  0,  5, 10, 10,  5,  0,-10,
+            -10,  5,  5, 10, 10,  5,  5,-10,
+            -10,  0, 10, 10, 10, 10,  0,-10,
+            -10, 10, 10, 10, 10, 10, 10,-10,
+            -10,  5,  0,  0,  0,  0,  5,-10,
+            -20,-10,-10,-10,-10,-10,-10,-20,
+        ];
+        let eval_white_knight = [
+            -50,-40,-30,-30,-30,-30,-40,-50,
+            -40,-20,  0,  0,  0,  0,-20,-40,
+            -30,  0, 10, 15, 15, 10,  0,-30,
+            -30,  5, 15, 20, 20, 15,  5,-30,
+            -30,  0, 15, 20, 20, 15,  0,-30,
+            -30,  5, 10, 15, 15, 10,  5,-30,
+            -40,-20,  0,  5,  5,  0,-20,-40,
+            -50,-40,-30,-30,-30,-30,-40,-50,
+        ];
+        let eval_white_pawn = [
+            0,  0,  0,  0,  0,  0,  0,  0,
+            50, 50, 50, 50, 50, 50, 50, 50,
+            10, 10, 20, 30, 30, 20, 10, 10,
+            5,  5, 10, 25, 25, 10,  5,  5,
+            0,  0,  0, 20, 20,  0,  0,  0,
+            5, -5,-10,  0,  0,-10, -5,  5,
+            5, 10, 10,-20,-20, 10, 10,  5,
+            0,  0,  0,  0,  0,  0,  0,  0,
+        ];
+        let tabl_zero = [
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0
+        ];
+
+        Align64([
+            // Mirror white pieces to LERF endianness
+            tabl_zero,
+            table_mirror(eval_white_king, 8),
+            table_mirror(eval_white_king_eg, 8),
+            table_mirror(eval_white_queen, 8),
+            table_mirror(eval_white_rook, 8),
+            table_mirror(eval_white_bishop, 8),
+            table_mirror(eval_white_knight, 8),
+            table_mirror(eval_white_pawn, 8),
+            // Black pieces have mappings mirrored to white pieces
+            tabl_zero,
+            table_negate_i8(eval_white_king),
+            table_negate_i8(eval_white_king_eg),
+            table_negate_i8(eval_white_queen),
+            table_negate_i8(eval_white_rook),
+            table_negate_i8(eval_white_bishop),
+            table_negate_i8(eval_white_knight),
+            table_negate_i8(eval_white_pawn),
+        ])
+    };
+
+    #[inline(always)]
     pub fn get_slider_move_mask<const IS_ROOK: bool>(&self, square: usize, blockers: u64) -> u64 {
         debug_assert!(square < 64, "Square index out of bounds");
 
@@ -415,6 +568,39 @@ impl Tables {
             self.rook_move_mask[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index]
         } else {
             self.bishop_move_mask[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index]
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn get_slider_move_mask_unchecked<const IS_ROOK: bool>(
+        &self,
+        square: usize,
+        blockers: u64,
+    ) -> u64 {
+        debug_assert!(square < 64, "Square index out of bounds");
+
+        unsafe {
+            let occupancy_index = Self::calc_occupancy_index_unchecked::<IS_ROOK>(square, blockers);
+
+            debug_assert!(
+                occupancy_index
+                    < if IS_ROOK {
+                        Self::ROOK_OCCUPANCY_MAX
+                    } else {
+                        Self::BISHOP_OCCUPANCY_MAX
+                    },
+                "Occupancy index out of bounds"
+            );
+
+            if IS_ROOK {
+                *self
+                    .rook_move_mask
+                    .get_unchecked(square * Self::ROOK_OCCUPANCY_MAX + occupancy_index)
+            } else {
+                *self
+                    .bishop_move_mask
+                    .get_unchecked(square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index)
+            }
         }
     }
 
@@ -550,6 +736,7 @@ impl Tables {
         moves
     }
 
+    #[inline(always)]
     fn calc_occupancy_index<const IS_ROOK: bool>(square: usize, blockers: u64) -> usize {
         let (magic, shamt) = if IS_ROOK {
             (
@@ -563,6 +750,27 @@ impl Tables {
             )
         };
         (blockers.wrapping_mul(magic) >> shamt) as usize
+    }
+
+    #[inline(always)]
+    unsafe fn calc_occupancy_index_unchecked<const IS_ROOK: bool>(
+        square: usize,
+        blockers: u64,
+    ) -> usize {
+        unsafe {
+            let (magic, shamt) = if IS_ROOK {
+                (
+                    *Tables::LT_ROOK_OCCUPANCY_MAGICS.get_unchecked(square),
+                    *Tables::LT_ROOK_OCCUPANCY_SHIFTS.get_unchecked(square),
+                )
+            } else {
+                (
+                    *Tables::LT_BISHOP_OCCUPANCY_MAGICS.get_unchecked(square),
+                    *Tables::LT_BISHOP_OCCUPANCY_SHIFTS.get_unchecked(square),
+                )
+            };
+            (blockers.wrapping_mul(magic) >> shamt) as usize
+        }
     }
 
     fn gen_slider_occupancy_premutations<const IS_ROOK: bool>() -> Box<[u64]> {
@@ -652,18 +860,22 @@ impl Tables {
         (hash_magics, hash_shifts)
     }
 
-    pub fn gen_zobrist_hashes() -> ([[u64; 64]; 12], u64, [u64; 16], [u64; 64]) {
+    pub fn gen_zobrist_hashes() -> ([[u64; 64]; 16], [[u64; 64]; 13], u64, [u64; 16], [u64; 64]) {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-        let mut hash_squares = [[0u64; 64]; 12];
+        let mut hash_squares_old = [[0u64; 64]; 13];
+        let mut hash_squares_new = [[0u64; 64]; 16];
         let mut hash_side_to_move = 0;
         let mut hash_castling_rights: [u64; 16] = [0; 16];
         let mut zobrist_en_passant_squares = [0; 64];
 
-        for piece in 0..12 {
+        for piece in 1..13 {
             for square in 0..64 {
                 let hash_key = rng.random::<u64>();
-                hash_squares[piece][square] = hash_key;
+                hash_squares_old[piece][square] = hash_key;
+                hash_squares_new
+                    [chess_v2::PieceIndex::from(util::PieceId::from(piece - 1)) as usize][square] =
+                    hash_key;
             }
         }
 
@@ -673,12 +885,13 @@ impl Tables {
 
         hash_side_to_move = rng.random::<u64>();
 
-        for square in 0..64 {
+        for square in 1..64 {
             zobrist_en_passant_squares[square] = rng.random::<u64>();
         }
 
         (
-            hash_squares,
+            hash_squares_new,
+            hash_squares_old,
             hash_side_to_move,
             hash_castling_rights,
             zobrist_en_passant_squares,

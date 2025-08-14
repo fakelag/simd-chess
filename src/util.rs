@@ -5,6 +5,9 @@ use crate::engine::{
 
 pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
+#[repr(align(64))]
+pub struct Align64<T>(pub T);
+
 #[macro_export]
 macro_rules! pop_ls1b {
     ($bitboard:ident) => {{

@@ -511,7 +511,7 @@ impl<'a> Search<'a> {
 
         let boards = self.chess.bitboards();
 
-        const PST: &[[i8; 64]; 14] = &tables::Tables::EVAL_TABLES_INV_I8;
+        const PST: &[[i8; 64]; 14] = &tables::Tables::EVAL_TABLES_INV_I8_OLD;
 
         unsafe {
             let is_endgame = self.is_endgame() as usize;
@@ -651,7 +651,7 @@ impl<'a> Search<'a> {
                 };
 
                 let square_bonus =
-                    tables::Tables::EVAL_TABLES_INV_I8[pst_index][piece_square as usize];
+                    tables::Tables::EVAL_TABLES_INV_I8_OLD[pst_index][piece_square as usize];
                 final_score += WEIGHT_TABLE[piece_id] + square_bonus as i32;
             }
         }

@@ -13,6 +13,7 @@ pub mod search_params;
 pub mod transposition;
 
 pub mod v10_mvcache;
+pub mod v11_opt;
 pub mod v1_negamax;
 pub mod v2_alphabeta;
 pub mod v3_itdep;
@@ -27,7 +28,7 @@ pub mod v9_prune;
 mod tests {
     use super::*;
     use crate::{
-        engine::{chess_v2, search::search_params::SearchParams, tables},
+        engine::{chess, chess_v2, search::search_params::SearchParams, tables},
         util,
     };
 
@@ -58,8 +59,7 @@ mod tests {
             let mut params = SearchParams::new();
             params.depth = Some(std::hint::black_box(10));
 
-            let mut search_engine =
-                v10_mvcache::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+            let mut search_engine = v11_opt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
             // Average search time over 10 iterations: 5089 Mcycles
             // Average search time over 10 iterations: 5116 Mcycles
             // Average search time over 10 iterations: 5225 Mcycles
@@ -68,6 +68,14 @@ mod tests {
             // Average search time over 10 iterations: 5055 Mcycles
             // Average search time over 10 iterations: 5043 Mcycles
             // Average search time over 10 iterations: 5050 Mcycles
+
+            // v10_mvcache
+            // Average search time over 10 iterations: 4998 Mcycles
+            // Average search time over 10 iterations: 5050 Mcycles
+
+            // v11_opt
+            // Average search time over 10 iterations: 4900 Mcycles
+            // Average search time over 10 iterations: 4822 Mcycles
 
             // let tx = tx.clone();
             // std::thread::spawn(move || {
