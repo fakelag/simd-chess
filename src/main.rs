@@ -5,14 +5,14 @@ use std::arch::x86_64::*;
 use std::hint::black_box;
 use std::{cell::SyncUnsafeCell, thread::JoinHandle};
 
-use crossbeam::{channel, epoch::Pointable};
+use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::engine::chess_v2::PieceIndex;
 use crate::{
     engine::{
         chess, chess_v2,
-        search::{self, AbortSignal, SearchStrategy, SigAbort, search_params, transposition},
+        search::{self, AbortSignal, SigAbort, search_params, transposition},
         tables,
     },
     ui::chess_ui::ChessUi,
@@ -767,6 +767,7 @@ fn test1(b_move: bool, tables: &tables::Tables, bitboards: &[u64; 16]) {
 
         assert!(pxq_cursor <= 8);
 
+        println!("pxq_cursor: {}", pxq_cursor);
         println!("pxq_arr: {:?}", pxq_arr);
 
         // print_vec_epi64("magics_x8", magics_x8);
