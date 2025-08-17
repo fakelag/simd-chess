@@ -80,6 +80,8 @@ pub struct ZobristKeys {
 pub struct Tables {
     rook_move_mask: Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]>,
     bishop_move_mask: Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]>,
+    pub slider_combined_move_masks:
+        Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX + 64 * Self::BISHOP_OCCUPANCY_MAX]>,
     pub zobrist_hash_keys: Box<ZobristKeys>,
 }
 
@@ -93,9 +95,30 @@ impl Tables {
             zobrist_en_passant_squares,
         ) = Self::gen_zobrist_hashes();
 
+        let rook_move_mask = Self::gen_rook_move_table();
+        let bishop_move_mask = Self::gen_bishop_move_table();
+
+        let slider_combined_move_masks = {
+            let mut masks =
+                vec![0; 64 * Self::ROOK_OCCUPANCY_MAX + 64 * Self::BISHOP_OCCUPANCY_MAX];
+            for square in 0..64 {
+                for j in 0..Self::ROOK_OCCUPANCY_MAX {
+                    masks[square * Self::ROOK_OCCUPANCY_MAX + j] =
+                        rook_move_mask[square * Self::ROOK_OCCUPANCY_MAX + j];
+                }
+                for j in 0..Self::BISHOP_OCCUPANCY_MAX {
+                    masks
+                        [64 * Self::ROOK_OCCUPANCY_MAX + square * Self::BISHOP_OCCUPANCY_MAX + j] =
+                        bishop_move_mask[square * Self::BISHOP_OCCUPANCY_MAX + j];
+                }
+            }
+            masks.into_boxed_slice().try_into().unwrap()
+        };
+
         Self {
-            rook_move_mask: Self::gen_rook_move_table(),
-            bishop_move_mask: Self::gen_bishop_move_table(),
+            rook_move_mask,
+            bishop_move_mask,
+            slider_combined_move_masks,
             zobrist_hash_keys: Box::new(ZobristKeys {
                 hash_piece_squares: zobrist_hash_squares_old[1..].try_into().unwrap(),
                 hash_piece_squares_new: zobrist_hash_squares_new,
@@ -106,8 +129,10 @@ impl Tables {
         }
     }
 
-    const ROOK_OCCUPANCY_MAX: usize = 1 << 12;
-    const BISHOP_OCCUPANCY_MAX: usize = 1 << 9;
+    pub const ROOK_OCCUPANCY_BITS: usize = 12;
+    pub const BISHOP_OCCUPANCY_BITS: usize = 9;
+    pub const ROOK_OCCUPANCY_MAX: usize = 1 << Self::ROOK_OCCUPANCY_BITS;
+    pub const BISHOP_OCCUPANCY_MAX: usize = 1 << Self::BISHOP_OCCUPANCY_BITS;
 
     pub const LT_KING_MOVE_MASKS: [u64; 64] = const {
         let mut moves = [0; 64];
@@ -297,7 +322,7 @@ impl Tables {
         shifts
     };
 
-    // pub const LT_CAPTURE_OCCUPANCY_MASKS_AGGREGATE: [[u64; 16]; 64] = const {
+    // pub const LT_CAPTURE_OCCUPANCY_MASKS_AGGREGATE: Align64<[[u64; 16]; 64]> = const {
     //     let mut masks = [[0u64; 16]; 64];
 
     //     let mut square = 0;
@@ -308,7 +333,6 @@ impl Tables {
     //         }
 
     //         masks[square][1] = Self::LT_KING_MOVE_MASKS[square];
-    //         // masks[square][2] = queen
     //         masks[square][3] = Self::LT_ROOK_OCCUPANCY_MASKS[square];
     //         masks[square][4] = Self::LT_BISHOP_OCCUPANCY_MASKS[square];
     //         masks[square][5] = Self::LT_KNIGHT_MOVE_MASKS[square];
@@ -323,7 +347,7 @@ impl Tables {
     //         square += 1;
     //     }
 
-    //     masks
+    //     Align64(masks)
     // };
 
     #[cfg_attr(any(), rustfmt::skip)]
@@ -549,6 +573,43 @@ impl Tables {
     };
 
     #[inline(always)]
+    pub fn calc_occupancy_index<const IS_ROOK: bool>(square: usize, blockers: u64) -> usize {
+        let (magic, shamt) = if IS_ROOK {
+            (
+                Tables::LT_ROOK_OCCUPANCY_MAGICS[square],
+                Tables::LT_ROOK_OCCUPANCY_SHIFTS[square],
+            )
+        } else {
+            (
+                Tables::LT_BISHOP_OCCUPANCY_MAGICS[square],
+                Tables::LT_BISHOP_OCCUPANCY_SHIFTS[square],
+            )
+        };
+        (blockers.wrapping_mul(magic) >> shamt) as usize
+    }
+
+    #[inline(always)]
+    pub unsafe fn calc_occupancy_index_unchecked<const IS_ROOK: bool>(
+        square: usize,
+        blockers: u64,
+    ) -> usize {
+        unsafe {
+            let (magic, shamt) = if IS_ROOK {
+                (
+                    *Tables::LT_ROOK_OCCUPANCY_MAGICS.get_unchecked(square),
+                    *Tables::LT_ROOK_OCCUPANCY_SHIFTS.get_unchecked(square),
+                )
+            } else {
+                (
+                    *Tables::LT_BISHOP_OCCUPANCY_MAGICS.get_unchecked(square),
+                    *Tables::LT_BISHOP_OCCUPANCY_SHIFTS.get_unchecked(square),
+                )
+            };
+            (blockers.wrapping_mul(magic) >> shamt) as usize
+        }
+    }
+
+    #[inline(always)]
     pub fn get_slider_move_mask<const IS_ROOK: bool>(&self, square: usize, blockers: u64) -> u64 {
         debug_assert!(square < 64, "Square index out of bounds");
 
@@ -736,43 +797,6 @@ impl Tables {
         moves
     }
 
-    #[inline(always)]
-    fn calc_occupancy_index<const IS_ROOK: bool>(square: usize, blockers: u64) -> usize {
-        let (magic, shamt) = if IS_ROOK {
-            (
-                Tables::LT_ROOK_OCCUPANCY_MAGICS[square],
-                Tables::LT_ROOK_OCCUPANCY_SHIFTS[square],
-            )
-        } else {
-            (
-                Tables::LT_BISHOP_OCCUPANCY_MAGICS[square],
-                Tables::LT_BISHOP_OCCUPANCY_SHIFTS[square],
-            )
-        };
-        (blockers.wrapping_mul(magic) >> shamt) as usize
-    }
-
-    #[inline(always)]
-    unsafe fn calc_occupancy_index_unchecked<const IS_ROOK: bool>(
-        square: usize,
-        blockers: u64,
-    ) -> usize {
-        unsafe {
-            let (magic, shamt) = if IS_ROOK {
-                (
-                    *Tables::LT_ROOK_OCCUPANCY_MAGICS.get_unchecked(square),
-                    *Tables::LT_ROOK_OCCUPANCY_SHIFTS.get_unchecked(square),
-                )
-            } else {
-                (
-                    *Tables::LT_BISHOP_OCCUPANCY_MAGICS.get_unchecked(square),
-                    *Tables::LT_BISHOP_OCCUPANCY_SHIFTS.get_unchecked(square),
-                )
-            };
-            (blockers.wrapping_mul(magic) >> shamt) as usize
-        }
-    }
-
     fn gen_slider_occupancy_premutations<const IS_ROOK: bool>() -> Box<[u64]> {
         let occupancy_table_size = if IS_ROOK {
             Self::ROOK_OCCUPANCY_MAX
@@ -804,7 +828,7 @@ impl Tables {
         masks
     }
 
-    fn gen_slider_hash_functions<const IS_ROOK: bool>() -> ([u64; 64], [u8; 64]) {
+    pub fn gen_slider_hash_functions<const IS_ROOK: bool>() -> ([u64; 64], [u8; 64]) {
         use rand::Rng;
         let mut rng = rand::rng();
 
@@ -840,6 +864,8 @@ impl Tables {
                 rng_magic = rng.random::<u64>();
                 rng_magic &= rng.random::<u64>();
                 rng_magic &= rng.random::<u64>();
+                rng_magic &= 0x00FFFFFF_FFFFFFFF; // Ensure the magic is 48 bits
+                rng_magic |= (shamt as u64) << 56; // Set the shift bits
 
                 for occupancy_index in 0..(1 << occupancy_bits) {
                     let premutation = premuts[square * occupancy_table_size + occupancy_index];
@@ -900,41 +926,71 @@ impl Tables {
 
     #[cfg_attr(any(), rustfmt::skip)]
     pub const LT_ROOK_OCCUPANCY_MAGICS: [u64; 64] = [
-        0x2a0010c201006080, 0x3080200212814000, 0x0100084020001100, 0x0100100100a08844,
-        0x8a00220004102088, 0x8100010002285400, 0x4400011048118204, 0x0100014021000682,
-        0x0000802040028001, 0x0000401000402000, 0x0001002001004810, 0x0203002049045000,
-        0x0211001004080300, 0x0002002200241059, 0x0482000402003881, 0x0603800100004080,
-        0x04108180024000a1, 0x0402404000a01000, 0x2440110040200100, 0xc000120028204201,
-        0x5208008008808401, 0x0002008002800400, 0x00080c0010080122, 0x4228020004088851,
-        0x4102400180218001, 0x0069400040201000, 0x00a0016080500082, 0x0008001010010200,
-        0x0008000900049100, 0x0404040080800200, 0x0801280400021110, 0x0524012200008044,
-        0x0080002000400140, 0x5860045000400420, 0x0240520082002240, 0x0100825000802800,
-        0x4000800400804800, 0x1001000209001c00, 0x0002800200801100, 0x2149040042001491,
-        0x1020400180068020, 0x8000810040010020, 0x0810200010008080, 0xc0300021004b0010,
-        0x8024008040080800, 0x1082000491020008, 0x00808802810c0030, 0x6002010880420004,
-        0x8001034082002200, 0x0020044008a18080, 0x8400100020008680, 0x11b0008212080080,
-        0x0404840008008080, 0x000a000400801280, 0x0360800200010080, 0x4401004104208200,
-        0x0042800101302441, 0x0000120109c02082, 0x800c20010140120b, 0x0012350120300029,
-        0x0026000820b08c02, 0x1005000204000801, 0x0000009005020804, 0x004020c024008906,
+        0x3480022080400650, 0x3540004820021000, 0x3500200040100900, 0x3500100189004420,
+        0x3500080011000422, 0x3500040011000802, 0x350050a402000500, 0x34800040a1800100,
+        0x3508800040043080, 0x3608400050006000, 0x3600806000801000, 0x3620800800500084,
+        0x3609802400808800, 0x360200100200880c, 0x3601005401001200, 0x3582000204004085,
+        0x3508208000400080, 0x3621848020004000, 0x3608808020001000, 0x3601050018201000,
+        0x3642808008002400, 0x3601010004000802, 0x3600040010184502, 0x350842000c128041,
+        0x3580004040092000, 0x36406000c01000c0, 0x36c6028200204010, 0x3601022900201001,
+        0x3694140080080280, 0x3646002200087004, 0x3681020400088110, 0x3500624a00008104,
+        0x3588488001002100, 0x3600c00901002080, 0x36860020820050c0, 0x3602090121001000,
+        0x3600800402800800, 0x3606008802004c10, 0x3602000442000811, 0x350000a242000401,
+        0x3500804001208000, 0x361000a004404000, 0x3601082000410010, 0x3602001140620008,
+        0x3655908801010004, 0x3642009008020004, 0x3603290810140002, 0x3581808a44020005,
+        0x35c0048000204180, 0x3640002010080020, 0x3600100820008080, 0x3600300021000900,
+        0x3600800400080080, 0x3600020080140080, 0x3600182605101400, 0x35062c540a810600,
+        0x3401008000443029, 0x3588803600c10022, 0x350831a00100416b, 0x35100051000904a1,
+        0x3505030800100301, 0x3501002208040001, 0x350009024801900c, 0x3400002400850042,
     ];
 
     #[cfg_attr(any(), rustfmt::skip)]
     pub const LT_BISHOP_OCCUPANCY_MAGICS: [u64; 64] = [
-        0x0004100a00410a00, 0x080a104411004020, 0x010c08008304820a, 0x1004040180900000,
-        0x0111114001060000, 0x0208882008166000, 0x0911420220603000, 0x0001004644200812,
-        0x2880c80208080100, 0x0100040104440182, 0x0000100186004051, 0x0001084845002540,
-        0x20d0020a1000a048, 0x0820011002900540, 0x0464040b11082012, 0x8804020200c20804,
-        0x81c0400810240282, 0x0488004210040180, 0x0048001000242022, 0x8041000824050130,
-        0x0000800400a02101, 0x004a000410440401, 0x4003204201104220, 0x0110844904880100,
-        0x0010080005081004, 0x0208180020434100, 0x0204010050010060, 0x0400404014010200,
-        0x8110040002802102, 0x282800c0820100a1, 0x0014142220410404, 0x0820411802010501,
-        0x801009081445b001, 0x0200882040440400, 0x3820402800100040, 0x4004120281080080,
-        0x0009100400008021, 0x0030004044060100, 0x0008010840840a01, 0x2022020200004248,
-        0x0040981d40001010, 0x0044010d10000918, 0x1042540228040400, 0x0204420202009420,
-        0x0008200410422400, 0x40c4008809400200, 0x8220440142138040, 0x0011012210816e08,
-        0x2048424230400480, 0x0203040211140580, 0x0800208404060020, 0x000a0400420200c0,
-        0x130000c0104100a8, 0x4044396008128000, 0x8020240c02b41004, 0x0444080481020000,
-        0x4042008404020238, 0x0040002582082000, 0x0880400022011090, 0x40a00001802a0800,
-        0x40018a0c04104405, 0x0400002020220182, 0x0000216002008302, 0x40d0024809002208,
+        0x3a90441d06440101, 0x3b02244802004002, 0x3b300404f0442100, 0x3b04040480040100,
+        0x3b01104008080208, 0x3b018804c0004800, 0x3b00880410040510, 0x3a04508410021002,
+        0x3b00401019020088, 0x3b00884208062220, 0x3b02042400a60020, 0x3b20424081031900,
+        0x3b00511040000040, 0x3b00010422401000, 0x3b0001c210242008, 0x3bc0008404010400,
+        0x3bc0060444040401, 0x3b600c8608010514, 0x3922041040820200, 0x3908200404001092,
+        0x3904008080a08013, 0x390600a108011400, 0x3b05040201100200, 0x3b0180090404a620,
+        0x3b24421020080100, 0x3b13106009501100, 0x3904280010084cc0, 0x3704004044010002,
+        0x37008c000a802009, 0x3901010002014120, 0x3b08110116110110, 0x3b40518002008400,
+        0x3b90022020190891, 0x3b0128210c020400, 0x3900220800404884, 0x3722040108040100,
+        0x3750038a00016200, 0x3920808500820120, 0x3b02008201090800, 0x3b31004110020108,
+        0x3b18443208402000, 0x3b920201210844a0, 0x3904a10802400800, 0x39004020130a5801,
+        0x3900200208802404, 0x3910200103000032, 0x3b5202020c000200, 0x3b82420401101120,
+        0x3b06011008040100, 0x3b20248404200820, 0x3b1002a402280114, 0x3b20808084040440,
+        0x3b10044005044000, 0x3b08600401020002, 0x3b50a00104388126, 0x3b2008020080250a,
+        0x3a8900880c020a10, 0x3b002503009a2000, 0x3b00280242080400, 0x3b18108000411080,
+        0x3b40020031120202, 0x3b30e25011100120, 0x3b40282004440060, 0x3aa2902200830200
     ];
+
+    pub const LT_SLIDER_MAGICS_GATHER: Align64<[[u64; 64]; 2]> = const {
+        Align64([
+            Tables::LT_ROOK_OCCUPANCY_MAGICS,
+            Tables::LT_BISHOP_OCCUPANCY_MAGICS,
+        ])
+    };
+
+    pub const LT_SLIDER_MASKS_GATHER: Align64<[[u64; 64]; 2]> = const {
+        Align64([
+            Tables::LT_ROOK_OCCUPANCY_MASKS,
+            Tables::LT_BISHOP_OCCUPANCY_MASKS,
+        ])
+    };
+
+    pub const LT_NON_SLIDER_MASKS_GATHER: Align64<[[u64; 64]; 16]> = const {
+        let mut masks = [[0u64; 64]; 16];
+
+        masks[chess_v2::PieceIndex::WhiteKing as usize] = Self::LT_KING_MOVE_MASKS;
+        masks[chess_v2::PieceIndex::WhiteKnight as usize] = Self::LT_KNIGHT_MOVE_MASKS;
+        masks[chess_v2::PieceIndex::WhitePawn as usize] =
+            Self::LT_PAWN_CAPTURE_MASKS[Side::White as usize];
+
+        masks[chess_v2::PieceIndex::BlackKing as usize] = Self::LT_KING_MOVE_MASKS;
+        masks[chess_v2::PieceIndex::BlackKnight as usize] = Self::LT_KNIGHT_MOVE_MASKS;
+        masks[chess_v2::PieceIndex::BlackPawn as usize] =
+            Self::LT_PAWN_CAPTURE_MASKS[Side::Black as usize];
+
+        Align64(masks)
+    };
 }
