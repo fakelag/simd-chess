@@ -634,25 +634,41 @@ fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
         let const_64_x8 = _mm512_set1_epi64(64);
         let const_1_x8 = _mm512_set1_epi64(1);
         let const_n1_x8 = _mm512_set1_epi64(-1);
+        let const_zero_x8 = _mm512_setzero_si512();
 
         // Flags
         let const_promotion_flag_x8 = _mm512_set1_epi64(chess_v2::MV_FLAG_PROMOTION as u64 as i64);
         let const_epcap_flag_x8 = _mm512_set1_epi64(chess_v2::MV_FLAG_EPCAP as u64 as i64);
         let const_cap_flag_x8 = _mm512_set1_epi64(chess_v2::MV_FLAG_CAP as u64 as i64);
+        let const_dpp_flag_x8 = _mm512_set1_epi64(chess_v2::MV_FLAG_DPP as u64 as i64);
 
         // let bitboard_x8 = [pawn1, pawn2, pawn3, knight, bishop, rook, queen, king];
         // let bitboard_x8 = load_bitboards_with_split_pawns(&bitboards, friendly_move_offset);
         // print_vec("bitboard_x8", bitboard_x8);
+        let b_move_rank_offset = (56 * (b_move as u64)) as u8;
 
         let friendly_move_offset_x8 = _mm512_set1_epi64(friendly_move_offset as i64);
         let full_board_x8 = _mm512_set1_epi64(full_board as i64);
+        let full_board_inv_x8 = _mm512_set1_epi64(!full_board as i64);
         let friendly_board_inv_x8 = _mm512_set1_epi64(!friendly_board as i64);
         let opponent_board_x8 = _mm512_set1_epi64(opponent_board as i64);
-        let promotion_rank_x8 = _mm512_set1_epi64(0b11111111 << (56 * (!b_move as u64)));
+        let pawn_promotion_rank_x8 =
+            _mm512_set1_epi64((0xFF00000000000000u64 >> b_move_rank_offset) as i64);
+        let pawn_double_push_rank_x8 =
+            _mm512_set1_epi64((0xFF000000u64 << ((b_move as usize) << 3)) as i64);
+
+        let pawn_push_offset_ranks =
+            (opponent_move_offset as u64 + b_move_rank_offset as u64) as i64;
+        let pawn_push_rank_rolv_offset_x8 = _mm512_set1_epi64(pawn_push_offset_ranks); // white=8, black=56
+        // let pawn_push_double_rolv_offset_x8 = _mm512_set1_epi64(pawn_push_offset_ranks << 1); // white=16, black=48
 
         let (mut sliders_x8, mut nonsliders_x8) =
             load_bitboards_with_sliders(&bitboards, friendly_move_offset);
 
+        let mut quiet_moves: [i16; 218] = [0i16; 218];
+        let mut quiet_cursor = 0u8;
+
+        // @todo 2*8*30=480 bytes - alloc in heap to keep stack small
         let mut capture_moves: [[i16; 8]; 30] = [[0i16; 8]; 30];
         let mut capture_cursors: [u8; 30] = [0; 30];
 
@@ -712,9 +728,9 @@ fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
 
         loop {
             // @todo - Try sub+and to pop ls1b instead of ms1b
-            let mut one_of_each_slider_index_x8 =
+            let one_of_each_slider_index_x8 =
                 _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
-            let mut one_of_each_non_slider_index_x8 =
+            let one_of_each_non_slider_index_x8 =
                 _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(nonsliders_x8));
 
             let active_pieces_non_slider_mask =
@@ -724,11 +740,16 @@ fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
                 break;
             }
 
+            // Source square bit for masking, shifting by -1 zeroes bits for inactive lanes
+            let src_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
+
             let slider_moves_x8 = get_slider_moves_x8::<0b00000111>(
                 tables,
                 full_board_x8,
                 one_of_each_slider_index_x8,
             );
+
+            let pawn_mask = 0b00000001 & active_pieces_non_slider_mask;
 
             let const_piece_indices_x8 = _mm512_set_epi64(
                 64 * PieceIndex::WhiteNullPiece as i64,
@@ -743,7 +764,7 @@ fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
 
             let mut non_slider_moves_x8 = _mm512_mask_i64gather_epi64(
                 _mm512_setzero_si512(),
-                0b00000111,
+                active_pieces_non_slider_mask,
                 _mm512_add_epi64(
                     _mm512_add_epi64(const_piece_indices_x8, friendly_move_offset_x8),
                     one_of_each_non_slider_index_x8,
@@ -753,9 +774,52 @@ fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
             );
             non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
 
-            let pawn_mask = 0b00000001;
-            // let mut pxq_x8 = _mm_setzero_si128();
-            // let mut pxq_cursor_x8 = _mm_set_epi16(0, 1, 2, 3, 4, 5, 6, 7);
+            // Add pawn push moves
+            {
+                let pawn_push_single_bit_x8 = _mm512_and_epi64(
+                    _mm512_rolv_epi64(src_sq_bit_x8, pawn_push_rank_rolv_offset_x8),
+                    full_board_inv_x8,
+                );
+                let pawn_push_double_bit_x8 = _mm512_and_epi64(
+                    _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
+                    _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
+                );
+                let pawn_push_single_dst_sq_x8 = _mm512_slli_epi64(
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_single_bit_x8)),
+                    6,
+                );
+                let pawn_push_double_dst_sq_x8 = _mm512_slli_epi64(
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_double_bit_x8)),
+                    6,
+                );
+                let pawn_push_single_mask =
+                    pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
+                let pawn_push_double_mask =
+                    pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
+
+                let pawn_push_single_move_epi16_x8 = _mm512_cvtepi64_epi16(_mm512_or_epi64(
+                    pawn_push_single_dst_sq_x8,
+                    one_of_each_non_slider_index_x8,
+                ));
+                let pawn_push_double_move_epi16_x8 = _mm512_cvtepi64_epi16(_mm512_or_epi64(
+                    pawn_push_double_dst_sq_x8,
+                    _mm512_or_epi64(one_of_each_non_slider_index_x8, const_dpp_flag_x8),
+                ));
+
+                _mm_mask_compressstoreu_epi16(
+                    quiet_moves.as_mut_ptr().add(quiet_cursor as usize),
+                    pawn_push_single_mask,
+                    pawn_push_single_move_epi16_x8,
+                );
+                quiet_cursor += pawn_push_single_mask.count_ones() as u8;
+
+                _mm_mask_compressstoreu_epi16(
+                    quiet_moves.as_mut_ptr().add(quiet_cursor as usize),
+                    pawn_push_double_mask,
+                    pawn_push_double_move_epi16_x8,
+                );
+                quiet_cursor += pawn_push_double_mask.count_ones() as u8;
+            }
 
             loop {
                 let dst_sq_x8 =
@@ -780,7 +844,7 @@ fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
                     // Promotion flag for pawn moves on the last rank
                     // NOTE: Requires special handling on move maker side
                     let promotion_mask =
-                        pawn_mask & _mm512_test_epi64_mask(dst_sq_bit_x8, promotion_rank_x8);
+                        pawn_mask & _mm512_test_epi64_mask(dst_sq_bit_x8, pawn_promotion_rank_x8);
 
                     // EP flag for en passant captures
                     let ep_mask = pawn_mask & _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_ep_x8);
@@ -880,7 +944,22 @@ fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
                 "[{:?}]: {:?}",
                 std::mem::transmute::<u8, CaptureMoves>(i),
                 capture_moves[i as usize]
+                    .iter()
+                    .map(|mv| {
+                        if *mv == 0 {
+                            return "".to_string();
+                        }
+                        util::move_string_dbg(*mv as u16)
+                    })
+                    .collect::<Vec<_>>()
             );
+        }
+
+        for mv in quiet_moves {
+            if mv == 0 {
+                break;
+            }
+            println!("Quiet: {:?} ({})", mv, util::move_string_dbg(mv as u16));
         }
 
         // print_vec_epi64("magics_x8", magics_x8);
@@ -933,7 +1012,7 @@ fn testing() {
         board
             .load_fen(
                 // "rnbqkbnr/pppppppp/8/8/5q1q/6P1/PPPPPPP1/RNBQKBNR w KQkq - 0 1",
-                "rnbqkbnr/pPpppp1p/4P3/6pP/5q1q/6P1/PPPP4/RNBQKBNR w KQkq g6 0 2",
+                "rnbqkbnr/pPpppp1p/4P3/6pP/5q1q/1P4P1/P1PP4/RNBQKBNR w KQkq g6 0 2",
                 &tables
             )
             .is_ok()
@@ -989,6 +1068,7 @@ fn testing() {
 
 fn main() {
     testing();
+
     // return;
     // use std::arch::x86_64::*;
     // use std::hint::black_box;
