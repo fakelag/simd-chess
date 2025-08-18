@@ -596,8 +596,11 @@ fn get_slider_moves_x8<const MASK: u8>(
 }
 
 #[inline(never)]
-fn test1(b_move: bool, tables: &tables::Tables, bitboards: &[u64; 16]) {
+fn test1(board: &chess_v2::ChessGame, tables: &tables::Tables) {
     unsafe {
+        let bitboards = board.bitboards_new();
+        let b_move = board.b_move();
+
         let friendly_move_offset = (b_move as usize) << 3;
         let opponent_move_offset = (!b_move as usize) << 3;
 
@@ -605,10 +608,27 @@ fn test1(b_move: bool, tables: &tables::Tables, bitboards: &[u64; 16]) {
         let friendly_board = bitboards[friendly_move_offset..friendly_move_offset + 8]
             .iter()
             .fold(0, |acc, &bb| acc | bb);
+        let opponent_board = bitboards[opponent_move_offset..opponent_move_offset + 8]
+            .iter()
+            .fold(0, |acc, &bb| acc | bb);
 
         let opponent_queen_x8 = _mm512_set1_epi64(
             bitboards[PieceIndex::WhiteQueen as usize + opponent_move_offset] as i64,
         );
+        let opponent_rook_x8 = _mm512_set1_epi64(
+            bitboards[PieceIndex::WhiteRook as usize + opponent_move_offset] as i64,
+        );
+        let opponent_bishop_x8 = _mm512_set1_epi64(
+            bitboards[PieceIndex::WhiteBishop as usize + opponent_move_offset] as i64,
+        );
+        let opponent_knight_x8 = _mm512_set1_epi64(
+            bitboards[PieceIndex::WhiteKnight as usize + opponent_move_offset] as i64,
+        );
+        let opponent_pawn_x8 = _mm512_set1_epi64(
+            bitboards[PieceIndex::WhitePawn as usize + opponent_move_offset] as i64,
+        );
+        let opponent_ep_x8 =
+            _mm512_set1_epi64((1u64 << (board.ep_square() as u64) >> 1 << 1) as i64);
 
         let const_63_x8 = _mm512_set1_epi64(63);
         let const_64_x8 = _mm512_set1_epi64(64);
@@ -616,7 +636,9 @@ fn test1(b_move: bool, tables: &tables::Tables, bitboards: &[u64; 16]) {
         let const_n1_x8 = _mm512_set1_epi64(-1);
 
         // Flags
-        let const_promotion_flag_epi16_x8 = _mm_set1_epi16(chess_v2::MV_FLAG_PROMOTION as i16);
+        let const_promotion_flag_x8 = _mm512_set1_epi64(chess_v2::MV_FLAG_PROMOTION as u64 as i64);
+        let const_epcap_flag_x8 = _mm512_set1_epi64(chess_v2::MV_FLAG_EPCAP as u64 as i64);
+        let const_cap_flag_x8 = _mm512_set1_epi64(chess_v2::MV_FLAG_CAP as u64 as i64);
 
         // let bitboard_x8 = [pawn1, pawn2, pawn3, knight, bishop, rook, queen, king];
         // let bitboard_x8 = load_bitboards_with_split_pawns(&bitboards, friendly_move_offset);
@@ -625,13 +647,68 @@ fn test1(b_move: bool, tables: &tables::Tables, bitboards: &[u64; 16]) {
         let friendly_move_offset_x8 = _mm512_set1_epi64(friendly_move_offset as i64);
         let full_board_x8 = _mm512_set1_epi64(full_board as i64);
         let friendly_board_inv_x8 = _mm512_set1_epi64(!friendly_board as i64);
+        let opponent_board_x8 = _mm512_set1_epi64(opponent_board as i64);
         let promotion_rank_x8 = _mm512_set1_epi64(0b11111111 << (56 * (!b_move as u64)));
 
         let (mut sliders_x8, mut nonsliders_x8) =
             load_bitboards_with_sliders(&bitboards, friendly_move_offset);
 
-        let mut pxq_arr = [0i16; 8];
-        let mut pxq_cursor = 0;
+        let mut capture_moves: [[i16; 8]; 30] = [[0i16; 8]; 30];
+        let mut capture_cursors: [u8; 30] = [0; 30];
+
+        #[derive(Debug)]
+        enum CaptureMoves {
+            PxQ,
+            NxQ,
+            BxQ,
+            RxQ,
+            QxQ,
+            KxQ,
+
+            PxR,
+            NxR,
+            BxR,
+            RxR,
+            QxR,
+            KxR,
+
+            PxB,
+            NxB,
+            BxB,
+            RxB,
+            QxB,
+            KxB,
+
+            PxN,
+            NxN,
+            BxN,
+            RxN,
+            QxN,
+            KxN,
+
+            PxP,
+            NxP,
+            BxP,
+            RxP,
+            QxP,
+            KxP,
+        }
+
+        macro_rules! capture_compress {
+            ($cap:expr, $src_piece_mask:ident, $cap_piece_mask:ident, $full_move_epi16_x8:ident) => {{
+                let cap_mask = $src_piece_mask & $cap_piece_mask;
+                let cap_cursor = &mut capture_cursors[$cap as usize];
+
+                _mm_mask_compressstoreu_epi16(
+                    capture_moves[$cap as usize]
+                        .as_mut_ptr()
+                        .add((*cap_cursor & 7) as usize),
+                    cap_mask,
+                    $full_move_epi16_x8,
+                );
+                *cap_cursor += cap_mask.count_ones() as u8;
+            }};
+        }
 
         loop {
             // @todo - Try sub+and to pop ls1b instead of ms1b
@@ -693,35 +770,64 @@ fn test1(b_move: bool, tables: &tables::Tables, bitboards: &[u64; 16]) {
                 // Dst square bit for masking
                 let dst_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, dst_sq_x8);
 
-                // Construct full move 16-bits
-                let mut full_move_epi16_x8 = _mm512_cvtepi64_epi16(_mm512_or_epi64(
+                let mut full_move_x8 = _mm512_or_epi64(
                     _mm512_slli_epi64(dst_sq_x8, 6),
                     one_of_each_non_slider_index_x8,
-                ));
+                );
 
-                // Create masks for captures
-                let xq_mask = _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_queen_x8);
-
-                // Pawn moves
+                // Compute flags while move is still in 64-bits
                 {
-                    // Merge promotion flag for pawn moves on the last rank
+                    // Promotion flag for pawn moves on the last rank
                     // NOTE: Requires special handling on move maker side
                     let promotion_mask =
                         pawn_mask & _mm512_test_epi64_mask(dst_sq_bit_x8, promotion_rank_x8);
-                    full_move_epi16_x8 = _mm_mask_add_epi16(
-                        full_move_epi16_x8,
-                        promotion_mask,
-                        full_move_epi16_x8,
-                        const_promotion_flag_epi16_x8,
-                    );
 
-                    let pxq_mask = pawn_mask & xq_mask;
-                    _mm_mask_compressstoreu_epi16(
-                        pxq_arr.as_mut_ptr().add(pxq_cursor & 7),
-                        pxq_mask,
-                        full_move_epi16_x8,
+                    // EP flag for en passant captures
+                    let ep_mask = pawn_mask & _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_ep_x8);
+
+                    // Capture flag
+                    let cap_mask = _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_board_x8);
+
+                    full_move_x8 = _mm512_mask_or_epi64(
+                        full_move_x8,
+                        promotion_mask,
+                        full_move_x8,
+                        const_promotion_flag_x8,
                     );
-                    pxq_cursor += pxq_mask.count_ones() as usize;
+                    full_move_x8 = _mm512_mask_or_epi64(
+                        full_move_x8,
+                        ep_mask,
+                        full_move_x8,
+                        const_epcap_flag_x8,
+                    );
+                    full_move_x8 = _mm512_mask_or_epi64(
+                        full_move_x8,
+                        cap_mask,
+                        full_move_x8,
+                        const_cap_flag_x8,
+                    );
+                }
+
+                // Convert full move to 16-bit format
+                let full_move_epi16_x8 = _mm512_cvtepi64_epi16(full_move_x8);
+
+                // Create masks for captures
+                let xq_mask = _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_queen_x8);
+                let xr_mask = _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_rook_x8);
+                let xb_mask = _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_bishop_x8);
+                let xn_mask = _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_knight_x8);
+                let xp_mask = _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_pawn_x8);
+
+                // Pawn moves
+                {
+                    let xp_ep_mask =
+                        xp_mask | _mm512_test_epi64_mask(dst_sq_bit_x8, opponent_ep_x8);
+
+                    capture_compress!(CaptureMoves::PxQ, pawn_mask, xq_mask, full_move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxR, pawn_mask, xr_mask, full_move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxB, pawn_mask, xb_mask, full_move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxN, pawn_mask, xn_mask, full_move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxP, pawn_mask, xp_ep_mask, full_move_epi16_x8);
                 }
 
                 // let pxq_compressed_x8 = _mm512_maskz_compress_epi64(dst_sq_pxq_mask, full_move_x8);
@@ -762,13 +868,20 @@ fn test1(b_move: bool, tables: &tables::Tables, bitboards: &[u64; 16]) {
                 _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8),
             );
 
-            println!("NEXT-NON-SLIDERS");
+            // println!("NEXT-NON-SLIDERS");
         }
 
-        assert!(pxq_cursor <= 8);
+        for i in 0..30 {
+            assert!(capture_cursors[i] <= 8);
+        }
 
-        println!("pxq_cursor: {}", pxq_cursor);
-        println!("pxq_arr: {:?}", pxq_arr);
+        for i in 0..30 {
+            println!(
+                "[{:?}]: {:?}",
+                std::mem::transmute::<u8, CaptureMoves>(i),
+                capture_moves[i as usize]
+            );
+        }
 
         // print_vec_epi64("magics_x8", magics_x8);
         // print_vec_epi8("magics_x8 8", magics_x8);
@@ -820,7 +933,7 @@ fn testing() {
         board
             .load_fen(
                 // "rnbqkbnr/pppppppp/8/8/5q1q/6P1/PPPPPPP1/RNBQKBNR w KQkq - 0 1",
-                "rnbqkbnr/pPpppppp/8/8/5q1q/6P1/PPPPPP2/RNBQKBNR w KQkq - 0 1",
+                "rnbqkbnr/pPpppp1p/4P3/6pP/5q1q/6P1/PPPP4/RNBQKBNR w KQkq g6 0 2",
                 &tables
             )
             .is_ok()
@@ -846,7 +959,6 @@ fn testing() {
 
     // [0, K, Q, R, B, N, P, 0]
     // [0, k, q, r, b, n, p, 0]
-    let bitboards = board.bitboards_new();
 
     // 1. PV Move (if any)
     // 2. TT Move (if any)
@@ -872,12 +984,12 @@ fn testing() {
     // [QUEEN MASK, ...]
     // [ROOK MASK, ...]
 
-    test1(b_move, &tables, &bitboards);
+    test1(&board, &tables);
 }
 
 fn main() {
     testing();
-    return;
+    // return;
     // use std::arch::x86_64::*;
     // use std::hint::black_box;
 
@@ -1131,18 +1243,18 @@ fn main() {
     // old makemove: 1432
     // new makemove: 1079
 
-    let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
+    let mode = std::env::args().nth(1).unwrap_or("gui".to_string());
 
-    std::hint::black_box(unsafe {
-        chess_v2::ChessGame::new().make_move(std::hint::black_box(0), &tables::Tables::new())
-    });
-    std::hint::black_box(
-        chess_v2::ChessGame::new()
-            .in_check_slow(&tables::Tables::new(), std::hint::black_box(false)),
-    );
+    // std::hint::black_box(unsafe {
+    //     chess_v2::ChessGame::new().make_move(std::hint::black_box(0), &tables::Tables::new())
+    // });
+    // std::hint::black_box(
+    //     chess_v2::ChessGame::new()
+    //         .in_check_slow(&tables::Tables::new(), std::hint::black_box(false)),
+    // );
 
     let result = match mode.as_str() {
-        // "gui" => chess_ui(),
+        "gui" => chess_ui(),
         "uci" => {
             let (tx_search, rx_search) = channel::bounded(1);
             let tables = tables::Tables::new();

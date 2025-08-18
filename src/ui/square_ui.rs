@@ -58,7 +58,7 @@ impl SquareUi {
             .filled(true)
             .build();
 
-        let square_text = square_name(self.sq_bit_index);
+        let square_text = format!("{}-{}", square_name(self.sq_bit_index), self.sq_bit_index);
         let square_text_width = ui.calc_text_size(&square_text)[0];
 
         draw_list.add_text(
