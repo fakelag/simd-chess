@@ -690,8 +690,8 @@ impl ChessGame {
 
                 if [
                     from_sq,
-                    from_sq + square_offsets[0] as u8,
-                    from_sq + square_offsets[1] as u8,
+                    from_sq.wrapping_add(square_offsets[0] as u8),
+                    from_sq.wrapping_add(square_offsets[1] as u8),
                 ]
                 .iter()
                 .any(|&square| self.is_king_square_attacked(square, self.b_move, tables))
