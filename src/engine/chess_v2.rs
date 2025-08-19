@@ -1719,22 +1719,17 @@ impl ChessGame {
                 }};
             }
 
+            // @todo - Try sub+and to pop ls1b instead of ms1b
+            let mut one_of_each_slider_index_x8 =
+                _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
+            let mut one_of_each_non_slider_index_x8 =
+                _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
+            let mut active_pieces_non_slider_mask =
+                _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
+            let mut active_pieces_slider_mask =
+                _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
+
             loop {
-                // @todo - Try sub+and to pop ls1b instead of ms1b
-                let one_of_each_slider_index_x8 =
-                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
-                let one_of_each_non_slider_index_x8 =
-                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
-
-                let active_pieces_non_slider_mask =
-                    _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
-                let active_pieces_slider_mask =
-                    _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
-
-                if (active_pieces_non_slider_mask | active_pieces_slider_mask) == 0 {
-                    break;
-                }
-
                 let mut slider_moves_x8 = ChessGame::get_slider_moves_x8(
                     tables,
                     full_board_x8,
@@ -1776,6 +1771,8 @@ impl ChessGame {
                     _mm512_rolv_epi64(src_sq_bit_x8, pawn_push_rank_rolv_offset_x8),
                     full_board_inv_x8,
                 );
+                let promotion_mask =
+                    _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
                 let pawn_push_double_bit_x8 = _mm512_and_epi64(
                     _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
                     _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
@@ -1792,9 +1789,6 @@ impl ChessGame {
                     pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
                 let pawn_push_double_mask =
                     pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
-
-                let promotion_mask =
-                    _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
 
                 let mut pawn_push_single_move_x8 =
                     _mm512_or_epi64(pawn_push_single_dst_sq_x8, one_of_each_non_slider_index_x8);
@@ -1816,22 +1810,11 @@ impl ChessGame {
                 quiet_compress!(pawn_push_single_mask, pawn_push_single_move_epi16_x8);
                 quiet_compress!(pawn_push_double_mask, pawn_push_double_move_epi16_x8);
 
+                let mut non_slider_dst_sq_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_slider_moves_x8));
+                let mut slider_dst_sq_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(slider_moves_x8));
                 loop {
-                    let non_slider_dst_sq_x8 =
-                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_slider_moves_x8));
-                    let non_slider_dst_sq_mask =
-                        _mm512_cmpneq_epi64_mask(non_slider_dst_sq_x8, const_n1_x8);
-
-                    let slider_dst_sq_x8 =
-                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(slider_moves_x8));
-                    let slider_dst_sq_mask =
-                        _mm512_cmpneq_epi64_mask(slider_dst_sq_x8, const_n1_x8);
-
-                    if (non_slider_dst_sq_mask | slider_dst_sq_mask) == 0 {
-                        // No more moves left
-                        break;
-                    }
-
                     // Dst square bits for masking
                     let non_slider_dst_sq_bit_x8 =
                         _mm512_sllv_epi64(const_1_x8, non_slider_dst_sq_x8);
@@ -1912,9 +1895,6 @@ impl ChessGame {
                     quiet_compress!(knight_mask & quiet_mask, move_epi16_x8);
                     quiet_compress!(king_mask & quiet_mask, move_epi16_x8);
 
-                    non_slider_moves_x8 =
-                        _mm512_xor_epi64(non_slider_moves_x8, non_slider_dst_sq_bit_x8);
-
                     let slider_dst_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, slider_dst_sq_x8);
 
                     let s_xq_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_queen_x8);
@@ -1962,7 +1942,25 @@ impl ChessGame {
                     quiet_compress!(bishop_mask & s_quiet_mask, s_mv_epi16_x8);
                     quiet_compress!(queen_mask & s_quiet_mask, s_mv_epi16_x8);
 
+                    non_slider_moves_x8 =
+                        _mm512_xor_epi64(non_slider_moves_x8, non_slider_dst_sq_bit_x8);
                     slider_moves_x8 = _mm512_xor_epi64(slider_moves_x8, slider_dst_sq_bit_x8);
+
+                    non_slider_dst_sq_x8 =
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_slider_moves_x8));
+                    slider_dst_sq_x8 =
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(slider_moves_x8));
+
+                    let non_slider_dst_sq_mask =
+                        _mm512_cmpneq_epi64_mask(non_slider_dst_sq_x8, const_n1_x8);
+
+                    let slider_dst_sq_mask =
+                        _mm512_cmpneq_epi64_mask(slider_dst_sq_x8, const_n1_x8);
+
+                    if (non_slider_dst_sq_mask | slider_dst_sq_mask) == 0 {
+                        // No more moves left
+                        break;
+                    }
                 }
 
                 // Pop pieces
@@ -1974,6 +1972,19 @@ impl ChessGame {
                     sliders_x8,
                     _mm512_sllv_epi64(const_1_x8, one_of_each_slider_index_x8),
                 );
+
+                one_of_each_slider_index_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
+                one_of_each_non_slider_index_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
+                active_pieces_non_slider_mask =
+                    _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
+                active_pieces_slider_mask =
+                    _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
+
+                if (active_pieces_non_slider_mask | active_pieces_slider_mask) == 0 {
+                    break;
+                }
             }
 
             // Castling moves
