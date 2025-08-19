@@ -1543,7 +1543,7 @@ impl ChessGame {
         for i in 0..30 {
             scratch2[i] = scratch[i].as_mut_ptr() as *mut i16;
         }
-        // let mut capture_cursors: [u8; 32] = [0; 32];
+
         let mut quiet_cursor = 0usize;
 
         unsafe {
@@ -1553,10 +1553,94 @@ impl ChessGame {
             let friendly_move_offset = (b_move as usize) << 3;
             let opponent_move_offset = (!b_move as usize) << 3;
 
+            let const_nonslider_selector = _mm512_set_epi64(
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhiteKnight as i64,
+                PieceIndex::WhiteKnight as i64,
+                PieceIndex::WhiteKing as i64,
+            );
+            let const_nonslider_split = _mm512_set_epi64(
+                0x8080808080808080u64 as i64, // h file
+                0x4040404040404040u64 as i64, // g file
+                0x3030303030303030u64 as i64, // ef file
+                0xc0c0c0c0c0c0c0cu64 as i64,  // cd file
+                0x303030303030303u64 as i64,  // ab file
+                0xF0F0F0F0F0F0F0F0u64 as i64, // right half
+                0x0F0F0F0F0F0F0F0Fu64 as i64, // left half
+                0xFFFFFFFF_FFFFFFFFu64 as i64,
+            );
+            const PAWN_LANES: u8 = 0b11111000;
+            const KNIGHT_LANES: u8 = 0b00000110;
+            const KING_LANES: u8 = 0b00000001;
+
+            let const_slider_selector = _mm512_set_epi64(
+                PieceIndex::WhiteQueen as i64,
+                PieceIndex::WhiteQueen as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteBishop as i64,
+                PieceIndex::WhiteBishop as i64,
+            );
+
+            let const_slider_split = _mm512_set_epi64(
+                0xFFFFFFFF_FFFFFFFFu64 as i64,
+                0xFFFFFFFF_FFFFFFFFu64 as i64,
+                0x050A050A050A050Au64 as i64, // left light squares
+                0x0A050A050A050A05u64 as i64, // left black squares
+                0x50A050A050A050A0u64 as i64, // right light squares
+                0xA050A050A050A050u64 as i64, // right black squares
+                0xAA55AA55AA55AA55u64 as i64, // black squares
+                0x55AA55AA55AA55AAu64 as i64, // light squares
+            );
+            // 0x0 = rook, 0x40 = bishop
+            let const_slider_gather_magic_masks_offsets_x8 =
+                _mm512_set_epi64(0x40, 0, 0, 0, 0, 0, 0x40, 0x40);
+            let const_slider_gather_moves_shifts_x8 = _mm512_set_epi64(
+                Tables::BISHOP_OCCUPANCY_BITS as i64,
+                Tables::ROOK_OCCUPANCY_BITS as i64,
+                Tables::ROOK_OCCUPANCY_BITS as i64,
+                Tables::ROOK_OCCUPANCY_BITS as i64,
+                Tables::ROOK_OCCUPANCY_BITS as i64,
+                Tables::ROOK_OCCUPANCY_BITS as i64,
+                Tables::BISHOP_OCCUPANCY_BITS as i64,
+                Tables::BISHOP_OCCUPANCY_BITS as i64,
+            );
+            const BISHOP_MV_GATHER_OFFSET: i64 = (64 * Tables::ROOK_OCCUPANCY_MAX) as i64;
+            let const_moves_gather_base_offsets_x8 = _mm512_set_epi64(
+                BISHOP_MV_GATHER_OFFSET,
+                0,
+                0,
+                0,
+                0,
+                0,
+                BISHOP_MV_GATHER_OFFSET,
+                BISHOP_MV_GATHER_OFFSET,
+            );
+            const BISHOP_LANES: u8 = 0b00000011;
+            const ROOK_LANES: u8 = 0b00111100;
+            const QUEEN_LANES: u8 = 0b11000000;
+
+            let bitboard_x8 =
+                _mm512_load_si512(bitboards.as_ptr().add(friendly_move_offset) as *const __m512i);
+
+            let mut sliders_x8 = _mm512_and_epi64(
+                _mm512_permutex2var_epi64(bitboard_x8, const_slider_selector, bitboard_x8),
+                const_slider_split,
+            );
+
+            let mut non_sliders_x8 = _mm512_and_epi64(
+                _mm512_permutex2var_epi64(bitboard_x8, const_nonslider_selector, bitboard_x8),
+                const_nonslider_split,
+            );
+
             let full_board = bitboards.iter().fold(0, |acc, &bb| acc | bb);
-            let friendly_board = bitboards[friendly_move_offset..friendly_move_offset + 8]
-                .iter()
-                .fold(0, |acc, &bb| acc | bb);
+            let friendly_board = _mm512_reduce_or_epi64(bitboard_x8) as u64;
             let opponent_board = bitboards[opponent_move_offset..opponent_move_offset + 8]
                 .iter()
                 .fold(0, |acc, &bb| acc | bb);
@@ -1602,23 +1686,9 @@ impl ChessGame {
             let pawn_double_push_rank_x8 =
                 _mm512_set1_epi64((0xFF000000u64 << ((b_move as usize) << 3)) as i64);
 
-            let const_piece_indices_x8 = _mm512_set_epi64(
-                PieceIndex::WhiteNullPiece as i64,
-                PieceIndex::WhiteNullPiece as i64,
-                PieceIndex::WhiteNullPiece as i64,
-                PieceIndex::WhiteNullPiece as i64,
-                PieceIndex::WhiteNullPiece as i64,
-                PieceIndex::WhiteKing as i64,
-                PieceIndex::WhiteKnight as i64,
-                PieceIndex::WhitePawn as i64,
-            );
-
             let pawn_push_offset_ranks =
                 (opponent_move_offset as u64 + b_move_rank_offset as u64) as i64;
             let pawn_push_rank_rolv_offset_x8 = _mm512_set1_epi64(pawn_push_offset_ranks); // white=8, black=56
-
-            let (mut sliders_x8, mut nonsliders_x8) =
-                self.load_bitboards_with_sliders(friendly_move_offset);
 
             macro_rules! capture_compress {
                 ($cap:expr, $src_piece_mask:ident, $cap_piece_mask:ident, $full_move_epi16_x8:ident) => {{
@@ -1654,7 +1724,7 @@ impl ChessGame {
                 let one_of_each_slider_index_x8 =
                     _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
                 let one_of_each_non_slider_index_x8 =
-                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(nonsliders_x8));
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
 
                 let active_pieces_non_slider_mask =
                     _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
@@ -1665,30 +1735,30 @@ impl ChessGame {
                     break;
                 }
 
-                // Source square bit for masking, shifting by -1 zeroes bits for inactive lanes
-                let src_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
-
                 let mut slider_moves_x8 = ChessGame::get_slider_moves_x8(
                     tables,
                     full_board_x8,
                     one_of_each_slider_index_x8,
+                    const_slider_gather_magic_masks_offsets_x8,
+                    const_moves_gather_base_offsets_x8,
+                    const_slider_gather_moves_shifts_x8,
                     active_pieces_slider_mask,
                 );
 
-                let pawn_mask = 0b00000001 & active_pieces_non_slider_mask;
-                let knight_mask = 0b00000010 & active_pieces_non_slider_mask;
-                let king_mask = 0b00000100 & active_pieces_non_slider_mask;
+                let pawn_mask = PAWN_LANES & active_pieces_non_slider_mask;
+                let knight_mask = KNIGHT_LANES & active_pieces_non_slider_mask;
+                let king_mask = KING_LANES & active_pieces_non_slider_mask;
 
-                let bishop_mask = 0b00000001 & active_pieces_slider_mask;
-                let rook_mask = 0b00000010 & active_pieces_slider_mask;
-                let queen_mask = 0b00001100 & active_pieces_slider_mask;
+                let bishop_mask = BISHOP_LANES & active_pieces_slider_mask;
+                let rook_mask = ROOK_LANES & active_pieces_slider_mask;
+                let queen_mask = QUEEN_LANES & active_pieces_slider_mask;
 
                 let mut non_slider_moves_x8 = _mm512_mask_i64gather_epi64(
                     _mm512_setzero_si512(),
                     active_pieces_non_slider_mask,
                     _mm512_add_epi64(
                         _mm512_mullo_epi64(
-                            _mm512_add_epi64(const_piece_indices_x8, friendly_move_offset_x8),
+                            _mm512_add_epi64(const_nonslider_selector, friendly_move_offset_x8),
                             const_64_x8,
                         ),
                         one_of_each_non_slider_index_x8,
@@ -1700,6 +1770,8 @@ impl ChessGame {
 
                 // Add pawn push moves
 
+                // Source square bit for masking, shifting by -1 zeroes bits for inactive lanes
+                let src_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
                 let pawn_push_single_bit_x8 = _mm512_and_epi64(
                     _mm512_rolv_epi64(src_sq_bit_x8, pawn_push_rank_rolv_offset_x8),
                     full_board_inv_x8,
@@ -1771,43 +1843,37 @@ impl ChessGame {
                         one_of_each_non_slider_index_x8,
                     );
 
-                    // Compute flags while move is still in 64-bits
-                    {
-                        // Promotion flag for pawn moves on the last rank
-                        // NOTE: Requires special handling on move maker side
-                        let promotion_mask = pawn_mask
-                            & _mm512_test_epi64_mask(
-                                non_slider_dst_sq_bit_x8,
-                                pawn_promotion_rank_x8,
-                            );
+                    // Promotion flag for pawn moves on the last rank
+                    // NOTE: Requires special handling on move maker side
+                    let promotion_mask = pawn_mask
+                        & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, pawn_promotion_rank_x8);
 
-                        // EP flag for en passant captures
-                        let ep_mask = pawn_mask
-                            & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_ep_x8);
+                    // EP flag for en passant captures
+                    let ep_mask = pawn_mask
+                        & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_ep_x8);
 
-                        // Capture flag
-                        let cap_mask =
-                            _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_board_x8);
+                    // Capture flag
+                    let cap_mask =
+                        _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_board_x8);
 
-                        non_slider_full_move_x8 = _mm512_mask_or_epi64(
-                            non_slider_full_move_x8,
-                            promotion_mask,
-                            non_slider_full_move_x8,
-                            const_promotion_flag_x8,
-                        );
-                        non_slider_full_move_x8 = _mm512_mask_or_epi64(
-                            non_slider_full_move_x8,
-                            ep_mask,
-                            non_slider_full_move_x8,
-                            const_epcap_flag_x8,
-                        );
-                        non_slider_full_move_x8 = _mm512_mask_or_epi64(
-                            non_slider_full_move_x8,
-                            cap_mask,
-                            non_slider_full_move_x8,
-                            const_cap_flag_x8,
-                        );
-                    }
+                    non_slider_full_move_x8 = _mm512_mask_or_epi64(
+                        non_slider_full_move_x8,
+                        promotion_mask,
+                        non_slider_full_move_x8,
+                        const_promotion_flag_x8,
+                    );
+                    non_slider_full_move_x8 = _mm512_mask_or_epi64(
+                        non_slider_full_move_x8,
+                        ep_mask,
+                        non_slider_full_move_x8,
+                        const_epcap_flag_x8,
+                    );
+                    non_slider_full_move_x8 = _mm512_mask_or_epi64(
+                        non_slider_full_move_x8,
+                        cap_mask,
+                        non_slider_full_move_x8,
+                        const_cap_flag_x8,
+                    );
 
                     // Convert full move to 16-bit format
                     let move_epi16_x8 = _mm512_cvtepi64_epi16(non_slider_full_move_x8);
@@ -1826,8 +1892,7 @@ impl ChessGame {
                     let quiet_mask =
                         _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, full_board_inv_x8);
 
-                    let xp_ep_mask =
-                        xp_mask | _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_ep_x8);
+                    let xp_ep_mask = xp_mask | ep_mask;
 
                     capture_compress!(CaptureMoves::PxQ, pawn_mask, xq_mask, move_epi16_x8);
                     capture_compress!(CaptureMoves::NxQ, knight_mask, xq_mask, move_epi16_x8);
@@ -1844,7 +1909,6 @@ impl ChessGame {
                     capture_compress!(CaptureMoves::PxP, pawn_mask, xp_ep_mask, move_epi16_x8);
                     capture_compress!(CaptureMoves::NxP, knight_mask, xp_mask, move_epi16_x8);
                     capture_compress!(CaptureMoves::KxP, king_mask, xp_mask, move_epi16_x8);
-
                     quiet_compress!(knight_mask & quiet_mask, move_epi16_x8);
                     quiet_compress!(king_mask & quiet_mask, move_epi16_x8);
 
@@ -1902,8 +1966,8 @@ impl ChessGame {
                 }
 
                 // Pop pieces
-                nonsliders_x8 = _mm512_xor_epi64(
-                    nonsliders_x8,
+                non_sliders_x8 = _mm512_xor_epi64(
+                    non_sliders_x8,
                     _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8),
                 );
                 sliders_x8 = _mm512_xor_epi64(
@@ -1975,35 +2039,7 @@ impl ChessGame {
             //     println!("Quiet: {:?} ({})", mv, util::move_string_dbg(mv as u16));
             // }
 
-            (
-                quiet_cursor as usize,
-                num_copied as usize,
-                // scratch2[0..30][black_box(0) as usize] as usize,
-                // scratch2[0..30].iter().sum::<u8>() as usize,
-            )
-        }
-    }
-
-    #[inline(always)]
-    fn load_bitboards_with_sliders(&self, b_move_offset: usize) -> (__m512i, __m512i) {
-        unsafe {
-            let bitboard_x8 = _mm512_load_si512(
-                self.board.bitboards.as_ptr().add(b_move_offset) as *const __m512i
-            );
-
-            // [bishop, rook, queen_b, queen_r, 0, 0, 0, 0]
-            let const_slider_selector = _mm512_set_epi64(0, 0, 0, 0, 2, 2, 3, 4);
-
-            // [pawn, knight, king, 0, 0, 0, 0, 0]
-            let const_nonslider_selector = _mm512_set_epi64(0, 0, 0, 0, 0, 1, 5, 6);
-
-            let sliders_x8 =
-                _mm512_permutex2var_epi64(bitboard_x8, const_slider_selector, bitboard_x8);
-
-            let non_sliders_x8 =
-                _mm512_permutex2var_epi64(bitboard_x8, const_nonslider_selector, bitboard_x8);
-
-            (sliders_x8, non_sliders_x8)
+            (quiet_cursor as usize, num_copied as usize)
         }
     }
 
@@ -2012,40 +2048,16 @@ impl ChessGame {
         tables: &Tables,
         full_board_x8: __m512i,
         piece_indices: __m512i,
+        gather_offsets_magics_masks_x8: __m512i,
+        gather_offsets_moves_x8: __m512i,
+        gather_shifts_moves_x8: __m512i,
         mask: u8,
     ) -> __m512i {
         unsafe {
-            // 0x0 = rook, 0x40 = bishop
-            let const_magic_masks_gather_offsets_x8 =
-                _mm512_set_epi64(0, 0, 0, 0, 0, 0x40, 0, 0x40);
-
-            let movement_gather_square_offsets_x8 = _mm512_set_epi64(
-                0,
-                0,
-                0,
-                0,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-            );
-
-            const BISHOP_MV_GATHER_OFFSET: i64 = (64 * Tables::ROOK_OCCUPANCY_MAX) as i64;
-            let const_moves_gather_offsets_x8 = _mm512_set_epi64(
-                0,
-                0,
-                0,
-                0,
-                0,
-                BISHOP_MV_GATHER_OFFSET,
-                0,
-                BISHOP_MV_GATHER_OFFSET,
-            );
-
             let masks_x8 = _mm512_mask_i64gather_epi64(
                 _mm512_setzero_si512(),
                 mask,
-                _mm512_add_epi64(piece_indices, const_magic_masks_gather_offsets_x8),
+                _mm512_add_epi64(piece_indices, gather_offsets_magics_masks_x8),
                 Tables::LT_SLIDER_MASKS_GATHER.0.as_ptr() as *const i64,
                 8,
             );
@@ -2053,7 +2065,7 @@ impl ChessGame {
             let magics_x8 = _mm512_mask_i64gather_epi64(
                 _mm512_setzero_si512(),
                 mask,
-                _mm512_add_epi64(piece_indices, const_magic_masks_gather_offsets_x8),
+                _mm512_add_epi64(piece_indices, gather_offsets_magics_masks_x8),
                 Tables::LT_SLIDER_MAGICS_GATHER.0.as_ptr() as *const i64,
                 8,
             );
@@ -2077,14 +2089,14 @@ impl ChessGame {
             );
 
             let movement_gather_indices_x8 = _mm512_add_epi64(
-                _mm512_sllv_epi64(piece_indices, movement_gather_square_offsets_x8),
+                _mm512_sllv_epi64(piece_indices, gather_shifts_moves_x8),
                 occupancy_indices_x8,
             );
 
             let slider_movement_mask_x8 = _mm512_mask_i64gather_epi64(
                 _mm512_setzero_si512(),
                 mask,
-                _mm512_add_epi64(movement_gather_indices_x8, const_moves_gather_offsets_x8),
+                _mm512_add_epi64(movement_gather_indices_x8, gather_offsets_moves_x8),
                 tables.slider_combined_move_masks.as_ptr() as *const i64,
                 8,
             );
