@@ -1709,8 +1709,8 @@ impl ChessGame {
                 let pawn_push_double_mask =
                     pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
 
-                let promotion_mask = pawn_mask
-                    & _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
+                let promotion_mask =
+                    _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
 
                 let mut pawn_push_single_move_x8 =
                     _mm512_or_epi64(pawn_push_single_dst_sq_x8, one_of_each_non_slider_index_x8);
