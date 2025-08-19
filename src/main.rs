@@ -1,5 +1,7 @@
 #![feature(sync_unsafe_cell)]
 #![feature(iter_array_chunks)]
+#![feature(likely_unlikely)]
+#![feature(cold_path)]
 
 use std::arch::x86_64::*;
 use std::hint::black_box;
@@ -1472,8 +1474,8 @@ fn main() {
         chess_v2::ChessGame::new()
             .in_check_slow(&tables::Tables::new(), std::hint::black_box(false)),
     );
-    let mut scratch = std::hint::black_box([[0u16; 32]; 30]);
-    let mut scratch2 = std::hint::black_box([0 as *mut i16; 30]);
+    let mut scratch = std::hint::black_box([[0u16; 32]; 32]);
+    let mut scratch2 = std::hint::black_box([0 as *mut i16; 32]);
     std::hint::black_box(chess_v2::ChessGame::new().gen_moves_avx512(
         &tables::Tables::new(),
         std::hint::black_box(&mut [0u16; 218]),

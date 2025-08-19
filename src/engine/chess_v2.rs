@@ -980,8 +980,8 @@ impl ChessGame {
         depth: u8,
         tables: &Tables,
         mut moves: Option<&mut Vec<(String, u64)>>,
-        scratch: &mut [[u16; 32]; 30],
-        scratch2: &mut [*mut i16; 30],
+        scratch: &mut [[u16; 32]; 32],
+        scratch2: &mut [*mut i16; 32],
     ) -> u64 {
         if depth == 0 {
             return 1;
@@ -1537,10 +1537,10 @@ impl ChessGame {
         tables: &Tables,
         quiet_list: &mut [u16; 218],
         capture_list: &mut [u16; 74],
-        scratch: &mut [[u16; 32]; 30],
-        scratch2: &mut [*mut i16; 30],
+        scratch: &mut [[u16; 32]; 32],
+        scratch2: &mut [*mut i16; 32],
     ) -> (usize, usize) {
-        for i in 0..30 {
+        for i in 0..32 {
             scratch2[i] = scratch[i].as_mut_ptr() as *mut i16;
         }
 
@@ -1990,26 +1990,31 @@ impl ChessGame {
             // Castling moves
             let king_bitboard =
                 bitboards[PieceIndex::WhiteKing as usize + ((b_move as usize) << 3)];
-            let src_sq = king_bitboard.trailing_zeros() as u16;
+            let king_square = king_bitboard.trailing_zeros() as u16;
 
-            quiet_list[quiet_cursor as usize] = ((src_sq + 2) << 6) | src_sq | MV_FLAGS_CASTLE_KING;
+            *quiet_list.get_unchecked_mut(quiet_cursor as usize) =
+                ((king_square + 2) << 6) | king_square | MV_FLAGS_CASTLE_KING;
             quiet_cursor += self.is_kingside_castle_allowed(b_move) as usize;
-            quiet_list[quiet_cursor as usize] =
-                ((src_sq - 2) << 6) | src_sq | MV_FLAGS_CASTLE_QUEEN;
+
+            *quiet_list.get_unchecked_mut(quiet_cursor as usize) =
+                ((king_square - 2) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN;
             quiet_cursor += self.is_queenside_castle_allowed(b_move) as usize;
 
             let mut num_copied = 0;
-            for i in 0..30 {
+            for i in 0..32 {
                 let num_captures = (scratch2[i] as usize - scratch[i].as_ptr() as usize) >> 1;
-                // println!(
-                //     "Copying {} captures for {:?} at {}",
-                //     num_captures,
-                //     std::mem::transmute::<u8, CaptureMoves>(i as u8),
-                //     num_copied
-                // );
-                capture_list
-                    .get_unchecked_mut(num_copied..num_copied + num_captures)
-                    .copy_from_slice(&scratch[i].get_unchecked(0..num_captures));
+                // capture_list
+                //     .get_unchecked_mut(num_copied..num_copied + num_captures)
+                //     .copy_from_slice(&scratch[i].get_unchecked(0..num_captures));
+
+                *capture_list.get_unchecked_mut(num_copied + 0) = *scratch[i].get_unchecked(0);
+                *capture_list.get_unchecked_mut(num_copied + 1) = *scratch[i].get_unchecked(1);
+                *capture_list.get_unchecked_mut(num_copied + 2) = *scratch[i].get_unchecked(2);
+                *capture_list.get_unchecked_mut(num_copied + 3) = *scratch[i].get_unchecked(3);
+                for j in 4..num_captures {
+                    std::hint::cold_path();
+                    *capture_list.get_unchecked_mut(num_copied + j) = *scratch[i].get_unchecked(j);
+                }
                 num_copied += num_captures;
             }
             // println!("Copied {} captures", num_copied);
@@ -2289,9 +2294,9 @@ mod tests {
         fn perft_verification(&mut self, depth: u8) -> u64 {
             let mut perft_results = Vec::new();
 
-            let mut scratch: Box<[[u16; 32]; 30]> =
-                vec![[0u16; 32]; 30].into_boxed_slice().try_into().unwrap();
-            let mut scratch2: [*mut i16; 30] = [0 as *mut i16; 30];
+            let mut scratch: Box<[[u16; 32]; 32]> =
+                vec![[0u16; 32]; 32].into_boxed_slice().try_into().unwrap();
+            let mut scratch2: [*mut i16; 32] = [0 as *mut i16; 32];
 
             let perft_result = if self.state_validation {
                 self.board.perft::<true>(
