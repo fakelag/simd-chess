@@ -237,12 +237,52 @@ pub fn move_flag_name(mv: u16) -> &'static str {
     }
 }
 
+pub fn move_flag_name_dbg(mv: u16) -> String {
+    let promotion = match mv & chess::MV_FLAGS_PR_MASK {
+        chess::MV_FLAGS_PR_BISHOP => "+b",
+        chess::MV_FLAGS_PR_KNIGHT => "+n",
+        chess::MV_FLAGS_PR_ROOK => "+r",
+        chess::MV_FLAGS_PR_QUEEN => "+q",
+        _ => "",
+    };
+    let cap = if (mv & chess::MV_FLAGS) == chess::MV_FLAG_EPCAP {
+        "+epc"
+    } else if mv & chess::MV_FLAG_CAP != 0 {
+        "+c"
+    } else {
+        ""
+    };
+    let dpp = if (mv & chess::MV_FLAGS) == chess::MV_FLAG_DPP {
+        "+dpp"
+    } else {
+        ""
+    };
+    let castle = if (mv & chess::MV_FLAGS) == chess::MV_FLAGS_CASTLE_KING {
+        "+kc"
+    } else if (mv & chess::MV_FLAGS) == chess::MV_FLAGS_CASTLE_QUEEN {
+        "+qc"
+    } else {
+        ""
+    };
+
+    format!("{}{}{}{}", promotion, cap, dpp, castle)
+}
+
 pub fn move_string(mv: u16) -> String {
     format!(
         "{}{}{}",
         square_name((mv & 0x3F) as u8),
         square_name(((mv >> 6) & 0x3F) as u8),
         move_flag_name(mv)
+    )
+}
+
+pub fn move_string_dbg(mv: u16) -> String {
+    format!(
+        "{}{}{}",
+        square_name((mv & 0x3F) as u8),
+        square_name(((mv >> 6) & 0x3F) as u8),
+        move_flag_name_dbg(mv)
     )
 }
 

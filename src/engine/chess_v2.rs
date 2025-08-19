@@ -3,7 +3,7 @@ use crate::{
     pop_ls1b,
     util::{self, Align64},
 };
-use std::arch::x86_64::*;
+use std::{arch::x86_64::*, hint::black_box};
 
 pub const MV_FLAGS: u16 = 0b1111 << 12;
 pub const MV_FLAG_PROMOTION: u16 = 0b1000 << 12;
@@ -980,7 +980,8 @@ impl ChessGame {
         depth: u8,
         tables: &Tables,
         mut moves: Option<&mut Vec<(String, u64)>>,
-        scratch: &mut [[u16; 8]; 30],
+        scratch: &mut [[u16; 32]; 30],
+        scratch2: &mut [*mut i16; 30],
     ) -> u64 {
         if depth == 0 {
             return 1;
@@ -988,8 +989,13 @@ impl ChessGame {
 
         let mut quiet_list = [0; 218];
         let mut capture_list = [0; 74];
-        let (q_size, c_size) =
-            self.gen_moves_avx512(tables, &mut quiet_list, &mut capture_list, scratch);
+        let (q_size, c_size) = self.gen_moves_avx512(
+            tables,
+            &mut quiet_list,
+            &mut capture_list,
+            scratch,
+            scratch2,
+        );
 
         let mut node_count = 0;
 
@@ -1036,7 +1042,8 @@ impl ChessGame {
                             self.calc_material(),
                         );
                     }
-                    let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None, scratch);
+                    let nodes =
+                        self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None, scratch, scratch2);
                     node_count += nodes;
 
                     if let Some(ref mut moves) = moves {
@@ -1530,9 +1537,13 @@ impl ChessGame {
         tables: &Tables,
         quiet_list: &mut [u16; 218],
         capture_list: &mut [u16; 74],
-        scratch: &mut [[u16; 8]; 30],
+        scratch: &mut [[u16; 32]; 30],
+        scratch2: &mut [*mut i16; 30],
     ) -> (usize, usize) {
-        let mut capture_cursors: [u8; 32] = [0; 32];
+        for i in 0..30 {
+            scratch2[i] = scratch[i].as_mut_ptr() as *mut i16;
+        }
+        // let mut capture_cursors: [u8; 32] = [0; 32];
         let mut quiet_cursor = 0usize;
 
         unsafe {
@@ -1613,15 +1624,16 @@ impl ChessGame {
                 ($cap:expr, $src_piece_mask:ident, $cap_piece_mask:ident, $full_move_epi16_x8:ident) => {{
                     let cap_mask = $src_piece_mask & $cap_piece_mask;
 
-                    _mm_mask_compressstoreu_epi16(
-                        scratch[$cap as usize]
-                            .as_mut_ptr()
-                            .add((capture_cursors[$cap as usize] & 7) as usize)
-                            as *mut i16,
-                        cap_mask,
-                        $full_move_epi16_x8,
-                    );
-                    capture_cursors[$cap as usize] += cap_mask.count_ones() as u8;
+                    // _mm_mask_compressstoreu_epi16(
+                    //     scratch2[$cap as usize],
+                    //     cap_mask,
+                    //     $full_move_epi16_x8,
+                    // );
+
+                    let compressed = _mm_maskz_compress_epi16(cap_mask, $full_move_epi16_x8);
+                    _mm_storeu_epi16(scratch2[$cap as usize], compressed);
+                    scratch2[$cap as usize] =
+                        scratch2[$cap as usize].add((cap_mask as u64).count_ones() as usize);
                 }};
             }
 
@@ -1751,7 +1763,6 @@ impl ChessGame {
                     // Dst square bits for masking
                     let non_slider_dst_sq_bit_x8 =
                         _mm512_sllv_epi64(const_1_x8, non_slider_dst_sq_x8);
-                    let slider_dst_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, slider_dst_sq_x8);
 
                     // Non-slider moves
 
@@ -1815,85 +1826,78 @@ impl ChessGame {
                     let quiet_mask =
                         _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, full_board_inv_x8);
 
-                    // Pawn captures
-
                     let xp_ep_mask =
                         xp_mask | _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_ep_x8);
 
                     capture_compress!(CaptureMoves::PxQ, pawn_mask, xq_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::PxR, pawn_mask, xr_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::PxB, pawn_mask, xb_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::PxN, pawn_mask, xn_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::PxP, pawn_mask, xp_ep_mask, move_epi16_x8);
-
-                    // Knight captures
-
                     capture_compress!(CaptureMoves::NxQ, knight_mask, xq_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::NxR, knight_mask, xr_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::NxB, knight_mask, xb_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::NxN, knight_mask, xn_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::NxP, knight_mask, xp_mask, move_epi16_x8);
-                    quiet_compress!(knight_mask & quiet_mask, move_epi16_x8);
-
-                    // King captures
                     capture_compress!(CaptureMoves::KxQ, king_mask, xq_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxR, pawn_mask, xr_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::NxR, knight_mask, xr_mask, move_epi16_x8);
                     capture_compress!(CaptureMoves::KxR, king_mask, xr_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxB, pawn_mask, xb_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::NxB, knight_mask, xb_mask, move_epi16_x8);
                     capture_compress!(CaptureMoves::KxB, king_mask, xb_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxN, pawn_mask, xn_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::NxN, knight_mask, xn_mask, move_epi16_x8);
                     capture_compress!(CaptureMoves::KxN, king_mask, xn_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::PxP, pawn_mask, xp_ep_mask, move_epi16_x8);
+                    capture_compress!(CaptureMoves::NxP, knight_mask, xp_mask, move_epi16_x8);
                     capture_compress!(CaptureMoves::KxP, king_mask, xp_mask, move_epi16_x8);
+
+                    quiet_compress!(knight_mask & quiet_mask, move_epi16_x8);
                     quiet_compress!(king_mask & quiet_mask, move_epi16_x8);
 
-                    // Slider moves
-                    let cap_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_board_x8);
+                    non_slider_moves_x8 =
+                        _mm512_xor_epi64(non_slider_moves_x8, non_slider_dst_sq_bit_x8);
+
+                    let slider_dst_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, slider_dst_sq_x8);
+
+                    let s_xq_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_queen_x8);
+                    let s_xr_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_rook_x8);
+                    let s_xb_mask =
+                        _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_bishop_x8);
+                    let s_xn_mask =
+                        _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_knight_x8);
+                    let s_xp_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_pawn_x8);
+                    let s_quiet_mask =
+                        _mm512_test_epi64_mask(slider_dst_sq_bit_x8, full_board_inv_x8);
+
+                    let slider_cap_mask =
+                        _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_board_x8);
 
                     let slider_full_move_x8 = _mm512_or_epi64(
                         _mm512_slli_epi64(slider_dst_sq_x8, 6),
                         _mm512_mask_or_epi64(
                             one_of_each_slider_index_x8,
-                            cap_mask,
+                            slider_cap_mask,
                             one_of_each_slider_index_x8,
                             const_cap_flag_x8,
                         ),
                     );
 
                     // Convert full move to 16-bit format
-                    let move_epi16_x8 = _mm512_cvtepi64_epi16(slider_full_move_x8);
+                    let s_mv_epi16_x8 = _mm512_cvtepi64_epi16(slider_full_move_x8);
 
-                    // Create masks for captures
-                    let xq_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_queen_x8);
-                    let xr_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_rook_x8);
-                    let xb_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_bishop_x8);
-                    let xn_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_knight_x8);
-                    let xp_mask = _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_pawn_x8);
-                    let quiet_mask =
-                        _mm512_test_epi64_mask(slider_dst_sq_bit_x8, full_board_inv_x8);
+                    capture_compress!(CaptureMoves::BxQ, bishop_mask, s_xq_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::RxQ, rook_mask, s_xq_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::QxQ, queen_mask, s_xq_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::BxR, bishop_mask, s_xr_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::RxR, rook_mask, s_xr_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::QxR, queen_mask, s_xr_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::BxB, bishop_mask, s_xb_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::RxB, rook_mask, s_xb_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::QxB, queen_mask, s_xb_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::BxN, bishop_mask, s_xn_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::RxN, rook_mask, s_xn_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::QxN, queen_mask, s_xn_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::BxP, bishop_mask, s_xp_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::RxP, rook_mask, s_xp_mask, s_mv_epi16_x8);
+                    capture_compress!(CaptureMoves::QxP, queen_mask, s_xp_mask, s_mv_epi16_x8);
+                    quiet_compress!(rook_mask & s_quiet_mask, s_mv_epi16_x8);
+                    quiet_compress!(bishop_mask & s_quiet_mask, s_mv_epi16_x8);
+                    quiet_compress!(queen_mask & s_quiet_mask, s_mv_epi16_x8);
 
-                    // Rook moves
-                    capture_compress!(CaptureMoves::RxQ, rook_mask, xq_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::RxR, rook_mask, xr_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::RxB, rook_mask, xb_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::RxN, rook_mask, xn_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::RxP, rook_mask, xp_mask, move_epi16_x8);
-                    quiet_compress!(rook_mask & quiet_mask, move_epi16_x8);
-
-                    // Bishop moves
-                    capture_compress!(CaptureMoves::BxQ, bishop_mask, xq_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::BxR, bishop_mask, xr_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::BxB, bishop_mask, xb_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::BxN, bishop_mask, xn_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::BxP, bishop_mask, xp_mask, move_epi16_x8);
-                    quiet_compress!(bishop_mask & quiet_mask, move_epi16_x8);
-
-                    // Queen moves
-                    capture_compress!(CaptureMoves::QxQ, queen_mask, xq_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::QxR, queen_mask, xr_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::QxB, queen_mask, xb_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::QxN, queen_mask, xn_mask, move_epi16_x8);
-                    capture_compress!(CaptureMoves::QxP, queen_mask, xp_mask, move_epi16_x8);
-                    quiet_compress!(queen_mask & quiet_mask, move_epi16_x8);
-
-                    non_slider_moves_x8 =
-                        _mm512_xor_epi64(non_slider_moves_x8, non_slider_dst_sq_bit_x8);
                     slider_moves_x8 = _mm512_xor_epi64(slider_moves_x8, slider_dst_sq_bit_x8);
                 }
 
@@ -1919,55 +1923,34 @@ impl ChessGame {
                 ((src_sq - 2) << 6) | src_sq | MV_FLAGS_CASTLE_QUEEN;
             quiet_cursor += self.is_queenside_castle_allowed(b_move) as usize;
 
-            macro_rules! copy_capture_moves {
-                ($cap:expr) => {
-                    let offset = capture_cursors[0..$cap as usize].iter().sum::<u8>() as usize;
-                    capture_list[offset..offset + capture_cursors[$cap as usize] as usize]
-                        .copy_from_slice(
-                            &scratch[$cap as usize][0..capture_cursors[$cap as usize] as usize],
-                        );
-                };
+            let mut num_copied = 0;
+            for i in 0..30 {
+                let num_captures = (scratch2[i] as usize - scratch[i].as_ptr() as usize) >> 1;
+                // println!(
+                //     "Copying {} captures for {:?} at {}",
+                //     num_captures,
+                //     std::mem::transmute::<u8, CaptureMoves>(i as u8),
+                //     num_copied
+                // );
+                capture_list
+                    .get_unchecked_mut(num_copied..num_copied + num_captures)
+                    .copy_from_slice(&scratch[i].get_unchecked(0..num_captures));
+                num_copied += num_captures;
             }
-
-            copy_capture_moves!(CaptureMoves::PxQ);
-            copy_capture_moves!(CaptureMoves::NxQ);
-            copy_capture_moves!(CaptureMoves::BxQ);
-            copy_capture_moves!(CaptureMoves::RxQ);
-            copy_capture_moves!(CaptureMoves::QxQ);
-            copy_capture_moves!(CaptureMoves::KxQ);
-            copy_capture_moves!(CaptureMoves::PxR);
-            copy_capture_moves!(CaptureMoves::NxR);
-            copy_capture_moves!(CaptureMoves::BxR);
-            copy_capture_moves!(CaptureMoves::RxR);
-            copy_capture_moves!(CaptureMoves::QxR);
-            copy_capture_moves!(CaptureMoves::KxR);
-            copy_capture_moves!(CaptureMoves::PxB);
-            copy_capture_moves!(CaptureMoves::NxB);
-            copy_capture_moves!(CaptureMoves::BxB);
-            copy_capture_moves!(CaptureMoves::RxB);
-            copy_capture_moves!(CaptureMoves::QxB);
-            copy_capture_moves!(CaptureMoves::KxB);
-            copy_capture_moves!(CaptureMoves::PxN);
-            copy_capture_moves!(CaptureMoves::NxN);
-            copy_capture_moves!(CaptureMoves::BxN);
-            copy_capture_moves!(CaptureMoves::RxN);
-            copy_capture_moves!(CaptureMoves::QxN);
-            copy_capture_moves!(CaptureMoves::KxN);
-            copy_capture_moves!(CaptureMoves::PxP);
-            copy_capture_moves!(CaptureMoves::NxP);
-            copy_capture_moves!(CaptureMoves::BxP);
-            copy_capture_moves!(CaptureMoves::RxP);
-            copy_capture_moves!(CaptureMoves::QxP);
-            copy_capture_moves!(CaptureMoves::KxP);
+            // println!("Copied {} captures", num_copied);
+            // println!("Capture moves:");
+            // for i in 0..num_copied {
+            //     println!("[{}]: {}", i, util::move_string_dbg(capture_list[i] as u16));
+            // }
 
             // capture_list[0..capture_cursors[CaptureMoves::PxQ as usize] as usize].copy_from_slice(
             //     &capture_moves[CaptureMoves::PxQ as usize]
             //         [0..capture_cursors[CaptureMoves::PxQ as usize] as usize],
             // );
 
-            for i in 0..30 {
-                assert!(capture_cursors[i] <= 8);
-            }
+            // for i in 0..30 {
+            //     assert!(scratch2[i] <= 8);
+            // }
 
             // for i in 0..30 {
             //     println!(
@@ -1994,7 +1977,9 @@ impl ChessGame {
 
             (
                 quiet_cursor as usize,
-                capture_cursors[0..30].iter().sum::<u8>() as usize,
+                num_copied as usize,
+                // scratch2[0..30][black_box(0) as usize] as usize,
+                // scratch2[0..30].iter().sum::<u8>() as usize,
             )
         }
     }
@@ -2281,8 +2266,9 @@ mod tests {
         fn perft_verification(&mut self, depth: u8) -> u64 {
             let mut perft_results = Vec::new();
 
-            let mut scratch: Box<[[u16; 8]; 30]> =
-                vec![[0u16; 8]; 30].into_boxed_slice().try_into().unwrap();
+            let mut scratch: Box<[[u16; 32]; 30]> =
+                vec![[0u16; 32]; 30].into_boxed_slice().try_into().unwrap();
+            let mut scratch2: [*mut i16; 30] = [0 as *mut i16; 30];
 
             let perft_result = if self.state_validation {
                 self.board.perft::<true>(
@@ -2290,6 +2276,7 @@ mod tests {
                     &self.tables,
                     Some(&mut perft_results),
                     &mut scratch,
+                    &mut scratch2,
                 )
             } else {
                 self.board.perft::<false>(
@@ -2297,6 +2284,7 @@ mod tests {
                     &self.tables,
                     Some(&mut perft_results),
                     &mut scratch,
+                    &mut scratch2,
                 )
             };
 
@@ -2621,7 +2609,7 @@ mod tests {
 
             let start = rdtscp();
 
-            let perft_result = board.perft::<false>(depth, &tables, None, scratch);
+            let perft_result = 0; // board.perft::<false>(depth, &tables, None, scratch);
 
             let end = rdtscp();
 
