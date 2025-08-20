@@ -710,8 +710,8 @@ impl ChessGame {
                     return false;
                 }
 
-                let rook_from_sq = to_sq as usize + square_offsets[2] as usize;
-                let rook_to_sq = to_sq as usize + square_offsets[3] as usize;
+                let rook_from_sq = (to_sq as usize).wrapping_add(square_offsets[2] as usize);
+                let rook_to_sq = (to_sq as usize).wrapping_add(square_offsets[3] as usize);
 
                 let rook_from_bit = 1 << rook_from_sq;
                 let rook_to_bit = 1 << rook_to_sq;
