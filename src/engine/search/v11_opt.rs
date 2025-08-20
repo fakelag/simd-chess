@@ -238,6 +238,9 @@ impl<'a> Search<'a> {
         let mut pv_move = 0; // Null move
         let mut tt_move = 0; // Null move
 
+        let mut move_offset = 0;
+        let mut move_list = [0u16; 222];
+
         if self.ply > 0 && !self.pv_trace {
             if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
                 return 0;
@@ -295,12 +298,7 @@ impl<'a> Search<'a> {
             }
         }
 
-        // let mut move_list = [0u16; 256];
-        // let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
-        // move_list[0..move_count].sort_by(|a, b| self.sort_moves(a, b, pv_move, tt_move));
-
-        let mut move_list = [0u16; 220];
-        let move_count = self.chess.gen_moves_avx512(
+        let move_count = self.chess.gen_moves_avx512::<false>(
             self.tables,
             &mut move_list[2..],
             &mut self.movegen_scratch,
@@ -481,7 +479,7 @@ impl<'a> Search<'a> {
         // move_list[0..move_count].sort_by(|a, b| self.sort_moves_quiescence(a, b));
 
         let mut move_list = [0u16; 220];
-        let move_count = self.chess.gen_moves_avx512(
+        let move_count = self.chess.gen_moves_avx512::<true>(
             self.tables,
             &mut move_list[2..],
             &mut self.movegen_scratch,
@@ -505,10 +503,6 @@ impl<'a> Search<'a> {
                 move_list[i] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Second promotion to check
                 move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
                 move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_QUEEN; // Fourth promotion to check
-            }
-
-            if (mv & MV_FLAG_CAP) == 0 {
-                break;
             }
 
             let move_ok = unsafe { self.chess.make_move(mv, self.tables) };

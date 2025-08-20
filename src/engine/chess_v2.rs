@@ -1015,7 +1015,7 @@ impl ChessGame {
         let mut node_count = 0;
 
         let mut move_list = [0u16; 220];
-        let move_count = self.gen_moves_avx512(tables, &mut move_list[2..], scratch, None);
+        let move_count = self.gen_moves_avx512::<false>(tables, &mut move_list[2..], scratch, None);
 
         let board_copy = self.clone();
 
@@ -1542,7 +1542,7 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn gen_moves_avx512(
+    pub fn gen_moves_avx512<const CAPTURE_ONLY: bool>(
         &self,
         tables: &Tables,
         move_list: &mut [u16],
@@ -1704,12 +1704,6 @@ impl ChessGame {
                     let cap_mask = $src_piece_mask & $cap_piece_mask;
                     let cap_mask_popcnt = (cap_mask as u64).count_ones() as usize;
 
-                    // _mm_mask_compressstoreu_epi16(
-                    //     scratch.capture_ptr[$cap as usize] as *mut i16,
-                    //     cap_mask,
-                    //     $full_move_epi16_x8,
-                    // );
-
                     let compressed = _mm_maskz_compress_epi16(cap_mask, $full_move_epi16_x8);
                     _mm_storeu_epi16(scratch.capture_ptr[$cap as usize] as *mut i16, compressed);
 
@@ -1720,13 +1714,15 @@ impl ChessGame {
 
             macro_rules! quiet_compress {
                 ($mask:expr, $full_move_epi16_x8:ident) => {{
-                    let mask = $mask;
-                    _mm_mask_compressstoreu_epi16(
-                        scratch.quiet_list.as_mut_ptr().add(quiet_cursor) as *mut i16,
-                        mask,
-                        $full_move_epi16_x8,
-                    );
-                    quiet_cursor += mask.count_ones() as usize;
+                    if !CAPTURE_ONLY {
+                        let mask = $mask;
+                        _mm_mask_compressstoreu_epi16(
+                            scratch.quiet_list.as_mut_ptr().add(quiet_cursor) as *mut i16,
+                            mask,
+                            $full_move_epi16_x8,
+                        );
+                        quiet_cursor += mask.count_ones() as usize;
+                    }
                 }};
             }
 
@@ -1796,11 +1792,18 @@ impl ChessGame {
                     8,
                 );
 
-                slider_moves_x8 = _mm512_and_si512(slider_moves_x8, friendly_board_inv_x8);
-                non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
+                if CAPTURE_ONLY {
+                    // Mask out moves that don't capture opponent pieces
+                    slider_moves_x8 = _mm512_and_si512(slider_moves_x8, opponent_board_x8);
+                    non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, opponent_board_x8);
+                } else {
+                    slider_moves_x8 = _mm512_and_si512(slider_moves_x8, friendly_board_inv_x8);
+                    non_slider_moves_x8 =
+                        _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
+                }
 
                 // Pawn push moves
-                {
+                if !CAPTURE_ONLY {
                     let src_sq_bit_x8 =
                         _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
                     let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
@@ -2033,17 +2036,19 @@ impl ChessGame {
             }
 
             // Castling moves
-            let king_bitboard =
-                bitboards[PieceIndex::WhiteKing as usize + ((b_move as usize) << 3)];
-            let king_square = king_bitboard.trailing_zeros() as u16;
+            if !CAPTURE_ONLY {
+                let king_bitboard =
+                    bitboards[PieceIndex::WhiteKing as usize + ((b_move as usize) << 3)];
+                let king_square = king_bitboard.trailing_zeros() as u16;
 
-            *scratch.quiet_list.get_unchecked_mut(quiet_cursor as usize) =
-                ((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING;
-            quiet_cursor += self.is_kingside_castle_allowed(b_move) as usize;
+                *scratch.quiet_list.get_unchecked_mut(quiet_cursor as usize) =
+                    ((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING;
+                quiet_cursor += self.is_kingside_castle_allowed(b_move) as usize;
 
-            *scratch.quiet_list.get_unchecked_mut(quiet_cursor as usize) =
-                ((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN;
-            quiet_cursor += self.is_queenside_castle_allowed(b_move) as usize;
+                *scratch.quiet_list.get_unchecked_mut(quiet_cursor as usize) =
+                    ((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN;
+                quiet_cursor += self.is_queenside_castle_allowed(b_move) as usize;
+            }
 
             let mut num_captures = 0;
             for i in 0..32 {
@@ -2085,9 +2090,11 @@ impl ChessGame {
                 num_captures += cap_count;
             }
 
-            move_list
-                .get_unchecked_mut(num_captures..num_captures + quiet_cursor)
-                .copy_from_slice(&scratch.quiet_list.get_unchecked(0..quiet_cursor));
+            if !CAPTURE_ONLY {
+                move_list
+                    .get_unchecked_mut(num_captures..num_captures + quiet_cursor)
+                    .copy_from_slice(&scratch.quiet_list.get_unchecked(0..quiet_cursor));
+            }
             // println!("Copied {} captures", num_copied);
             // println!("Capture moves:");
             // for i in 0..num_copied {
