@@ -38,10 +38,9 @@ const WEIGHT_TABLE: [i32; 12] = [
     -WEIGHT_PAWN,
 ];
 
-// @todo - EpCap should be scored 5000, size u16
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES: [[usize; 16]; 16] = [
-    /* Ep Cap */      [0, 0, 0, 0, 0, 0, 9000, 0, 0, 0, 0, 0, 0, 0, 9000, 0],
+    /* Ep Cap */      [0, 0, 0, 0, 0, 0, 5000, 0, 0, 0, 0, 0, 0, 0, 5000, 0],
     /* WhiteKing */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     /* WhiteQueen */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 1500, 1400, 1300, 1200, 1100, 1000, 0],
     /* WhiteRook */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 2500, 2400, 2300, 2200, 2100, 2000, 0],
@@ -74,6 +73,11 @@ impl PvTable {
     }
 }
 
+struct Scratch {
+    captures: [[u16; 32]; 32],
+    cursors: [*mut i16; 32],
+}
+
 pub struct Search<'a> {
     chess: ChessGame,
     tables: &'a tables::Tables,
@@ -97,6 +101,8 @@ pub struct Search<'a> {
     /// When a quiet move raises alpha, a bonus is added to the score, higher score prioritises the move
     /// against other quiet moves.
     alpha_moves: Box<[[u32; 64]; 16]>,
+
+    movegen_scratch: Box<MovegenScratch>,
 
     params: Box<SearchParams>,
 
@@ -187,6 +193,7 @@ impl<'a> Search<'a> {
             alpha_moves: Box::new([[0; 64]; 16]),
             rt,
             tt,
+            movegen_scratch: Box::new(MovegenScratch::new()),
         };
 
         s
@@ -230,8 +237,6 @@ impl<'a> Search<'a> {
 
         let mut pv_move = 0; // Null move
         let mut tt_move = 0; // Null move
-
-        let mut move_list = [0u16; 256];
 
         if self.ply > 0 && !self.pv_trace {
             if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
@@ -290,8 +295,17 @@ impl<'a> Search<'a> {
             }
         }
 
-        let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
-        move_list[0..move_count].sort_by(|a, b| self.sort_moves(a, b, pv_move, tt_move));
+        // let mut move_list = [0u16; 256];
+        // let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
+        // move_list[0..move_count].sort_by(|a, b| self.sort_moves(a, b, pv_move, tt_move));
+
+        let mut move_list = [0u16; 220];
+        let move_count = self.chess.gen_moves_avx512(
+            self.tables,
+            &mut move_list[2..],
+            &mut self.movegen_scratch,
+            None,
+        );
 
         let mut best_move = 0;
         let mut has_legal_moves = false;
@@ -300,8 +314,20 @@ impl<'a> Search<'a> {
 
         let mut moves_searched = 0;
 
-        for i in 0..move_count {
+        let mut i = 2;
+        while i < move_count + 2 {
             let mv = move_list[i];
+            i += 1;
+
+            // @todo strength - Check queen promotion first
+            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_KNIGHT {
+                i -= 3;
+
+                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+                move_list[i] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Second promotion to check
+                move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
+                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_QUEEN; // Fourth promotion to check
+            }
 
             let move_ok = unsafe { self.chess.make_move(mv, self.tables) };
 
@@ -450,17 +476,36 @@ impl<'a> Search<'a> {
             alpha = static_eval;
         }
 
-        let mut move_list = [0u16; 256];
+        // let mut move_list = [0u16; 256];
+        // let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
+        // move_list[0..move_count].sort_by(|a, b| self.sort_moves_quiescence(a, b));
 
-        let move_count = self.chess.gen_moves_slow(self.tables, &mut move_list);
-        move_list[0..move_count].sort_by(|a, b| self.sort_moves_quiescence(a, b));
+        let mut move_list = [0u16; 220];
+        let move_count = self.chess.gen_moves_avx512(
+            self.tables,
+            &mut move_list[2..],
+            &mut self.movegen_scratch,
+            None,
+        );
 
         let mut best_score = static_eval;
-
         let board_copy = self.chess.clone();
 
-        for i in 0..move_count {
+        let mut i = 2;
+        while i < move_count + 2 {
             let mv = move_list[i];
+            i += 1;
+
+            // @todo strength - Check queen promotion first
+            // @todo perf - Should quiesc search only check knight & Q promotions?
+            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_KNIGHT {
+                i -= 3;
+
+                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+                move_list[i] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Second promotion to check
+                move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
+                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_QUEEN; // Fourth promotion to check
+            }
 
             if (mv & MV_FLAG_CAP) == 0 {
                 break;

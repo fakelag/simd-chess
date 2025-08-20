@@ -85,6 +85,24 @@ enum CaptureMoves {
     KxP,
 }
 
+#[derive(Debug)]
+#[repr(align(64))]
+pub struct MovegenScratch {
+    quiet_list: [u16; 218],
+    capture_list: [[u16; 32]; 32],
+    capture_ptr: [*mut u16; 32],
+}
+
+impl MovegenScratch {
+    pub fn new() -> Self {
+        Self {
+            quiet_list: [0; 218],
+            capture_list: [[0; 32]; 32],
+            capture_ptr: [std::ptr::null_mut(); 32],
+        }
+    }
+}
+
 const CASTLES_SQUARES: [u8; 64] = [
     0b1011, 0b1111, 0b1111, 0b1111, 0b0011, 0b1111, 0b1111, 0b0111, //
     0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
@@ -239,6 +257,14 @@ pub struct ChessGame {
     spt: [u8; 64],
 }
 const CHESS_GAME_SIZE_ASSERT: [u8; 256] = [0; std::mem::size_of::<ChessGame>()];
+
+#[derive(Default, Debug)]
+pub struct Stats {
+    slider_piece_counts: [u8; 8],
+    nonslider_piece_counts: [u8; 8],
+    slider_move_counts: [u8; 8],
+    nonslider_move_counts: [u8; 8],
+}
 
 impl ChessGame {
     pub fn new() -> Self {
@@ -980,78 +1006,62 @@ impl ChessGame {
         depth: u8,
         tables: &Tables,
         mut moves: Option<&mut Vec<(String, u64)>>,
-        scratch: &mut [[u16; 32]; 32],
-        scratch2: &mut [*mut i16; 32],
+        scratch: &mut MovegenScratch,
     ) -> u64 {
         if depth == 0 {
             return 1;
         }
 
-        let mut quiet_list = [0; 218];
-        let mut capture_list = [0; 74];
-        let (q_size, c_size) = self.gen_moves_avx512(
-            tables,
-            &mut quiet_list,
-            &mut capture_list,
-            scratch,
-            scratch2,
-        );
-
         let mut node_count = 0;
+
+        let mut move_list = [0u16; 220];
+        let move_count = self.gen_moves_avx512(tables, &mut move_list[2..], scratch, None);
 
         let board_copy = self.clone();
 
-        for mv in capture_list
-            .iter()
-            .take(c_size)
-            .chain(quiet_list.iter().take(q_size))
-        {
-            let mv = *mv;
+        let mut i = 2;
+        while i < move_count + 2 {
+            let mv = move_list[i];
+            i += 1;
 
-            let with_flags = [
-                MV_FLAGS_PR_KNIGHT,
-                MV_FLAGS_PR_BISHOP,
-                MV_FLAGS_PR_ROOK,
-                MV_FLAGS_PR_QUEEN,
-            ]
-            .map(|flag| (mv & !MV_FLAGS_PR_MASK) | flag);
-            let without_flags = [mv];
+            // @todo strength - Check queen promotion first
+            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_KNIGHT {
+                i -= 3;
 
-            let moves_to_play = if mv & MV_FLAG_PROMOTION != 0 {
-                with_flags.iter()
-            } else {
-                without_flags.iter()
-            };
-
-            for &mv in moves_to_play {
-                if unsafe { self.make_move(mv, tables) }
-                    && !self.in_check_slow(tables, !self.b_move)
-                {
-                    if INTEGRITY_CHECK {
-                        assert!(
-                            self.zobrist_key == self.calc_initial_zobrist_key(tables),
-                            "Zobrist key mismatch after move {}",
-                            util::move_string(mv),
-                        );
-                        assert!(self.spt == self.calc_spt(), "Spt mismatch after move");
-                        assert!(
-                            self.material == self.calc_material(),
-                            "Material mismatch after move {}: {:?} vs {:?}",
-                            util::move_string(mv),
-                            self.material,
-                            self.calc_material(),
-                        );
-                    }
-                    let nodes =
-                        self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None, scratch, scratch2);
-                    node_count += nodes;
-
-                    if let Some(ref mut moves) = moves {
-                        moves.push((util::move_string(mv), nodes));
-                    }
-                }
-                *self = board_copy;
+                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+                move_list[i] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Second promotion to check
+                move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
+                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_QUEEN; // Second promotion to check
             }
+
+            if unsafe { self.make_move(mv, tables) } && !self.in_check_slow(tables, !self.b_move) {
+                if INTEGRITY_CHECK {
+                    assert!(
+                        self.zobrist_key == self.calc_initial_zobrist_key(tables),
+                        "Zobrist key mismatch after move {}",
+                        util::move_string_dbg(mv),
+                    );
+                    assert!(
+                        self.spt == self.calc_spt(),
+                        "Spt mismatch after move {}",
+                        util::move_string_dbg(mv),
+                    );
+                    assert!(
+                        self.material == self.calc_material(),
+                        "Material mismatch after move {}: {:?} vs {:?}",
+                        util::move_string_dbg(mv),
+                        self.material,
+                        self.calc_material(),
+                    );
+                }
+                let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None, scratch);
+                node_count += nodes;
+
+                if let Some(ref mut moves) = moves {
+                    moves.push((util::move_string(mv), nodes));
+                }
+            }
+            *self = board_copy;
         }
 
         node_count
@@ -1531,17 +1541,16 @@ impl ChessGame {
         self.castles & (0b1 << (!b_move as u8 * 2)) != 0
     }
 
-    #[inline(never)]
+    #[inline(always)]
     pub fn gen_moves_avx512(
         &self,
         tables: &Tables,
-        quiet_list: &mut [u16; 218],
-        capture_list: &mut [u16; 74],
-        scratch: &mut [[u16; 32]; 32],
-        scratch2: &mut [*mut i16; 32],
-    ) -> (usize, usize) {
+        move_list: &mut [u16],
+        scratch: &mut MovegenScratch,
+        mut stats: Option<&mut Stats>,
+    ) -> usize {
         for i in 0..32 {
-            scratch2[i] = scratch[i].as_mut_ptr() as *mut i16;
+            scratch.capture_ptr[i] = scratch.capture_list[i].as_mut_ptr() as *mut u16;
         }
 
         let mut quiet_cursor = 0usize;
@@ -1564,11 +1573,11 @@ impl ChessGame {
                 PieceIndex::WhiteKing as i64,
             );
             let const_nonslider_split = _mm512_set_epi64(
-                0x8080808080808080u64 as i64, // h file
-                0x4040404040404040u64 as i64, // g file
-                0x3030303030303030u64 as i64, // ef file
-                0xc0c0c0c0c0c0c0cu64 as i64,  // cd file
-                0x303030303030303u64 as i64,  // ab file
+                0x4040404040404040u64 as i64, // g // 0x8080808080808080u64 as i64, // h file
+                0x2020202020202020u64 as i64, // f // 0x4040404040404040u64 as i64, // g file
+                0x404040404040404u64 as i64,  // c // 0x3030303030303030u64 as i64, // ef file
+                0x1212121212121212u64 as i64, // be // 0xc0c0c0c0c0c0c0cu64 as i64,  // cd file
+                0x8989898989898989u64 as i64, // adh // 0x303030303030303u64 as i64,  // ab file
                 0xF0F0F0F0F0F0F0F0u64 as i64, // right half
                 0x0F0F0F0F0F0F0F0Fu64 as i64, // left half
                 0xFFFFFFFF_FFFFFFFFu64 as i64,
@@ -1669,7 +1678,7 @@ impl ChessGame {
             let const_zero_x8 = _mm512_setzero_si512();
 
             // Flags
-            let const_promotion_flag_x8 = _mm512_set1_epi64(MV_FLAG_PROMOTION as u64 as i64);
+            let const_promotion_flag_x8 = _mm512_set1_epi64(MV_FLAGS_PR_KNIGHT as u64 as i64);
             let const_epcap_flag_x8 = _mm512_set1_epi64(MV_FLAG_EPCAP as u64 as i64);
             let const_cap_flag_x8 = _mm512_set1_epi64(MV_FLAG_CAP as u64 as i64);
             let const_dpp_flag_x8 = _mm512_set1_epi64(MV_FLAG_DPP as u64 as i64);
@@ -1693,17 +1702,19 @@ impl ChessGame {
             macro_rules! capture_compress {
                 ($cap:expr, $src_piece_mask:ident, $cap_piece_mask:ident, $full_move_epi16_x8:ident) => {{
                     let cap_mask = $src_piece_mask & $cap_piece_mask;
+                    let cap_mask_popcnt = (cap_mask as u64).count_ones() as usize;
 
                     // _mm_mask_compressstoreu_epi16(
-                    //     scratch2[$cap as usize],
+                    //     scratch.capture_ptr[$cap as usize] as *mut i16,
                     //     cap_mask,
                     //     $full_move_epi16_x8,
                     // );
 
                     let compressed = _mm_maskz_compress_epi16(cap_mask, $full_move_epi16_x8);
-                    _mm_storeu_epi16(scratch2[$cap as usize], compressed);
-                    scratch2[$cap as usize] =
-                        scratch2[$cap as usize].add((cap_mask as u64).count_ones() as usize);
+                    _mm_storeu_epi16(scratch.capture_ptr[$cap as usize] as *mut i16, compressed);
+
+                    scratch.capture_ptr[$cap as usize] =
+                        scratch.capture_ptr[$cap as usize].add(cap_mask_popcnt);
                 }};
             }
 
@@ -1711,7 +1722,7 @@ impl ChessGame {
                 ($mask:expr, $full_move_epi16_x8:ident) => {{
                     let mask = $mask;
                     _mm_mask_compressstoreu_epi16(
-                        quiet_list.as_mut_ptr().add(quiet_cursor) as *mut i16,
+                        scratch.quiet_list.as_mut_ptr().add(quiet_cursor) as *mut i16,
                         mask,
                         $full_move_epi16_x8,
                     );
@@ -1728,6 +1739,29 @@ impl ChessGame {
                 _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
             let mut active_pieces_slider_mask =
                 _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
+
+            macro_rules! collect_stats {
+                ($stats:ident, $field:ident, $vec:ident) => {
+                    let mut counts_arr = [0u64; 8];
+                    _mm512_storeu_si512(counts_arr.as_mut_ptr() as *mut __m512i, $vec);
+                    $stats.$field = $stats
+                        .$field
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &prev)| prev + counts_arr[index] as u8)
+                        .collect::<Vec<_>>()
+                        .as_slice()
+                        .try_into()
+                        .unwrap();
+                };
+            }
+
+            // if let Some(stats) = &mut stats {
+            //     let nonslider_piece_counts_x8 = _mm512_popcnt_epi64(non_sliders_x8);
+            //     let slider_piece_counts_x8 = _mm512_popcnt_epi64(sliders_x8);
+            //     collect_stats!(stats, nonslider_piece_counts, nonslider_piece_counts_x8);
+            //     collect_stats!(stats, slider_piece_counts, slider_piece_counts_x8);
+            // }
 
             loop {
                 let mut slider_moves_x8 = ChessGame::get_slider_moves_x8(
@@ -1761,54 +1795,67 @@ impl ChessGame {
                     Tables::LT_NON_SLIDER_MASKS_GATHER.0.as_ptr() as *const i64,
                     8,
                 );
+
+                slider_moves_x8 = _mm512_and_si512(slider_moves_x8, friendly_board_inv_x8);
                 non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
 
-                // Add pawn push moves
+                // Pawn push moves
+                {
+                    let src_sq_bit_x8 =
+                        _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
+                    let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
+                        pawn_mask,
+                        _mm512_rolv_epi64(src_sq_bit_x8, pawn_push_rank_rolv_offset_x8),
+                        full_board_inv_x8,
+                    );
+                    let promotion_mask =
+                        _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
+                    let pawn_push_double_bit_x8 = _mm512_and_epi64(
+                        _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
+                        _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
+                    );
+                    let pawn_push_single_dst_sq_x8 = _mm512_slli_epi64(
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_single_bit_x8)),
+                        6,
+                    );
+                    let pawn_push_double_dst_sq_x8 = _mm512_slli_epi64(
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_double_bit_x8)),
+                        6,
+                    );
+                    let pawn_push_single_mask = pawn_mask
+                        & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
+                    let pawn_push_double_mask = pawn_mask
+                        & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
 
-                // Source square bit for masking, shifting by -1 zeroes bits for inactive lanes
-                let src_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
-                let pawn_push_single_bit_x8 = _mm512_and_epi64(
-                    _mm512_rolv_epi64(src_sq_bit_x8, pawn_push_rank_rolv_offset_x8),
-                    full_board_inv_x8,
-                );
-                let promotion_mask =
-                    _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
-                let pawn_push_double_bit_x8 = _mm512_and_epi64(
-                    _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
-                    _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
-                );
-                let pawn_push_single_dst_sq_x8 = _mm512_slli_epi64(
-                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_single_bit_x8)),
-                    6,
-                );
-                let pawn_push_double_dst_sq_x8 = _mm512_slli_epi64(
-                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_double_bit_x8)),
-                    6,
-                );
-                let pawn_push_single_mask =
-                    pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
-                let pawn_push_double_mask =
-                    pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
+                    let mut pawn_push_single_move_x8 = _mm512_or_epi64(
+                        pawn_push_single_dst_sq_x8,
+                        one_of_each_non_slider_index_x8,
+                    );
 
-                let mut pawn_push_single_move_x8 =
-                    _mm512_or_epi64(pawn_push_single_dst_sq_x8, one_of_each_non_slider_index_x8);
+                    pawn_push_single_move_x8 = _mm512_mask_or_epi64(
+                        pawn_push_single_move_x8,
+                        promotion_mask,
+                        pawn_push_single_move_x8,
+                        const_promotion_flag_x8,
+                    );
 
-                pawn_push_single_move_x8 = _mm512_mask_or_epi64(
-                    pawn_push_single_move_x8,
-                    promotion_mask,
-                    pawn_push_single_move_x8,
-                    const_promotion_flag_x8,
-                );
+                    let pawn_push_single_move_epi16_x8 =
+                        _mm512_cvtepi64_epi16(pawn_push_single_move_x8);
+                    let pawn_push_double_move_epi16_x8 = _mm512_cvtepi64_epi16(_mm512_or_epi64(
+                        pawn_push_double_dst_sq_x8,
+                        _mm512_or_epi64(one_of_each_non_slider_index_x8, const_dpp_flag_x8),
+                    ));
 
-                let pawn_push_single_move_epi16_x8 =
-                    _mm512_cvtepi64_epi16(pawn_push_single_move_x8);
-                let pawn_push_double_move_epi16_x8 = _mm512_cvtepi64_epi16(_mm512_or_epi64(
-                    pawn_push_double_dst_sq_x8,
-                    _mm512_or_epi64(one_of_each_non_slider_index_x8, const_dpp_flag_x8),
-                ));
+                    quiet_compress!(pawn_push_single_mask, pawn_push_single_move_epi16_x8);
+                    quiet_compress!(pawn_push_double_mask, pawn_push_double_move_epi16_x8);
+                }
 
-                quiet_compress!(pawn_push_single_mask, pawn_push_single_move_epi16_x8);
-                quiet_compress!(pawn_push_double_mask, pawn_push_double_move_epi16_x8);
+                // if let Some(stats) = &mut stats {
+                //     let nonslider_move_counts = _mm512_popcnt_epi64(non_slider_moves_x8);
+                //     let slider_move_counts = _mm512_popcnt_epi64(slider_moves_x8);
+                //     collect_stats!(stats, nonslider_move_counts, nonslider_move_counts);
+                //     collect_stats!(stats, slider_move_counts, slider_move_counts);
+                // }
 
                 let mut non_slider_dst_sq_x8 =
                     _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_slider_moves_x8));
@@ -1819,15 +1866,13 @@ impl ChessGame {
                     let non_slider_dst_sq_bit_x8 =
                         _mm512_sllv_epi64(const_1_x8, non_slider_dst_sq_x8);
 
-                    // Non-slider moves
-
                     let mut non_slider_full_move_x8 = _mm512_or_epi64(
                         _mm512_slli_epi64(non_slider_dst_sq_x8, 6),
                         one_of_each_non_slider_index_x8,
                     );
 
                     // Promotion flag for pawn moves on the last rank
-                    // NOTE: Requires special handling on move maker side
+                    // NOTE: This requires special handling on move maker side to try out other promotions
                     let promotion_mask = pawn_mask
                         & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, pawn_promotion_rank_x8);
 
@@ -1992,31 +2037,57 @@ impl ChessGame {
                 bitboards[PieceIndex::WhiteKing as usize + ((b_move as usize) << 3)];
             let king_square = king_bitboard.trailing_zeros() as u16;
 
-            *quiet_list.get_unchecked_mut(quiet_cursor as usize) =
-                ((king_square + 2) << 6) | king_square | MV_FLAGS_CASTLE_KING;
+            *scratch.quiet_list.get_unchecked_mut(quiet_cursor as usize) =
+                ((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING;
             quiet_cursor += self.is_kingside_castle_allowed(b_move) as usize;
 
-            *quiet_list.get_unchecked_mut(quiet_cursor as usize) =
-                ((king_square - 2) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN;
+            *scratch.quiet_list.get_unchecked_mut(quiet_cursor as usize) =
+                ((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN;
             quiet_cursor += self.is_queenside_castle_allowed(b_move) as usize;
 
-            let mut num_copied = 0;
+            let mut num_captures = 0;
             for i in 0..32 {
-                let num_captures = (scratch2[i] as usize - scratch[i].as_ptr() as usize) >> 1;
+                let cap_count = (scratch.capture_ptr[i] as usize
+                    - scratch.capture_list[i].as_ptr() as usize)
+                    >> 1;
                 // capture_list
-                //     .get_unchecked_mut(num_copied..num_copied + num_captures)
-                //     .copy_from_slice(&scratch[i].get_unchecked(0..num_captures));
+                //     .get_unchecked_mut(num_captures..num_captures + cap_count)
+                //     .copy_from_slice(&scratch[i].get_unchecked(0..cap_count));
 
-                *capture_list.get_unchecked_mut(num_copied + 0) = *scratch[i].get_unchecked(0);
-                *capture_list.get_unchecked_mut(num_copied + 1) = *scratch[i].get_unchecked(1);
-                *capture_list.get_unchecked_mut(num_copied + 2) = *scratch[i].get_unchecked(2);
-                *capture_list.get_unchecked_mut(num_copied + 3) = *scratch[i].get_unchecked(3);
-                for j in 4..num_captures {
+                // WIP:
+                // *capture_list.get_unchecked_mut(num_captures + 0) = *scratch[i].get_unchecked(0);
+                // *capture_list.get_unchecked_mut(num_captures + 1) = *scratch[i].get_unchecked(1);
+                // *capture_list.get_unchecked_mut(num_captures + 2) = *scratch[i].get_unchecked(2);
+                // *capture_list.get_unchecked_mut(num_captures + 3) = *scratch[i].get_unchecked(3);
+                // for j in 4..cap_count {
+                //     std::hint::cold_path();
+                //     *capture_list.get_unchecked_mut(num_captures + j) = *scratch[i].get_unchecked(j);
+                // }
+
+                // Single list
+                // move_list
+                //     .get_unchecked_mut(num_captures..num_captures + cap_count)
+                //     .copy_from_slice(&scratch[i].get_unchecked(0..cap_count));
+                *move_list.get_unchecked_mut(num_captures + 0) =
+                    *scratch.capture_list[i].get_unchecked(0);
+                *move_list.get_unchecked_mut(num_captures + 1) =
+                    *scratch.capture_list[i].get_unchecked(1);
+                *move_list.get_unchecked_mut(num_captures + 2) =
+                    *scratch.capture_list[i].get_unchecked(2);
+                *move_list.get_unchecked_mut(num_captures + 3) =
+                    *scratch.capture_list[i].get_unchecked(3);
+                for j in 4..cap_count {
                     std::hint::cold_path();
-                    *capture_list.get_unchecked_mut(num_copied + j) = *scratch[i].get_unchecked(j);
+                    *move_list.get_unchecked_mut(num_captures + j) =
+                        *scratch.capture_list[i].get_unchecked(j);
                 }
-                num_copied += num_captures;
+
+                num_captures += cap_count;
             }
+
+            move_list
+                .get_unchecked_mut(num_captures..num_captures + quiet_cursor)
+                .copy_from_slice(&scratch.quiet_list.get_unchecked(0..quiet_cursor));
             // println!("Copied {} captures", num_copied);
             // println!("Capture moves:");
             // for i in 0..num_copied {
@@ -2055,7 +2126,8 @@ impl ChessGame {
             //     println!("Quiet: {:?} ({})", mv, util::move_string_dbg(mv as u16));
             // }
 
-            (quiet_cursor as usize, num_copied as usize)
+            // (quiet_cursor as usize, num_captures as usize)
+            num_captures + quiet_cursor
         }
     }
 
@@ -2294,9 +2366,7 @@ mod tests {
         fn perft_verification(&mut self, depth: u8) -> u64 {
             let mut perft_results = Vec::new();
 
-            let mut scratch: Box<[[u16; 32]; 32]> =
-                vec![[0u16; 32]; 32].into_boxed_slice().try_into().unwrap();
-            let mut scratch2: [*mut i16; 32] = [0 as *mut i16; 32];
+            let mut scratch = MovegenScratch::new();
 
             let perft_result = if self.state_validation {
                 self.board.perft::<true>(
@@ -2304,7 +2374,6 @@ mod tests {
                     &self.tables,
                     Some(&mut perft_results),
                     &mut scratch,
-                    &mut scratch2,
                 )
             } else {
                 self.board.perft::<false>(
@@ -2312,7 +2381,6 @@ mod tests {
                     &self.tables,
                     Some(&mut perft_results),
                     &mut scratch,
-                    &mut scratch2,
                 )
             };
 
