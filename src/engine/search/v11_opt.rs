@@ -302,6 +302,10 @@ impl<'a> Search<'a> {
             self.tables,
             &mut move_list[2..],
             &mut self.movegen_scratch,
+            pv_move,
+            tt_move,
+            unsafe { self.beta_moves.get_unchecked(self.ply as usize)[0] },
+            unsafe { self.beta_moves.get_unchecked(self.ply as usize)[1] },
             None,
         );
 
@@ -483,6 +487,10 @@ impl<'a> Search<'a> {
             self.tables,
             &mut move_list[2..],
             &mut self.movegen_scratch,
+            0,
+            0,
+            0,
+            0,
             None,
         );
 

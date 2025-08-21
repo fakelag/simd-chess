@@ -1467,22 +1467,64 @@ fn main() {
 
     let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
 
-    std::hint::black_box(unsafe {
-        chess_v2::ChessGame::new().make_move(std::hint::black_box(0), &tables::Tables::new())
-    });
-    std::hint::black_box(
-        chess_v2::ChessGame::new()
-            .in_check_slow(&tables::Tables::new(), std::hint::black_box(false)),
-    );
-    let mut scratch = std::hint::black_box([[0u16; 32]; 32]);
-    let mut scratch2 = std::hint::black_box([0 as *mut i16; 32]);
-    std::hint::black_box(chess_v2::ChessGame::new().gen_moves_avx512(
-        &tables::Tables::new(),
-        std::hint::black_box(&mut [0u16; 218]),
-        std::hint::black_box(&mut [0u16; 74]),
+    let tables = tables::Tables::new();
+
+    let mut chess = chess_v2::ChessGame::new();
+
+    let fen = util::FEN_STARTPOS; // "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+    assert!(chess.load_fen(fen, &tables).is_ok());
+
+    let mut scratch = chess_v2::MovegenScratch::new();
+
+    // let mut scratch = [[0u16; 32]; 32];
+    // let mut scratch2 = [0 as *mut i16; 32];
+    // let mut scratch3 = [0u16; 218];
+
+    // let mut quiet_list = &mut [0u16; 218];
+    // let mut capture_list = &mut [0u16; 74];
+
+    let mut stats = chess_v2::Stats::default();
+
+    let mut move_list = [0u16; 218];
+
+    let move_count = chess.gen_moves_avx512::<false>(
+        &tables,
+        &mut move_list,
         &mut scratch,
-        &mut scratch2,
-    ));
+        black_box(5900),
+        black_box(5900),
+        black_box(5900),
+        black_box(5900),
+        Some(&mut stats),
+    );
+
+    println!("{:?}", move_count);
+    println!(
+        "Moves: {:?}",
+        move_list
+            .iter()
+            .take(move_count)
+            .map(|&mv| (util::move_string_dbg(mv as u16), mv as u16))
+            .collect::<Vec<_>>()
+    );
+    // println!(
+    //     "Quiet moves: {:?}",
+    //     quiet_list
+    //         .iter()
+    //         .take(q_count)
+    //         .map(|&mv| util::move_string_dbg(mv as u16))
+    //         .collect::<Vec<_>>()
+    // );
+    // println!(
+    //     "Capture moves: {:?}",
+    //     capture_list
+    //         .iter()
+    //         .take(c_count)
+    //         .map(|&mv| util::move_string_dbg(mv as u16))
+    //         .collect::<Vec<_>>()
+    // );
+    println!("Stats: {:?}", stats);
+    return;
 
     let result = match mode.as_str() {
         // "gui" => chess_ui(),
