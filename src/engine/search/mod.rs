@@ -10,6 +10,7 @@ pub trait SearchStrategy<'a> {
 
 pub mod repetition;
 pub mod search_params;
+pub mod sorting;
 pub mod transposition;
 
 pub mod v10_mvcache;
