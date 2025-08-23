@@ -23,6 +23,26 @@ macro_rules! cmp_swap_x32_epu16 {
     }};
 }
 
+macro_rules! cmp_swap_x16_epu16 {
+    ($input:expr, $perm:expr, $mask:expr) => {{
+        let input = $input;
+        let permuted_x16 = _mm256_permutexvar_epi16($perm, input);
+        let min_x16 = _mm256_min_epu16(input, permuted_x16);
+        let max_x16 = _mm256_max_epu16(input, permuted_x16);
+        _mm256_mask_blend_epi16($mask, max_x16, min_x16)
+    }};
+}
+
+macro_rules! cmp_swap_x8_epu16 {
+    ($input:expr, $perm:expr, $mask:expr) => {{
+        let input = $input;
+        let permuted_x8 = _mm_permutexvar_epi16($perm, input);
+        let min_x8 = _mm_min_epu16(input, permuted_x8);
+        let max_x8 = _mm_max_epu16(input, permuted_x8);
+        _mm_mask_blend_epi16($mask, max_x8, min_x8)
+    }};
+}
+
 macro_rules! m128_reverse_epi16 {
     ($a:expr) => {{
         let index = _mm_set_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
@@ -75,7 +95,7 @@ fn sort8(arr: &mut [u16]) {
     sort4(&mut arr[4..8]);
 }
 
-fn sort16(inout_x16: &mut __m256i) {
+pub fn sort16_linear(inout_x16: &mut __m256i) {
     unsafe {
         let mut lo_arr: [u16; 8] = [0u16; 8];
         let mut hi_arr: [u16; 8] = [0u16; 8];
@@ -107,6 +127,122 @@ fn sort16(inout_x16: &mut __m256i) {
 
         *inout_x16 = _mm256_castsi128_si256(lo_x8);
         *inout_x16 = _mm256_inserti128_si256(*inout_x16, hi_x8, 1);
+    }
+}
+
+pub fn sort16(inout_x16: &mut __m256i) {
+    unsafe {
+        // fn print_m256_epu16(label: &str, a: &__m256i) {
+        //     let mut arr: [u16; 16] = [0u16; 16];
+        //     unsafe {
+        //         _mm256_storeu_si256(arr.as_mut_ptr() as *mut __m256i, *a);
+        //     }
+        //     println!("{}: {:?}", label, arr);
+        // }
+
+        // fn print_m512_epu16(label: &str, a: &__m512i) {
+        //     let mut arr: [u16; 32] = [0u16; 32];
+        //     unsafe {
+        //         _mm512_storeu_si512(arr.as_mut_ptr() as *mut __m512i, *a);
+        //     }
+        //     println!("{}: {:?}", label, arr);
+        // }
+
+        const PERM_SELECT_B: u16 = 0x10;
+
+        let identity_x16 = _mm256_set_epi16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+        let identity_x8 = _mm_set_epi16(7, 6, 5, 4, 3, 2, 1, 0);
+
+        let const_1_x16 = _mm256_set1_epi16(1);
+        let const_2_x16 = _mm256_set1_epi16(2);
+        let const_7_x16 = _mm256_set1_epi16(7);
+
+        let const_perm_rev1_x16 = _mm256_set_epi16(
+            0, 0, 0, 0, 0, 0, 0, 0, // unused
+            8, 9, 10, 11, 12, 13, 14, 15, // reverse order
+        );
+
+        let sort4_m256 = |inout_x16: &mut __m256i| {
+            let low_adj_mask = 0x5555u16;
+            let low_gap2_mask = 0x3333u16;
+            let low_mid12_mask = 0x2222u16;
+
+            let perm_x32 = _mm256_xor_si256(identity_x16, const_1_x16);
+            *inout_x16 = cmp_swap_x16_epu16!(*inout_x16, perm_x32, low_adj_mask);
+
+            let perm_x32 = _mm256_xor_si256(identity_x16, const_2_x16);
+            *inout_x16 = cmp_swap_x16_epu16!(*inout_x16, perm_x32, low_gap2_mask);
+
+            let perm_x16 = _mm256_set_epi16(15, 13, 14, 12, 11, 9, 10, 8, 7, 5, 6, 4, 3, 1, 2, 0);
+            *inout_x16 = cmp_swap_x16_epu16!(*inout_x16, perm_x16, low_mid12_mask);
+
+            // let low_adj_mask = 0x55u8;
+            // let low_gap2_mask = 0x33u8;
+
+            // let input_x8_0 = _mm256_castsi256_si128(*inout_x16);
+            // let input_x8_1 = _mm256_extracti128_si256(*inout_x16, 1);
+
+            // let perm_x8 = _mm_xor_si128(identity_x8, _mm_set1_epi16(1));
+
+            // let mut sorted_x8_0 = cmp_swap_x8_epu16!(input_x8_0, perm_x8, low_adj_mask);
+            // let mut sorted_x8_1 = cmp_swap_x8_epu16!(input_x8_1, perm_x8, low_adj_mask);
+
+            // let perm_x8 = _mm_xor_si128(identity_x8, _mm_set1_epi16(2));
+
+            // sorted_x8_0 = cmp_swap_x8_epu16!(sorted_x8_0, perm_x8, low_gap2_mask);
+            // sorted_x8_1 = cmp_swap_x8_epu16!(sorted_x8_1, perm_x8, low_gap2_mask);
+
+            // let perm_x8 = _mm_set_epi16(7, 5, 6, 4, 3, 1, 2, 0);
+            // sorted_x8_0 = cmp_swap_x8_epu16!(sorted_x8_0, perm_x8, low_gap2_mask);
+            // sorted_x8_1 = cmp_swap_x8_epu16!(sorted_x8_1, perm_x8, low_gap2_mask);
+
+            // *inout_x16 = _mm256_castsi128_si256(sorted_x8_0);
+            // *inout_x16 = _mm256_inserti128_si256(*inout_x16, sorted_x8_1, 1);
+        };
+
+        let crosscompare_m256 = |inout_x16: &mut __m256i| {
+            let low_rev8_mask = 0x0F0Fu16;
+
+            let perm_x16 = _mm256_xor_si256(identity_x16, const_7_x16);
+            *inout_x16 = cmp_swap_x16_epu16!(*inout_x16, perm_x16, low_rev8_mask);
+        };
+
+        let combine_x8_m256 = |inout_x16: &mut __m256i| {
+            let permuted_x16 = _mm256_permutexvar_epi16(const_perm_rev1_x16, *inout_x16);
+
+            let min_x32 = _mm256_min_epu16(*inout_x16, permuted_x16);
+            let max_x32 = _mm256_max_epu16(*inout_x16, permuted_x16);
+
+            let combine_perm_x16 = _mm256_set_epi16(
+                (7 | PERM_SELECT_B) as i16,
+                (6 | PERM_SELECT_B) as i16,
+                (5 | PERM_SELECT_B) as i16,
+                (4 | PERM_SELECT_B) as i16,
+                (3 | PERM_SELECT_B) as i16,
+                (2 | PERM_SELECT_B) as i16,
+                (1 | PERM_SELECT_B) as i16,
+                (0 | PERM_SELECT_B) as i16,
+                7,
+                6,
+                5,
+                4,
+                3,
+                2,
+                1,
+                0,
+            );
+            *inout_x16 = _mm256_permutex2var_epi16(min_x32, combine_perm_x16, max_x32);
+        };
+
+        sort4_m256(inout_x16);
+        crosscompare_m256(inout_x16);
+        sort4_m256(inout_x16);
+
+        combine_x8_m256(inout_x16);
+
+        sort4_m256(inout_x16);
+        crosscompare_m256(inout_x16);
+        sort4_m256(inout_x16);
     }
 }
 
