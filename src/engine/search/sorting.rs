@@ -1,5 +1,11 @@
 use std::arch::x86_64::*;
 
+macro_rules! calc_seg_size {
+    ($n:expr) => {
+        $n.next_power_of_two().min(256).max(16)
+    };
+}
+
 macro_rules! cmp_swap_arr {
     ($arr:ident, $i:expr, $j:expr) => {{
         let a = $arr[$i];
@@ -67,6 +73,7 @@ macro_rules! m512_reverse_epi16 {
     }};
 }
 
+#[inline(always)]
 fn sort4(arr: &mut [u16]) {
     debug_assert!(arr.len() == 4);
 
@@ -77,6 +84,7 @@ fn sort4(arr: &mut [u16]) {
     cmp_swap_arr!(arr, 1, 2);
 }
 
+#[inline(always)]
 fn sort8(arr: &mut [u16]) {
     debug_assert!(arr.len() == 8);
 
@@ -130,6 +138,7 @@ pub fn sort16_linear(inout_x16: &mut __m256i) {
     }
 }
 
+#[inline(always)]
 pub fn sort16(inout_x16: &mut __m256i) {
     unsafe {
         // fn print_m256_epu16(label: &str, a: &__m256i) {
@@ -151,7 +160,7 @@ pub fn sort16(inout_x16: &mut __m256i) {
         const PERM_SELECT_B: u16 = 0x10;
 
         let identity_x16 = _mm256_set_epi16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        let identity_x8 = _mm_set_epi16(7, 6, 5, 4, 3, 2, 1, 0);
+        // let identity_x8 = _mm_set_epi16(7, 6, 5, 4, 3, 2, 1, 0);
 
         let const_1_x16 = _mm256_set1_epi16(1);
         let const_2_x16 = _mm256_set1_epi16(2);
@@ -246,6 +255,7 @@ pub fn sort16(inout_x16: &mut __m256i) {
     }
 }
 
+#[inline(always)]
 pub fn sort32(inout_x32: &mut __m512i) {
     unsafe {
         const PERM_SELECT_B: u16 = 0x20;
@@ -516,13 +526,7 @@ fn sort256(
     }
 }
 
-macro_rules! calc_seg_size {
-    ($n:expr) => {
-        $n.next_power_of_two().min(256).max(16)
-    };
-}
-
-#[inline(never)]
+#[inline(always)]
 pub fn sort_218x16_avx512(buf_218: &mut [u16; 256], n: usize) {
     if n <= 8 {
         sort8(&mut buf_218[0..8]);
