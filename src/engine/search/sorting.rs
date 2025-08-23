@@ -13,6 +13,16 @@ macro_rules! cmp_swap_arr {
     }};
 }
 
+macro_rules! cmp_swap_x32_epu16 {
+    ($input:expr, $perm:expr, $mask:expr) => {{
+        let input = $input;
+        let permuted_x32 = _mm512_permutexvar_epi16($perm, input);
+        let min_x32 = _mm512_min_epu16(input, permuted_x32);
+        let max_x32 = _mm512_max_epu16(input, permuted_x32);
+        _mm512_mask_blend_epi16($mask, max_x32, min_x32)
+    }};
+}
+
 macro_rules! m128_reverse_epi16 {
     ($a:expr) => {{
         let index = _mm_set_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
@@ -100,176 +110,152 @@ fn sort16(inout_x16: &mut __m256i) {
     }
 }
 
-macro_rules! cmp_and_swap_m512 {
-    ($input:expr, $perm:expr, $mask:expr) => {{
-        let input = $input;
-        let permuted_x32 = _mm512_permutexvar_epi16($perm, input);
-        let min_x32 = _mm512_min_epu16(input, permuted_x32);
-        let max_x32 = _mm512_max_epu16(input, permuted_x32);
-        _mm512_mask_blend_epi16($mask, max_x32, min_x32)
-    }};
-}
-
-#[inline(never)]
 pub fn sort32(inout_x32: &mut __m512i) {
     unsafe {
+        const PERM_SELECT_B: u16 = 0x20;
+
         let identity_x32 = _mm512_set_epi16(
             31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
             9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
         );
-        let idx = identity_x32;
-        let one = _mm512_set1_epi16(1);
-        let two = _mm512_set1_epi16(2);
-        let seven = _mm512_set1_epi16(7);
 
-        let low_adj_x32 = 0x55555555u32; // even lanes: 0,2,4,...
-        let low_gap2_x32 = 0x33333333u32; // lanes with (i & 2) == 0: 0,1,4,5,8,9,...
-        let low_mid12_x32 = 0x22222222u32; // lanes with (i % 4) == 1: 1,5,9,...
-        let low_rev8_x32 = 0x0F0F0F0Fu32; // lanes with (i & 4) == 0 within each 8-lane block
+        let const_1_x32 = _mm512_set1_epi16(1);
+        let const_2_x32 = _mm512_set1_epi16(2);
+        let const_7_x32 = _mm512_set1_epi16(7);
 
-        let sort4_m512 = |inout_x32: &mut __m512i| {
-            // 1) Adjacent pairs: (0,1)(2,3)...(30,31)
-            {
-                let perm_x32 = _mm512_xor_si512(idx, one); // i ^ 1
-                *inout_x32 = cmp_and_swap_m512!(*inout_x32, perm_x32, low_adj_x32);
-            }
-
-            // 2) Stride-2 pairs: (0,2)(1,3)(4,6)(5,7)...(29,31)
-            {
-                let perm_x32 = _mm512_xor_si512(idx, two); // i ^ 2
-                *inout_x32 = cmp_and_swap_m512!(*inout_x32, perm_x32, low_gap2_x32);
-            }
-
-            // 3) Middle pairs within 4-wide groups: (1,2)(5,6)...(29,30)
-            // Build a permute that swaps only lanes with offsets 1<->2, leaves 0 and 3 unchanged.
-            {
-                let perm_x32 = _mm512_set_epi16(
-                    31, 29, 30, 28, 27, 25, 26, 24, 23, 21, 22, 20, 19, 17, 18, 16, 15, 13, 14, 12,
-                    11, 9, 10, 8, 7, 5, 6, 4, 3, 1, 2, 0,
-                );
-                *inout_x32 = cmp_and_swap_m512!(*inout_x32, perm_x32, low_mid12_x32);
-            }
-        };
-
-        // 4) Cross-compare within each 8-lane group:
-        // (0,7)(1,6)(2,5)(3,4) | (8,15)(9,14)... | (16,23)... | (24,31)...
-        let crosscompare_m512 = |inout_x32: &mut __m512i| {
-            {
-                let perm_x32 = _mm512_xor_si512(idx, seven); // i ^ 7  (reverse within each 8)
-                *inout_x32 = cmp_and_swap_m512!(*inout_x32, perm_x32, low_rev8_x32);
-            }
-        };
-
-        // fn print_vec_epu16(vec: __m512i) {
-        //     let mut arr: [u16; 32] = [0; 32];
-        //     unsafe {
-        //         _mm512_storeu_si512(arr.as_mut_ptr() as *mut __m512i, vec);
-        //     }
-        //     println!("{:?}", arr);
-        // }
-
-        sort4_m512(inout_x32);
-        crosscompare_m512(inout_x32);
-        sort4_m512(inout_x32);
-
-        let perm_rev2_x32 = _mm512_set_epi16(
-            23, 22, 21, 20, 19, 18, 17, 16, // normal order
+        let const_perm_rev2_x32 = _mm512_set_epi16(
+            0, 0, 0, 0, 0, 0, 0, 0, // unused
             24, 25, 26, 27, 28, 29, 30, 31, // reverse order
-            7, 6, 5, 4, 3, 2, 1, 0, // normal order
+            0, 0, 0, 0, 0, 0, 0, 0, // unused
             8, 9, 10, 11, 12, 13, 14, 15, // reverse order
         );
-        let permuted_x32 = _mm512_permutexvar_epi16(perm_rev2_x32, *inout_x32);
-
-        let min_x32 = _mm512_min_epu16(*inout_x32, permuted_x32);
-        let max_x32 = _mm512_max_epu16(*inout_x32, permuted_x32);
-
-        let select_max = 0b100000u16;
-        let combine_perm_x32 = _mm512_set_epi16(
-            (23 | select_max) as i16,
-            (22 | select_max) as i16,
-            (21 | select_max) as i16,
-            (20 | select_max) as i16,
-            (19 | select_max) as i16,
-            (18 | select_max) as i16,
-            (17 | select_max) as i16,
-            (16 | select_max) as i16,
-            23,
-            22,
-            21,
-            20,
-            19,
-            18,
-            17,
-            16, // select min
-            (7 | select_max) as i16,
-            (6 | select_max) as i16,
-            (5 | select_max) as i16,
-            (4 | select_max) as i16,
-            (3 | select_max) as i16,
-            (2 | select_max) as i16,
-            (1 | select_max) as i16,
-            (0 | select_max) as i16, // select max
-            7,
-            6,
-            5,
-            4,
-            3,
-            2,
-            1,
-            0, // select min
-        );
-        *inout_x32 = _mm512_permutex2var_epi16(min_x32, combine_perm_x32, max_x32);
-
-        sort4_m512(inout_x32);
-        crosscompare_m512(inout_x32);
-        sort4_m512(inout_x32);
-
-        let perm_rev2_x32 = _mm512_set_epi16(
-            // 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, // normal order
+        let const_perm_rev1_x32 = _mm512_set_epi16(
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // dont care
             16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, // reverse order
         );
-        let permuted_x32 = _mm512_permutexvar_epi16(perm_rev2_x32, *inout_x32);
 
-        let min_x32 = _mm512_min_epu16(*inout_x32, permuted_x32);
-        let max_x32 = _mm512_max_epu16(*inout_x32, permuted_x32);
+        let sort4_m512 = |inout_x32: &mut __m512i| {
+            let low_adj_mask = 0x55555555u32;
+            let low_gap2_mask = 0x33333333u32;
+            let low_mid12_mask = 0x22222222u32;
 
-        let select_max = 0b100000u16;
-        let combine_perm_x32 = _mm512_set_epi16(
-            (15 | select_max) as i16,
-            (14 | select_max) as i16,
-            (13 | select_max) as i16,
-            (12 | select_max) as i16,
-            (11 | select_max) as i16,
-            (10 | select_max) as i16,
-            (9 | select_max) as i16,
-            (8 | select_max) as i16, // select max
-            (7 | select_max) as i16,
-            (6 | select_max) as i16,
-            (5 | select_max) as i16,
-            (4 | select_max) as i16,
-            (3 | select_max) as i16,
-            (2 | select_max) as i16,
-            (1 | select_max) as i16,
-            (0 | select_max) as i16, // select max
-            15,
-            14,
-            13,
-            12,
-            11,
-            10,
-            9,
-            8, // select min
-            7,
-            6,
-            5,
-            4,
-            3,
-            2,
-            1,
-            0, // select min
-        );
-        *inout_x32 = _mm512_permutex2var_epi16(min_x32, combine_perm_x32, max_x32);
+            let perm_x32 = _mm512_xor_si512(identity_x32, const_1_x32);
+            *inout_x32 = cmp_swap_x32_epu16!(*inout_x32, perm_x32, low_adj_mask);
+
+            let perm_x32 = _mm512_xor_si512(identity_x32, const_2_x32);
+            *inout_x32 = cmp_swap_x32_epu16!(*inout_x32, perm_x32, low_gap2_mask);
+
+            let perm_x32 = _mm512_set_epi16(
+                31, 29, 30, 28, 27, 25, 26, 24, 23, 21, 22, 20, 19, 17, 18, 16, 15, 13, 14, 12, 11,
+                9, 10, 8, 7, 5, 6, 4, 3, 1, 2, 0,
+            );
+            *inout_x32 = cmp_swap_x32_epu16!(*inout_x32, perm_x32, low_mid12_mask);
+        };
+
+        let crosscompare_m512 = |inout_x32: &mut __m512i| {
+            let low_rev8_mask = 0x0F0F0F0Fu32;
+
+            let perm_x32 = _mm512_xor_si512(identity_x32, const_7_x32);
+            *inout_x32 = cmp_swap_x32_epu16!(*inout_x32, perm_x32, low_rev8_mask);
+        };
+
+        let combine_x8_m512 = |inout_x32: &mut __m512i| {
+            let permuted_x32 = _mm512_permutexvar_epi16(const_perm_rev2_x32, *inout_x32);
+
+            let min_x32 = _mm512_min_epu16(*inout_x32, permuted_x32);
+            let max_x32 = _mm512_max_epu16(*inout_x32, permuted_x32);
+
+            let combine_perm_x32 = _mm512_set_epi16(
+                (23 | PERM_SELECT_B) as i16,
+                (22 | PERM_SELECT_B) as i16,
+                (21 | PERM_SELECT_B) as i16,
+                (20 | PERM_SELECT_B) as i16,
+                (19 | PERM_SELECT_B) as i16,
+                (18 | PERM_SELECT_B) as i16,
+                (17 | PERM_SELECT_B) as i16,
+                (16 | PERM_SELECT_B) as i16,
+                23,
+                22,
+                21,
+                20,
+                19,
+                18,
+                17,
+                16,
+                (7 | PERM_SELECT_B) as i16,
+                (6 | PERM_SELECT_B) as i16,
+                (5 | PERM_SELECT_B) as i16,
+                (4 | PERM_SELECT_B) as i16,
+                (3 | PERM_SELECT_B) as i16,
+                (2 | PERM_SELECT_B) as i16,
+                (1 | PERM_SELECT_B) as i16,
+                (0 | PERM_SELECT_B) as i16,
+                7,
+                6,
+                5,
+                4,
+                3,
+                2,
+                1,
+                0,
+            );
+            *inout_x32 = _mm512_permutex2var_epi16(min_x32, combine_perm_x32, max_x32);
+        };
+
+        let combine_x16_m512 = |inout_x32: &mut __m512i| {
+            let permuted_x32 = _mm512_permutexvar_epi16(const_perm_rev1_x32, *inout_x32);
+
+            let min_x32 = _mm512_min_epu16(*inout_x32, permuted_x32);
+            let max_x32 = _mm512_max_epu16(*inout_x32, permuted_x32);
+
+            let combine_perm_x32 = _mm512_set_epi16(
+                (15 | PERM_SELECT_B) as i16,
+                (14 | PERM_SELECT_B) as i16,
+                (13 | PERM_SELECT_B) as i16,
+                (12 | PERM_SELECT_B) as i16,
+                (11 | PERM_SELECT_B) as i16,
+                (10 | PERM_SELECT_B) as i16,
+                (9 | PERM_SELECT_B) as i16,
+                (8 | PERM_SELECT_B) as i16,
+                (7 | PERM_SELECT_B) as i16,
+                (6 | PERM_SELECT_B) as i16,
+                (5 | PERM_SELECT_B) as i16,
+                (4 | PERM_SELECT_B) as i16,
+                (3 | PERM_SELECT_B) as i16,
+                (2 | PERM_SELECT_B) as i16,
+                (1 | PERM_SELECT_B) as i16,
+                (0 | PERM_SELECT_B) as i16,
+                15,
+                14,
+                13,
+                12,
+                11,
+                10,
+                9,
+                8,
+                7,
+                6,
+                5,
+                4,
+                3,
+                2,
+                1,
+                0,
+            );
+            *inout_x32 = _mm512_permutex2var_epi16(min_x32, combine_perm_x32, max_x32);
+        };
+
+        sort4_m512(inout_x32);
+        crosscompare_m512(inout_x32);
+        sort4_m512(inout_x32);
+
+        combine_x8_m512(inout_x32);
+
+        sort4_m512(inout_x32);
+        crosscompare_m512(inout_x32);
+        sort4_m512(inout_x32);
+
+        combine_x16_m512(inout_x32);
 
         // 16-bit halves have smaller values in the lower half, larger values in the upper half.
 
@@ -277,54 +263,7 @@ pub fn sort32(inout_x32: &mut __m512i) {
         crosscompare_m512(inout_x32);
         sort4_m512(inout_x32);
 
-        // xxxx
-        let perm_rev2_x32 = _mm512_set_epi16(
-            23, 22, 21, 20, 19, 18, 17, 16, // normal order
-            24, 25, 26, 27, 28, 29, 30, 31, // reverse order
-            7, 6, 5, 4, 3, 2, 1, 0, // normal order
-            8, 9, 10, 11, 12, 13, 14, 15, // reverse order
-        );
-        let permuted_x32 = _mm512_permutexvar_epi16(perm_rev2_x32, *inout_x32);
-
-        let min_x32 = _mm512_min_epu16(*inout_x32, permuted_x32);
-        let max_x32 = _mm512_max_epu16(*inout_x32, permuted_x32);
-
-        let select_max = 0b100000u16;
-        let combine_perm_x32 = _mm512_set_epi16(
-            (23 | select_max) as i16,
-            (22 | select_max) as i16,
-            (21 | select_max) as i16,
-            (20 | select_max) as i16,
-            (19 | select_max) as i16,
-            (18 | select_max) as i16,
-            (17 | select_max) as i16,
-            (16 | select_max) as i16,
-            23,
-            22,
-            21,
-            20,
-            19,
-            18,
-            17,
-            16, // select min
-            (7 | select_max) as i16,
-            (6 | select_max) as i16,
-            (5 | select_max) as i16,
-            (4 | select_max) as i16,
-            (3 | select_max) as i16,
-            (2 | select_max) as i16,
-            (1 | select_max) as i16,
-            (0 | select_max) as i16, // select max
-            7,
-            6,
-            5,
-            4,
-            3,
-            2,
-            1,
-            0, // select min
-        );
-        *inout_x32 = _mm512_permutex2var_epi16(min_x32, combine_perm_x32, max_x32);
+        combine_x8_m512(inout_x32);
 
         sort4_m512(inout_x32);
         crosscompare_m512(inout_x32);
@@ -332,7 +271,7 @@ pub fn sort32(inout_x32: &mut __m512i) {
     }
 }
 
-pub fn sort32_old(inout_x32: &mut __m512i) {
+pub fn sort32_linear(inout_x32: &mut __m512i) {
     unsafe {
         let mut lo_x16 = _mm512_castsi512_si256(*inout_x32);
         let mut hi_x16 = _mm512_extracti32x8_epi32(*inout_x32, 1);
