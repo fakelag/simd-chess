@@ -3,7 +3,7 @@ use crate::{
     pop_ls1b,
     util::{self, Align64},
 };
-use std::{arch::x86_64::*, hint::black_box};
+use std::arch::x86_64::*;
 
 pub const MV_FLAGS: u16 = 0b1111 << 12;
 pub const MV_FLAG_PROMOTION: u16 = 0b1000 << 12;
@@ -83,24 +83,6 @@ enum CaptureMoves {
     RxP,
     QxP,
     KxP,
-}
-
-#[derive(Debug)]
-#[repr(align(64))]
-pub struct MovegenScratch {
-    quiet_list: [u16; 218],
-    capture_list: [[u16; 32]; 32],
-    capture_ptr: [*mut u16; 32],
-}
-
-impl MovegenScratch {
-    pub fn new() -> Self {
-        Self {
-            quiet_list: [0; 218],
-            capture_list: [[0; 32]; 32],
-            capture_ptr: [std::ptr::null_mut(); 32],
-        }
-    }
 }
 
 const CASTLES_SQUARES: [u8; 64] = [
@@ -258,14 +240,6 @@ pub struct ChessGame {
 }
 const CHESS_GAME_SIZE_ASSERT: [u8; 256] = [0; std::mem::size_of::<ChessGame>()];
 
-#[derive(Default, Debug)]
-pub struct Stats {
-    slider_piece_counts: [u8; 8],
-    nonslider_piece_counts: [u8; 8],
-    slider_move_counts: [u8; 8],
-    nonslider_move_counts: [u8; 8],
-}
-
 impl ChessGame {
     pub fn new() -> Self {
         Self {
@@ -281,7 +255,7 @@ impl ChessGame {
         }
     }
 
-    // #[inline(always)]
+    #[inline(always)]
     pub fn gen_moves_avx512<const CAPTURE_ONLY: bool>(
         &self,
         tables: &Tables,
@@ -427,29 +401,6 @@ impl ChessGame {
             let mut active_pieces_slider_mask =
                 _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
 
-            // macro_rules! collect_stats {
-            //     ($stats:ident, $field:ident, $vec:ident) => {
-            //         let mut counts_arr = [0u64; 8];
-            //         _mm512_storeu_si512(counts_arr.as_mut_ptr() as *mut __m512i, $vec);
-            //         $stats.$field = $stats
-            //             .$field
-            //             .iter()
-            //             .enumerate()
-            //             .map(|(index, &prev)| prev + counts_arr[index] as u8)
-            //             .collect::<Vec<_>>()
-            //             .as_slice()
-            //             .try_into()
-            //             .unwrap();
-            //     };
-            // }
-
-            // if let Some(stats) = &mut stats {
-            //     let nonslider_piece_counts_x8 = _mm512_popcnt_epi64(non_sliders_x8);
-            //     let slider_piece_counts_x8 = _mm512_popcnt_epi64(sliders_x8);
-            //     collect_stats!(stats, nonslider_piece_counts, nonslider_piece_counts_x8);
-            //     collect_stats!(stats, slider_piece_counts, slider_piece_counts_x8);
-            // }
-
             macro_rules! push_moves {
                 ($mask:expr, $moves_epi16_x8:ident) => {{
                     let mask = $mask;
@@ -549,13 +500,6 @@ impl ChessGame {
                     push_moves!(pawn_push_single_mask, pawn_push_single_move_epi16_x8);
                     push_moves!(pawn_push_double_mask, pawn_push_double_move_epi16_x8);
                 }
-
-                // if let Some(stats) = &mut stats {
-                //     let nonslider_move_counts = _mm512_popcnt_epi64(non_slider_moves_x8);
-                //     let slider_move_counts = _mm512_popcnt_epi64(slider_moves_x8);
-                //     collect_stats!(stats, nonslider_move_counts, nonslider_move_counts);
-                //     collect_stats!(stats, slider_move_counts, slider_move_counts);
-                // }
 
                 let mut non_slider_dst_sq_x8 =
                     _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_slider_moves_x8));
@@ -682,8 +626,8 @@ impl ChessGame {
 
             // Castling moves
             if !CAPTURE_ONLY {
-                let king_bitboard = self.board.bitboards
-                    [PieceIndex::WhiteKing as usize + ((self.b_move as usize) << 3)];
+                let king_bitboard =
+                    self.board.bitboards[PieceIndex::WhiteKing as usize + friendly_move_offset];
                 let king_square = king_bitboard.trailing_zeros() as u16;
 
                 *move_list.get_unchecked_mut(mv_cursor as usize) =
@@ -1347,27 +1291,37 @@ impl ChessGame {
         true
     }
 
+    #[inline(always)]
     pub fn make_null_move(&mut self, tables: &Tables) -> u8 {
-        let zb_keys = &tables.zobrist_hash_keys;
+        unsafe {
+            let zb_keys = &tables.zobrist_hash_keys;
 
-        self.b_move = !self.b_move;
-        self.zobrist_key ^= zb_keys.hash_side_to_move;
-        self.zobrist_key ^= zb_keys.hash_en_passant_squares[self.en_passant as usize];
+            self.b_move = !self.b_move;
+            self.zobrist_key ^= zb_keys.hash_side_to_move;
+            self.zobrist_key ^= zb_keys
+                .hash_en_passant_squares
+                .get_unchecked(self.en_passant as usize);
 
-        let old_ep = self.en_passant;
-        self.en_passant = 0;
+            let old_ep = self.en_passant;
+            self.en_passant = 0;
 
-        old_ep
+            old_ep
+        }
     }
 
+    #[inline(always)]
     pub fn rollback_null_move(&mut self, ep_square: u8, tables: &Tables) {
-        let zb_keys = &tables.zobrist_hash_keys;
+        unsafe {
+            let zb_keys = &tables.zobrist_hash_keys;
 
-        self.b_move = !self.b_move;
-        self.zobrist_key ^= zb_keys.hash_en_passant_squares[ep_square as usize];
-        self.zobrist_key ^= zb_keys.hash_side_to_move;
+            self.b_move = !self.b_move;
+            self.zobrist_key ^= zb_keys
+                .hash_en_passant_squares
+                .get_unchecked(ep_square as usize);
+            self.zobrist_key ^= zb_keys.hash_side_to_move;
 
-        self.en_passant = ep_square;
+            self.en_passant = ep_square;
+        }
     }
 
     pub fn perft_prev<const INTEGRITY_CHECK: bool>(
@@ -1424,7 +1378,6 @@ impl ChessGame {
         depth: u8,
         tables: &Tables,
         mut moves: Option<&mut Vec<(String, u64)>>,
-        scratch: &mut MovegenScratch,
     ) -> u64 {
         if depth == 0 {
             return 1;
@@ -1475,7 +1428,7 @@ impl ChessGame {
                         self.calc_material(),
                     );
                 }
-                let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None, scratch);
+                let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None);
                 node_count += nodes;
 
                 if let Some(ref mut moves) = moves {
@@ -2140,22 +2093,12 @@ mod tests {
         fn perft_verification(&mut self, depth: u8) -> u64 {
             let mut perft_results = Vec::new();
 
-            let mut scratch = MovegenScratch::new();
-
             let perft_result = if self.state_validation {
-                self.board.perft::<true>(
-                    depth,
-                    &self.tables,
-                    Some(&mut perft_results),
-                    &mut scratch,
-                )
+                self.board
+                    .perft::<true>(depth, &self.tables, Some(&mut perft_results))
             } else {
-                self.board.perft::<false>(
-                    depth,
-                    &self.tables,
-                    Some(&mut perft_results),
-                    &mut scratch,
-                )
+                self.board
+                    .perft::<false>(depth, &self.tables, Some(&mut perft_results))
             };
 
             if !PERFT_MOVE_VERIFICATION {
