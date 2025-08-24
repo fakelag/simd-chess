@@ -3,28 +3,31 @@ use crossbeam::channel;
 use crate::{
     chess_v2::*,
     engine::{
+        chess_v2,
         search::{
             AbortSignal, SearchStrategy,
-            repetition::RepetitionTable,
+            repetition_v2::RepetitionTable,
             search_params::SearchParams,
             sorting,
-            transposition::{BoundType, TranspositionTable},
+            transposition_v2::{BoundType, TranspositionTable},
         },
         tables::{self},
     },
     util::{self, Align64},
 };
 
-const SCORE_INF: i32 = i32::MAX - 1;
-const WEIGHT_KING: i32 = 10000;
-const WEIGHT_QUEEN: i32 = 1000;
-const WEIGHT_ROOK: i32 = 525;
-const WEIGHT_BISHOP: i32 = 350;
-const WEIGHT_KNIGHT: i32 = 350;
-const WEIGHT_PAWN: i32 = 100;
+type Eval = i16;
+
+const SCORE_INF: Eval = i16::MAX - 1;
+const WEIGHT_KING: Eval = 10000;
+const WEIGHT_QUEEN: Eval = 1000;
+const WEIGHT_ROOK: Eval = 525;
+const WEIGHT_BISHOP: Eval = 350;
+const WEIGHT_KNIGHT: Eval = 350;
+const WEIGHT_PAWN: Eval = 100;
 const PV_DEPTH: usize = 64;
 
-const WEIGHT_TABLE: [i32; 12] = [
+const WEIGHT_TABLE: [Eval; 12] = [
     WEIGHT_KING,
     WEIGHT_QUEEN,
     WEIGHT_ROOK,
@@ -112,6 +115,8 @@ pub struct Search<'a> {
     pv_length: usize,
     pv_trace: bool,
 
+    move_list: [u16; 218],
+
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
 
@@ -123,11 +128,9 @@ pub struct Search<'a> {
     /// against other quiet moves.
     alpha_moves: Box<[[u8; 64]; 16]>,
 
-    movegen_scratch: Box<MovegenScratch>,
-
     params: Box<SearchParams>,
 
-    score: i32,
+    score: Eval,
     b_cut_count: u64,
     b_cut_null_count: u64,
     a_raise_count: u64,
@@ -148,7 +151,7 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
         'outer: for depth in 1..=target_depth {
             self.ply = 0;
 
-            let score = self.go(-i32::MAX, i32::MAX, depth);
+            let score = self.go(-Eval::MAX, Eval::MAX, depth);
 
             if self.is_stopping {
                 break 'outer;
@@ -174,11 +177,9 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
     }
 
     fn search_score(&self) -> i32 {
-        self.score
+        self.score as i32
     }
 }
-
-const VERIFY_SORTING: bool = false;
 
 impl<'a> Search<'a> {
     pub fn new(
@@ -192,6 +193,7 @@ impl<'a> Search<'a> {
         let mut s = Search {
             sig,
             chess: chess,
+            move_list: [0; 218],
             params: Box::new(params),
             tables,
             quiet_nodes: 0,
@@ -202,7 +204,7 @@ impl<'a> Search<'a> {
             b_cut_null_count: 0,
             ply: 0,
             is_stopping: false,
-            score: -i32::MAX,
+            score: -Eval::MAX,
             pv_table: unsafe {
                 let mut pv_table = Box::new_uninit();
                 pv_table.write(PvTable::new());
@@ -216,7 +218,6 @@ impl<'a> Search<'a> {
             alpha_moves: Box::new([[0; 64]; 16]),
             rt,
             tt,
-            movegen_scratch: Box::new(MovegenScratch::new()),
         };
 
         s
@@ -243,25 +244,31 @@ impl<'a> Search<'a> {
     pub fn get_quiet_nodes(&self) -> u64 {
         self.quiet_nodes
     }
+    pub fn get_rt(&self) -> &RepetitionTable {
+        &self.rt
+    }
 
-    fn go(&mut self, alpha: i32, beta: i32, depth: u8) -> i32 {
+    fn go(&mut self, alpha: Eval, beta: Eval, depth: u8) -> Eval {
+        let ply = self.ply as usize & (PV_DEPTH - 1);
+
         self.node_count += 1;
+        self.pv_table.lengths[ply] = 0;
 
         if self.node_count & 0x7FF == 0 && self.check_sigabort() {
             self.is_stopping = true;
             return 0;
         }
 
-        if self.ply >= PV_DEPTH as u8 - 1 {
-            return self.quiescence(alpha, beta, self.ply as u32);
-        }
-
-        self.pv_table.lengths[self.ply as usize] = 0;
+        let search_done = self.ply >= PV_DEPTH as u8 - 1 || depth == 0;
+        let apply_pruning = !self.pv_trace && ply > 0;
 
         let mut pv_move = 0; // Null move
         let mut tt_move = 0; // Null move
+        let mut bound_type = BoundType::UpperBound;
+        let mut alpha = alpha;
+        let mut depth = depth;
 
-        if self.ply > 0 && !self.pv_trace {
+        if apply_pruning {
             if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
                 return 0;
             }
@@ -272,33 +279,29 @@ impl<'a> Search<'a> {
                 return score;
             }
 
-            if let Some(mv) = mv {
-                tt_move = mv;
-            }
+            tt_move = mv;
         }
 
-        let mut bound_type = BoundType::UpperBound;
-        let mut alpha = alpha;
-        let mut depth = depth;
-
-        if depth == 0 {
+        if search_done {
             debug_assert!(!self.pv_trace);
-            return self.quiescence(alpha, beta, self.ply as u32);
+            return self.quiescence(alpha, beta, ply as u32);
         }
 
         let in_check = self.chess.in_check_slow(self.tables, self.chess.b_move());
         depth += in_check as u8;
 
+        let depth_pruning = depth >= 3 && !in_check;
+
         self.rt
             .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
 
         if self.pv_trace {
-            self.pv_trace = self.pv_length > (self.ply as usize + 1);
-            pv_move = self.pv[self.ply as usize];
+            self.pv_trace = self.pv_length > (ply + 1);
+            pv_move = self.pv[ply];
         }
 
         // Null move pruning
-        if !self.pv_trace && self.ply > 0 && depth >= 3 && !in_check && !self.is_endgame() {
+        if apply_pruning && depth_pruning && !self.is_endgame() {
             let ep_square = self.chess.make_null_move(self.tables);
 
             self.ply += 1;
@@ -318,28 +321,15 @@ impl<'a> Search<'a> {
             }
         }
 
-        // let mut move_list = [0u16; 220];
-        // let move_count = self
-        //     .chess
-        //     .gen_moves_avx512::<false>(self.tables, &mut move_list[2..]);
-        // move_list[2..move_count + 2].sort_by(|a, b| self.sort_moves(a, b, pv_move, tt_move));
-
-        // let mut move_scores = [0u16; 218];
-        // for i in 0..move_count {
-        //     let mv = move_list[i + 2];
-        //     move_scores[i] = self.score_move_asc(i as u8, mv, pv_move, tt_move);
-        // }
-        // std::hint::black_box(&move_scores);
-        // std::hint::black_box(sorting::sort_avx512(&mut move_scores[0..move_count]));
-
-        let mut move_gen_list = [0u16; 218];
         let move_count = self
             .chess
-            .gen_moves_avx512::<false>(self.tables, &mut move_gen_list);
+            .gen_moves_avx512::<false>(self.tables, &mut self.move_list);
+
+        std::hint::likely(move_count > 8 && move_count < 64);
 
         let mut move_scores = [0xFFFFu16; 256];
         for i in 0..move_count {
-            let mv = move_gen_list[i];
+            let mv = self.move_list[i];
             move_scores[i] = self.score_move_asc(i as u8, mv, pv_move, tt_move);
         }
 
@@ -348,38 +338,7 @@ impl<'a> Search<'a> {
         let mut move_list = [0u16; 220];
         for i in 0..move_count {
             let mv_index = i + 2;
-            move_list[mv_index] = move_gen_list[(move_scores[i] & 0xFF) as usize];
-        }
-
-        // VERIFY
-        if VERIFY_SORTING {
-            let mut verify = move_list.clone();
-            verify[2..move_count + 2].sort_by(|a, b| self.sort_moves(a, b, pv_move, tt_move));
-
-            for i in 2..move_count + 2 {
-                assert!(
-                    verify[i] == move_list[i]
-                        || ((self.score_move_asc(i as u8, verify[i], pv_move, tt_move) >> 8)
-                            == (move_scores[i - 2] >> 8)),
-                    "Move generation mismatch at index {}: {} != {}.\nverify={:?}\nmove_list={:?}\nscores={:?}\nFen={}\n",
-                    i,
-                    util::move_string_dbg(verify[i]),
-                    util::move_string_dbg(move_list[i]),
-                    verify
-                        .iter()
-                        .map(|m| util::move_string_dbg(*m))
-                        .collect::<Vec<_>>(),
-                    move_list
-                        .iter()
-                        .map(|m| util::move_string_dbg(*m))
-                        .collect::<Vec<_>>(),
-                    move_scores
-                        .iter()
-                        .map(|m| format!("{:#x}", m))
-                        .collect::<Vec<_>>(),
-                    self.chess.gen_fen(),
-                );
-            }
+            move_list[mv_index] = self.move_list[(move_scores[i] & 0xFF) as usize];
         }
 
         let mut best_move = 0;
@@ -417,7 +376,7 @@ impl<'a> Search<'a> {
             let is_non_capture_or_promotion = mv & (MV_FLAG_CAP | MV_FLAG_PROMOTION) == 0;
 
             let late_move_reduction =
-                moves_searched > 3 && !in_check && depth >= 3 && is_non_capture_or_promotion;
+                moves_searched > 3 && depth_pruning && is_non_capture_or_promotion;
 
             has_legal_moves = true;
 
@@ -468,16 +427,16 @@ impl<'a> Search<'a> {
             best_move = mv;
 
             // Update PV
-            let child_pv_length = self.pv_table.lengths[self.ply as usize + 1];
+            let child_pv_length = self.pv_table.lengths[ply + 1];
 
-            self.pv_table.moves[self.ply as usize][0] = mv;
-            self.pv_table.lengths[self.ply as usize] = child_pv_length + 1;
+            self.pv_table.moves[ply][0] = mv;
+            self.pv_table.lengths[ply] = child_pv_length + 1;
 
             // @perf - use disjoint unchecked
             let [root_pv_moves, child_pv_moves] = self
                 .pv_table
                 .moves
-                .get_disjoint_mut([self.ply as usize, self.ply as usize + 1])
+                .get_disjoint_mut([ply, ply + 1])
                 .unwrap();
 
             root_pv_moves[1..child_pv_length as usize + 1]
@@ -507,7 +466,7 @@ impl<'a> Search<'a> {
 
         if !has_legal_moves {
             if in_check {
-                return -SCORE_INF + self.ply as i32;
+                return -SCORE_INF + self.ply as Eval;
             }
 
             // Stalemate
@@ -525,7 +484,7 @@ impl<'a> Search<'a> {
         alpha
     }
 
-    fn quiescence(&mut self, alpha: i32, beta: i32, start_ply: u32) -> i32 {
+    fn quiescence(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {
         self.node_count += 1;
         self.quiet_nodes += 1;
         self.quiet_depth = self.quiet_depth.max(self.ply as u32 - start_ply);
@@ -552,20 +511,13 @@ impl<'a> Search<'a> {
             alpha = static_eval;
         }
 
-        // let mut move_list = [0u16; 220];
-        // let move_count = self
-        //     .chess
-        //     .gen_moves_avx512::<true>(self.tables, &mut move_list[2..]);
-        // move_list[2..move_count + 2].sort_by(|a, b| self.sort_moves_quiescence(a, b));
-
-        let mut move_gen_list = [0u16; 218];
         let move_count = self
             .chess
-            .gen_moves_avx512::<true>(self.tables, &mut move_gen_list);
+            .gen_moves_avx512::<true>(self.tables, &mut self.move_list);
 
         let mut move_scores = [0xFFFFu16; 256];
         for i in 0..move_count {
-            let mv = move_gen_list[i];
+            let mv = self.move_list[i];
             move_scores[i] = self.score_move_asc_quiescence(i as u8, mv);
         }
 
@@ -574,41 +526,10 @@ impl<'a> Search<'a> {
         let mut move_list = [0u16; 220];
         for i in 0..move_count {
             let mv_index = i + 2;
-            move_list[mv_index] = move_gen_list[(move_scores[i] & 0xFF) as usize];
+            move_list[mv_index] = self.move_list[(move_scores[i] & 0xFF) as usize];
         }
 
-        // VERIFICATION:
-        if VERIFY_SORTING {
-            let mut verify = move_list.clone();
-            verify[2..move_count + 2].sort_by(|a, b| self.sort_moves_quiescence(a, b));
-
-            for i in 2..move_count + 2 {
-                assert!(
-                    verify[i] == move_list[i]
-                        || ((self.score_move_asc_quiescence(i as u8, verify[i]) >> 8)
-                            == (move_scores[i - 2] >> 8)),
-                    "Move generation mismatch at index {}: {} != {}.\nverify={:?}\nmove_list={:?}\nscores={:?}\nFen={}\n",
-                    i,
-                    util::move_string_dbg(verify[i]),
-                    util::move_string_dbg(move_list[i]),
-                    verify
-                        .iter()
-                        .map(|m| util::move_string_dbg(*m))
-                        .collect::<Vec<_>>(),
-                    move_list
-                        .iter()
-                        .map(|m| util::move_string_dbg(*m))
-                        .collect::<Vec<_>>(),
-                    move_scores
-                        .iter()
-                        .map(|m| format!("{:#x}", m))
-                        .collect::<Vec<_>>(),
-                    self.chess.gen_fen(),
-                );
-            }
-        }
-
-        let mut best_score = static_eval;
+        let mut best_score: Eval = static_eval;
         let board_copy = self.chess.clone();
 
         let mut i = 2;
@@ -674,10 +595,10 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    pub fn evaluate(&mut self) -> i32 {
+    pub fn evaluate(&mut self) -> Eval {
         use std::arch::x86_64::*;
 
-        let mut score = 0;
+        let mut score: Eval = 0;
 
         let bitboards = self.chess.bitboards_new();
 
@@ -751,29 +672,29 @@ impl<'a> Search<'a> {
             let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
             let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
 
-            score += _mm256_reduce_add_epi16(summed_bonuses_lsb) as i32;
-            score += _mm256_reduce_add_epi16(summed_bonuses_msb) as i32;
+            score += _mm256_reduce_add_epi16(summed_bonuses_lsb) as Eval;
+            score += _mm256_reduce_add_epi16(summed_bonuses_msb) as Eval;
         }
 
         // There is always 1 king on the board, skip king weight itself which would be +-0
-        score += (bitboards[PieceIndex::WhiteQueen as usize].count_ones() as i32
-            - bitboards[PieceIndex::BlackQueen as usize].count_ones() as i32)
+        score += (bitboards[PieceIndex::WhiteQueen as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackQueen as usize].count_ones() as Eval)
             * WEIGHT_QUEEN;
 
-        score += (bitboards[PieceIndex::WhiteRook as usize].count_ones() as i32
-            - bitboards[PieceIndex::BlackRook as usize].count_ones() as i32)
+        score += (bitboards[PieceIndex::WhiteRook as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackRook as usize].count_ones() as Eval)
             * WEIGHT_ROOK;
 
-        score += (bitboards[PieceIndex::WhiteBishop as usize].count_ones() as i32
-            - bitboards[PieceIndex::BlackBishop as usize].count_ones() as i32)
+        score += (bitboards[PieceIndex::WhiteBishop as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackBishop as usize].count_ones() as Eval)
             * WEIGHT_BISHOP;
 
-        score += (bitboards[PieceIndex::WhiteKnight as usize].count_ones() as i32
-            - bitboards[PieceIndex::BlackKnight as usize].count_ones() as i32)
+        score += (bitboards[PieceIndex::WhiteKnight as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackKnight as usize].count_ones() as Eval)
             * WEIGHT_KNIGHT;
 
-        score += (bitboards[PieceIndex::WhitePawn as usize].count_ones() as i32
-            - bitboards[PieceIndex::BlackPawn as usize].count_ones() as i32)
+        score += (bitboards[PieceIndex::WhitePawn as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackPawn as usize].count_ones() as Eval)
             * WEIGHT_PAWN;
 
         let final_score = score * if self.chess.b_move() { -1 } else { 1 };
@@ -789,13 +710,13 @@ impl<'a> Search<'a> {
         final_score
     }
 
-    fn evaluate_legacy(&mut self) -> i32 {
+    fn evaluate_legacy(&mut self) -> Eval {
         let material = self.chess.material();
         let is_endgame = (((material[0] & (!1023)) | (material[1] & (!1023))) == 0) as usize;
 
         let boards = self.chess.bitboards_new();
 
-        let mut final_score = 0;
+        let mut final_score: Eval = 0;
 
         for piece_id in
             crate::util::PieceId::WhiteKing as usize..crate::util::PieceId::PieceMax as usize
@@ -822,7 +743,7 @@ impl<'a> Search<'a> {
 
                 let square_bonus =
                     tables::Tables::EVAL_TABLES_INV_I8_OLD[pst_index][piece_square as usize];
-                final_score += WEIGHT_TABLE[piece_id] + square_bonus as i32;
+                final_score += WEIGHT_TABLE[piece_id] + square_bonus as Eval;
             }
         }
 

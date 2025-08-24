@@ -9,9 +9,11 @@ pub trait SearchStrategy<'a> {
 }
 
 pub mod repetition;
+pub mod repetition_v2;
 pub mod search_params;
 pub mod sorting;
 pub mod transposition;
+pub mod transposition_v2;
 
 pub mod v10_mvcache;
 pub mod v11_opt;
@@ -47,8 +49,9 @@ mod tests {
         // let test_fen = util::FEN_STARTPOS;
 
         let bench = || {
-            let mut tt = transposition::TranspositionTable::new(4);
-            let mut rt = repetition::RepetitionTable::new();
+            let tt = std::cell::SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(4));
+
+            let mut rt = repetition_v2::RepetitionTable::new();
 
             let mut chess = chess_v2::ChessGame::new();
             assert!(
@@ -60,7 +63,8 @@ mod tests {
             let mut params = SearchParams::new();
             params.depth = Some(std::hint::black_box(10));
 
-            let mut search_engine = v11_opt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
+            let mut search_engine =
+                v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
             // Average search time over 10 iterations: 5089 Mcycles
             // Average search time over 10 iterations: 5116 Mcycles
             // Average search time over 10 iterations: 5225 Mcycles
@@ -102,6 +106,8 @@ mod tests {
                 (mv, end - start)
             };
 
+            let tt_stats = unsafe { &mut *tt.get() }.calc_stats();
+
             println!(
                 "Nodes searched: {} ({} quiescence / {:.02}%)",
                 search_engine.num_nodes_searched(),
@@ -118,6 +124,11 @@ mod tests {
             println!("α-raise count: {}", search_engine.a_raise_count());
             println!("depth: {}", search_engine.get_depth());
             println!("q-depth: {}", search_engine.get_quiet_depth());
+            println!(
+                "TT usage: {:.02}%",
+                ((tt_stats.1 + tt_stats.2 + tt_stats.3) as f64) / (tt_stats.0 as f64) * 100.0
+            );
+            println!("TT entries: {}", tt_stats.0);
             println!(
                 "PV: {:?}",
                 search_engine
