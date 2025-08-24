@@ -522,28 +522,26 @@ impl<'a> Search<'a> {
 
         sorting::sort_218x16_avx512(&mut move_scores, move_count);
 
-        let mut move_list = [0u16; 220];
+        let mut move_list = [0u16; 218];
         for i in 0..move_count {
-            let mv_index = i + 2;
-            move_list[mv_index] = self.move_list[(move_scores[i] & 0xFF) as usize];
+            move_list[i] = self.move_list[(move_scores[i] & 0xFF) as usize];
         }
 
         let mut best_score: Eval = static_eval;
         let board_copy = self.chess.clone();
 
-        let mut i = 2;
-        while i < move_count + 2 {
+        let mut i = 0;
+        while i < move_count {
             let mv = move_list[i];
             i += 1;
 
-            // @todo perf - Should quiesc search only check knight & Q promotions?
+            // Quiescence search can't encounter new captures after queen or knight promotions, so
+            // underpromotions to bishop and rook are skipped
             if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
-                i -= 3;
+                i -= 1;
 
                 let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
                 move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
-                move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
             let move_ok = unsafe { self.chess.make_move(mv, self.tables) };
