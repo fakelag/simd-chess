@@ -127,7 +127,6 @@ pub enum PieceIndex {
 }
 
 impl From<usize> for PieceIndex {
-    // @todo perf - mem transmute
     fn from(value: usize) -> Self {
         match value {
             0 => PieceIndex::WhiteNullPiece,
@@ -391,7 +390,6 @@ impl ChessGame {
                 (opponent_move_offset as u64 + b_move_rank_offset as u64) as i64;
             let pawn_push_rank_rolv_offset_x8 = _mm512_set1_epi64(pawn_push_offset_ranks); // white=8, black=56
 
-            // @todo - Try sub+and to pop ls1b instead of ms1b
             let mut one_of_each_slider_index_x8 =
                 _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
             let mut one_of_each_non_slider_index_x8 =
@@ -744,8 +742,8 @@ impl ChessGame {
             is_attacked |=
                 opponent_bitboards[PieceIndex::WhiteKnight as usize] & knight_attack_mask;
 
-            // @todo - King might not be able to attack all squares if pinned -
-            // but this does not matter for castling check
+            // King might not be able to attack all squares if pinned
+            // but it does not matter for castling check
             let king_attack_mask = *Tables::LT_KING_MOVE_MASKS.get_unchecked(sq_index as usize);
             is_attacked |= opponent_bitboards[PieceIndex::WhiteKing as usize] & king_attack_mask;
 
@@ -797,12 +795,7 @@ impl ChessGame {
 
                 // Capture can also be a promotion
                 if dst_sq / 8 == !b_move as u16 * 7 {
-                    for promotion_flag in [
-                        MV_FLAGS_PR_QUEEN,
-                        MV_FLAGS_PR_KNIGHT,
-                        MV_FLAGS_PR_ROOK,
-                        MV_FLAGS_PR_BISHOP,
-                    ] {
+                    for promotion_flag in [MV_FLAGS_PR_QUEEN] {
                         move_list[move_cursor] =
                             (dst_sq << 6) | src_sq | promotion_flag | MV_FLAG_CAP;
                         move_cursor += 1;
@@ -814,7 +807,6 @@ impl ChessGame {
             }
 
             // En passant
-            // @todo - could be branchless
             if self.en_passant != 0 {
                 if pawn_cap_mask & (1 << self.en_passant) != 0 {
                     move_list[move_cursor] =
@@ -831,12 +823,7 @@ impl ChessGame {
                 if (full_board & (1 << dst_sq)) == 0 {
                     match src_sq / 8 {
                         1 => {
-                            for promotion_flag in [
-                                MV_FLAGS_PR_QUEEN,
-                                MV_FLAGS_PR_KNIGHT,
-                                MV_FLAGS_PR_ROOK,
-                                MV_FLAGS_PR_BISHOP,
-                            ] {
+                            for promotion_flag in [MV_FLAGS_PR_QUEEN] {
                                 move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
                                 move_cursor += 1;
                             }
@@ -863,12 +850,7 @@ impl ChessGame {
                 if (full_board & (1 << dst_sq)) == 0 {
                     match src_sq / 8 {
                         6 => {
-                            for promotion_flag in [
-                                MV_FLAGS_PR_QUEEN,
-                                MV_FLAGS_PR_KNIGHT,
-                                MV_FLAGS_PR_ROOK,
-                                MV_FLAGS_PR_BISHOP,
-                            ] {
+                            for promotion_flag in [MV_FLAGS_PR_QUEEN] {
                                 move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
                                 move_cursor += 1;
                             }
@@ -1019,37 +1001,13 @@ impl ChessGame {
         0
     }
 
-    // Returns 0 if there is no piece, PieceId+1 otherwise
-    // Cost estimate: ~7 cycles
-    // #[inline(always)]
-    // fn piece_at_avx512(&mut self, sq_bit: u64) -> usize {
-    //     unsafe {
-    //         let select_vec = _mm512_set1_epi64(sq_bit as i64);
-    //         let index_vec = _mm512_set_epi32(12, 11, 10, 9, 8, 7, 6, 5, 8, 7, 6, 5, 4, 3, 2, 1);
-
-    //         let white_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr().add(1) as *const _);
-    //         let rest_vec = _mm512_loadu_si512(self.board.bitboards.as_ptr().add(5) as *const _);
-
-    //         let from_mask_white = _mm512_test_epi64_mask(white_vec, select_vec) as u16;
-    //         let from_mask_rest = _mm512_test_epi64_mask(rest_vec, select_vec) as u16;
-
-    //         let piece_vec = _mm512_mask_compress_epi32(
-    //             _mm512_setzero_si512(),
-    //             _mm512_kunpackb(from_mask_rest, from_mask_white),
-    //             index_vec,
-    //         );
-    //         let piece_idx = _mm_cvtsi128_si32(_mm512_castsi512_si128(piece_vec)) as usize;
-
-    //         piece_idx
-    //     }
-    // }
-
     /// Makes a move on the board. If it returns true, the move was made, otherwise it was not and
     /// no state was changed.
     ///
     /// Safety: the given move must always be pseudovalid, e.g a move that must be valid on the chess board, with
     /// the exception of leaving the king in check or castling without checking threats to the passed squares. In
     /// the latter case, the function returns false. The former case must be handled by the caller.
+    #[inline(always)]
     pub unsafe fn make_move(&mut self, mv: u16, tables: &Tables) -> bool {
         let zb_keys = &tables.zobrist_hash_keys;
 
@@ -1387,8 +1345,6 @@ impl ChessGame {
 
         let mut move_list = [0u16; 220];
 
-        // let move_count =
-        //     self.gen_moves_avx512::<false>(tables, &mut move_list[2..], scratch, 0, 0, 0, 0, None);
         let move_count = self.gen_moves_avx512::<false>(tables, &mut move_list[2..]);
 
         let board_copy = self.clone();
@@ -1398,7 +1354,6 @@ impl ChessGame {
             let mv = move_list[i];
             i += 1;
 
-            // @todo strength - Check queen promotion first
             if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
                 i -= 3;
 

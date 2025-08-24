@@ -56,7 +56,6 @@ pub enum PieceId {
 }
 
 impl From<usize> for PieceId {
-    // @todo perf - mem transmute
     fn from(value: usize) -> Self {
         match value {
             0 => PieceId::WhiteKing,

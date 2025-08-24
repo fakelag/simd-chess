@@ -467,7 +467,6 @@ impl<'a> Search<'a> {
             self.pv_table.moves[ply][0] = mv;
             self.pv_table.lengths[ply] = child_pv_length + 1;
 
-            // @perf - use disjoint unchecked
             let [root_pv_moves, child_pv_moves] = self
                 .pv_table
                 .moves
