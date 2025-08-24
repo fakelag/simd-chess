@@ -353,14 +353,13 @@ impl<'a> Search<'a> {
             let mv = move_list[i];
             i += 1;
 
-            // @todo strength - Check queen promotion first
-            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_KNIGHT {
+            if (mv & MV_FLAGS_PR_MASK) == MV_FLAGS_PR_QUEEN {
                 i -= 3;
 
                 let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Second promotion to check
+                move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
                 move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_QUEEN; // Fourth promotion to check
+                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
             let move_ok = unsafe { self.chess.make_move(mv, self.tables) };
@@ -537,15 +536,14 @@ impl<'a> Search<'a> {
             let mv = move_list[i];
             i += 1;
 
-            // @todo strength - Check queen promotion first
             // @todo perf - Should quiesc search only check knight & Q promotions?
-            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_KNIGHT {
+            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
                 i -= 3;
 
                 let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Second promotion to check
+                move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
                 move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_QUEEN; // Fourth promotion to check
+                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
             let move_ok = unsafe { self.chess.make_move(mv, self.tables) };

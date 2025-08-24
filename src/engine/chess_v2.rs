@@ -370,7 +370,7 @@ impl ChessGame {
             let const_zero_x8 = _mm512_setzero_si512();
 
             // Flags
-            let const_promotion_flag_x8 = _mm512_set1_epi64(MV_FLAGS_PR_KNIGHT as u64 as i64);
+            let const_promotion_flag_x8 = _mm512_set1_epi64(MV_FLAGS_PR_QUEEN as u64 as i64);
             let const_epcap_flag_x8 = _mm512_set1_epi64(MV_FLAG_EPCAP as u64 as i64);
             let const_cap_flag_x8 = _mm512_set1_epi64(MV_FLAG_CAP as u64 as i64);
             let const_dpp_flag_x8 = _mm512_set1_epi64(MV_FLAG_DPP as u64 as i64);
@@ -798,10 +798,10 @@ impl ChessGame {
                 // Capture can also be a promotion
                 if dst_sq / 8 == !b_move as u16 * 7 {
                     for promotion_flag in [
-                        MV_FLAGS_PR_KNIGHT,
-                        MV_FLAGS_PR_BISHOP,
-                        MV_FLAGS_PR_ROOK,
                         MV_FLAGS_PR_QUEEN,
+                        MV_FLAGS_PR_KNIGHT,
+                        MV_FLAGS_PR_ROOK,
+                        MV_FLAGS_PR_BISHOP,
                     ] {
                         move_list[move_cursor] =
                             (dst_sq << 6) | src_sq | promotion_flag | MV_FLAG_CAP;
@@ -832,10 +832,10 @@ impl ChessGame {
                     match src_sq / 8 {
                         1 => {
                             for promotion_flag in [
-                                MV_FLAGS_PR_KNIGHT,
-                                MV_FLAGS_PR_BISHOP,
-                                MV_FLAGS_PR_ROOK,
                                 MV_FLAGS_PR_QUEEN,
+                                MV_FLAGS_PR_KNIGHT,
+                                MV_FLAGS_PR_ROOK,
+                                MV_FLAGS_PR_BISHOP,
                             ] {
                                 move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
                                 move_cursor += 1;
@@ -864,10 +864,10 @@ impl ChessGame {
                     match src_sq / 8 {
                         6 => {
                             for promotion_flag in [
-                                MV_FLAGS_PR_KNIGHT,
-                                MV_FLAGS_PR_BISHOP,
-                                MV_FLAGS_PR_ROOK,
                                 MV_FLAGS_PR_QUEEN,
+                                MV_FLAGS_PR_KNIGHT,
+                                MV_FLAGS_PR_ROOK,
+                                MV_FLAGS_PR_BISHOP,
                             ] {
                                 move_list[move_cursor] = (dst_sq << 6) | src_sq | promotion_flag;
                                 move_cursor += 1;
@@ -1204,10 +1204,10 @@ impl ChessGame {
 
         if move_flags & MV_FLAG_PROMOTION != 0 {
             let promotion_piece = match move_flags & MV_FLAGS_PR_MASK {
-                MV_FLAGS_PR_KNIGHT => PieceIndex::WhiteKnight as usize + friendly_offset,
-                MV_FLAGS_PR_BISHOP => PieceIndex::WhiteBishop as usize + friendly_offset,
-                MV_FLAGS_PR_ROOK => PieceIndex::WhiteRook as usize + friendly_offset,
                 MV_FLAGS_PR_QUEEN => PieceIndex::WhiteQueen as usize + friendly_offset,
+                MV_FLAGS_PR_KNIGHT => PieceIndex::WhiteKnight as usize + friendly_offset,
+                MV_FLAGS_PR_ROOK => PieceIndex::WhiteRook as usize + friendly_offset,
+                MV_FLAGS_PR_BISHOP => PieceIndex::WhiteBishop as usize + friendly_offset,
                 _ => unreachable!(),
             };
 
@@ -1399,13 +1399,13 @@ impl ChessGame {
             i += 1;
 
             // @todo strength - Check queen promotion first
-            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_KNIGHT {
+            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
                 i -= 3;
 
                 let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Second promotion to check
+                move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
                 move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_QUEEN; // Second promotion to check
+                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
             if unsafe { self.make_move(mv, tables) } && !self.in_check_slow(tables, !self.b_move) {
