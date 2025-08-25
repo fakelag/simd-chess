@@ -35,7 +35,7 @@ struct GoCommand {
     params: search_params::SearchParams,
     chess: chess::ChessGame,
     sig: AbortSignal,
-    repetition_table: search::repetition::RepetitionTable,
+    repetition_table: search::repetition_v2::RepetitionTable,
 }
 
 fn chess_ui() -> anyhow::Result<()> {
@@ -54,21 +54,26 @@ fn chess_ui() -> anyhow::Result<()> {
 fn search_thread(
     rx_search: channel::Receiver<GoCommand>,
     tables: &tables::Tables,
-    tt: &SyncUnsafeCell<transposition::TranspositionTable>,
+    tt: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) {
     let tt = unsafe { &mut *tt.get() };
     loop {
         match rx_search.recv() {
             Ok(go) => {
                 let debug = go.params.debug;
-                // let mut search_engine = search::v11_opt::Search::new(
-                //     go.params,
-                //     go.chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
+
+                let chess = chess_v2::ChessGame::from(go.chess);
+
+                assert!(chess.zobrist_key() == chess.calc_initial_zobrist_key(tables));
+
+                let mut search_engine = search::v11_opt::Search::new(
+                    go.params,
+                    chess,
+                    tables,
+                    tt,
+                    go.repetition_table,
+                    &go.sig,
+                );
                 // let mut search_engine = search::v10_mvcache::Search::new(
                 //     go.params,
                 //     go.chess,
@@ -129,36 +134,36 @@ fn search_thread(
                 // let mut search_engine =
                 //     search::v2_alphabeta::Alphabeta::new(go.params, go.chess, tables, &go.sig);
 
-                // let best_move = search_engine.search();
+                let best_move = search_engine.search();
 
-                // if debug {
-                //     let elapsed = go.start_time.elapsed();
-                //     let search_nodes = search_engine.num_nodes_searched();
-                //     let search_depth = search_engine.get_depth();
-                //     let search_score = search_engine.search_score();
+                if debug {
+                    let elapsed = go.start_time.elapsed();
+                    let search_nodes = search_engine.num_nodes_searched();
+                    let search_depth = search_engine.get_depth();
+                    let search_score = search_engine.search_score();
 
-                //     let tt_stats = tt.calc_stats();
+                    let tt_stats = tt.calc_stats();
 
-                //     println!(
-                //         "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy)",
-                //         search_nodes,
-                //         util::time_format(elapsed.as_millis() as u64),
-                //         search_depth,
-                //         util::move_string(best_move),
-                //         best_move,
-                //         search_score,
-                //         (tt_stats.1 + tt_stats.2 + tt_stats.3) as f64 / (tt_stats.0 as f64) * 100.0
-                //     );
-                // }
+                    println!(
+                        "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy)",
+                        search_nodes,
+                        util::time_format(elapsed.as_millis() as u64),
+                        search_depth,
+                        util::move_string(best_move),
+                        best_move,
+                        search_score,
+                        (tt_stats.1 + tt_stats.2 + tt_stats.3) as f64 / (tt_stats.0 as f64) * 100.0
+                    );
+                }
 
-                // println!(
-                //     "bestmove {}",
-                //     if best_move != 0 {
-                //         util::move_string(best_move)
-                //     } else {
-                //         "0000".to_string()
-                //     }
-                // );
+                println!(
+                    "bestmove {}",
+                    if best_move != 0 {
+                        util::move_string(best_move)
+                    } else {
+                        "0000".to_string()
+                    }
+                );
             }
             Err(_) => {
                 println!("info search thread terminated");
@@ -171,11 +176,11 @@ fn search_thread(
 fn chess_uci(
     tx_search: channel::Sender<GoCommand>,
     tables: &tables::Tables,
-    tt: &SyncUnsafeCell<transposition::TranspositionTable>,
+    tt: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) -> anyhow::Result<()> {
     let mut debug = false;
     let mut game_board: Option<chess::ChessGame> = None;
-    let mut repetition_table: Option<search::repetition::RepetitionTable> = None;
+    let mut repetition_table: Option<search::repetition_v2::RepetitionTable> = None;
 
     struct GoContext {
         tx_abort: channel::Sender<SigAbort>,
@@ -218,7 +223,7 @@ fn chess_uci(
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let mut board = chess::ChessGame::new();
-                let mut rep_table = search::repetition::RepetitionTable::new();
+                let mut rep_table = search::repetition_v2::RepetitionTable::new();
 
                 // Safety: Engine should not be calculating when receiving a position command
                 let tt = unsafe { &mut *tt.get() };
@@ -320,7 +325,7 @@ fn main() {
             // implement thread safety correctly. This has a few benefits:
             // 1. TranspositionTable can be accessed without runtime costs such as locks or refcounters
             // 2. The table can potentially be shared between threads efficiently, even unsoundly if races are deemed to be acceptable
-            let tt = SyncUnsafeCell::new(transposition::TranspositionTable::new(4));
+            let tt = SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(2));
 
             let result = std::thread::scope(|s| {
                 let st = s.spawn(|| {

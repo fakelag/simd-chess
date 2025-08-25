@@ -266,7 +266,7 @@ impl ChessUi {
                             .build(|| {
                                 square_wh = SquareUi::calc_square_wh(ui);
 
-                                hovering_sq_index = (0..64).find_map(|square_index| {
+                                hovering_sq_index = (0u8..64).find_map(|square_index| {
                                     let [wnd_x, wnd_y] = ui.window_pos();
                                     let rank = square_index / 8;
                                     let file = square_index % 8;

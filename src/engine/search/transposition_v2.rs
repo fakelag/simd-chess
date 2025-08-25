@@ -18,7 +18,7 @@ type TtEval = i16;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TranspositionEntry {
-    hash_high32: u32,
+    hash: u64,
     score: i16,
     depth: u8,
     mv: u16,
@@ -28,7 +28,7 @@ pub struct TranspositionEntry {
 impl TranspositionEntry {
     pub fn new() -> Self {
         TranspositionEntry {
-            hash_high32: 0,
+            hash: 0,
             score: 0,
             depth: 0,
             mv: 0,
@@ -76,7 +76,7 @@ impl TranspositionTable {
 
         let mut can_use_entry = 1u8;
 
-        can_use_entry &= (entry.hash_high32 == ((hash >> 32) as u32)) as u8;
+        can_use_entry &= (entry.hash == hash) as u8;
         can_use_entry &= (entry.depth >= depth) as u8;
 
         let condition = [
@@ -105,7 +105,7 @@ impl TranspositionTable {
 
         // Replace if the new entry is from a deeper search
         if entry.depth <= depth {
-            entry.hash_high32 = (hash >> 32) as u32;
+            entry.hash = hash;
             entry.score = score;
             entry.depth = depth;
             entry.flags = flags;
@@ -125,7 +125,7 @@ impl TranspositionTable {
         let mut upper_bound = 0;
 
         for entry in &self.entries {
-            if entry.hash_high32 != 0 {
+            if entry.hash != 0 {
                 match entry.flags {
                     BoundType::Exact => exact += 1,
                     BoundType::LowerBound => lower_bound += 1,

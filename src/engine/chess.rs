@@ -60,15 +60,15 @@ pub struct Bitboards {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChessGame {
-    board: Bitboards,
-    b_move: bool,
-    castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
-    en_passant: Option<u8>, // @perf - Encode as 64u8
-    half_moves: u32,
-    full_moves: u32,
-    zobrist_key: u64,
-    material: [u16; 2],
-    spt: [u8; 64],
+    pub board: Bitboards,
+    pub b_move: bool,
+    pub castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
+    pub en_passant: Option<u8>, // @perf - Encode as 64u8
+    pub half_moves: u32,
+    pub full_moves: u32,
+    pub zobrist_key: u64,
+    pub material: [u16; 2],
+    pub spt: [u8; 64],
 }
 const CHESS_GAME_SIZE_ASSERT: [u8; 256] = [0; std::mem::size_of::<ChessGame>()];
 

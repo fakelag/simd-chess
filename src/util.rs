@@ -293,7 +293,7 @@ pub fn parse_position<'a>(
     position_buf: &'a str,
     board: &mut chess::ChessGame,
     tables: &tables::Tables,
-    mut repetition_table: Option<&mut search::repetition::RepetitionTable>,
+    mut repetition_table: Option<&mut search::repetition_v2::RepetitionTable>,
     mut out_moves: Option<&mut Vec<u16>>,
     out_fen: Option<&mut String>,
 ) -> anyhow::Result<()> {
