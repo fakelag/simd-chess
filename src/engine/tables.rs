@@ -322,34 +322,6 @@ impl Tables {
         shifts
     };
 
-    // pub const LT_CAPTURE_OCCUPANCY_MASKS_AGGREGATE: Align64<[[u64; 16]; 64]> = const {
-    //     let mut masks = [[0u64; 16]; 64];
-
-    //     let mut square = 0;
-
-    //     loop {
-    //         if square == 64 {
-    //             break;
-    //         }
-
-    //         masks[square][1] = Self::LT_KING_MOVE_MASKS[square];
-    //         masks[square][3] = Self::LT_ROOK_OCCUPANCY_MASKS[square];
-    //         masks[square][4] = Self::LT_BISHOP_OCCUPANCY_MASKS[square];
-    //         masks[square][5] = Self::LT_KNIGHT_MOVE_MASKS[square];
-    //         masks[square][6] = Self::LT_PAWN_CAPTURE_MASKS[Side::White as usize][square];
-
-    //         masks[square][9] = Self::LT_KING_MOVE_MASKS[square];
-    //         masks[square][11] = Self::LT_ROOK_OCCUPANCY_MASKS[square];
-    //         masks[square][12] = Self::LT_BISHOP_OCCUPANCY_MASKS[square];
-    //         masks[square][13] = Self::LT_KNIGHT_MOVE_MASKS[square];
-    //         masks[square][14] = Self::LT_PAWN_CAPTURE_MASKS[Side::Black as usize][square];
-
-    //         square += 1;
-    //     }
-
-    //     Align64(masks)
-    // };
-
     #[cfg_attr(any(), rustfmt::skip)]
     pub const EVAL_TABLES_INV_I8_OLD: [[i8; 64]; util::PieceId::PieceMax as usize + 2] = const {
         /*

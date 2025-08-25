@@ -65,32 +65,12 @@ mod tests {
 
             let mut search_engine =
                 v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
-            // Average search time over 10 iterations: 5089 Mcycles
-            // Average search time over 10 iterations: 5116 Mcycles
-            // Average search time over 10 iterations: 5225 Mcycles
-            // Average search time over 10 iterations: 5213 Mcycles
-
-            // Average search time over 10 iterations: 5055 Mcycles
-            // Average search time over 10 iterations: 5043 Mcycles
-            // Average search time over 10 iterations: 5050 Mcycles
-
-            // v10_mvcache
-            // Average search time over 10 iterations: 4998 Mcycles
-            // Average search time over 10 iterations: 5050 Mcycles
-
-            // v11_opt
-            // Average search time over 10 iterations: 4900 Mcycles
-            // Average search time over 10 iterations: 4822 Mcycles
 
             // let tx = tx.clone();
             // std::thread::spawn(move || {
             //     std::thread::sleep(std::time::Duration::from_millis(100));
             //     tx.send(SigAbort {}).unwrap();
             // });
-
-            // let mut search_engine = v5_tt::Search::new(params, chess, &tables, &mut tt, rt, &rx);
-            // let mut search_engine = v4_pv::Search::new(params, chess, &tables, &rx);
-            // let mut search_engine = v3_itdep::IterativeDeepening::new(params, chess, &tables, &rx);
 
             let (bestmove, delta) = {
                 let start = rdtsc();
@@ -117,10 +97,6 @@ mod tests {
                     * 100.0
             );
             println!("β-cutoff count: {}", search_engine.b_cut_count());
-            // println!(
-            //     "β-cutoff null move count: {}",
-            //     search_engine.b_cut_null_count()
-            // );
             println!("α-raise count: {}", search_engine.a_raise_count());
             println!("depth: {}", search_engine.get_depth());
             println!("q-depth: {}", search_engine.get_quiet_depth());

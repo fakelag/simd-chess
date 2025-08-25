@@ -343,7 +343,7 @@ impl<'a> Search<'a> {
             move_scores[i] = self.score_move_asc(i as u8, mv, pv_move, tt_move);
         }
 
-        sorting::sort_218x16_avx512(&mut move_scores, move_count);
+        sorting::sort_256x16_avx512(&mut move_scores, move_count);
 
         let mut move_list = [0u16; 256];
         for i in 0..move_count {
@@ -568,7 +568,7 @@ impl<'a> Search<'a> {
             move_scores[i] = self.score_move_asc_quiescence(i as u8, mv);
         }
 
-        sorting::sort_218x16_avx512(&mut move_scores, move_count);
+        sorting::sort_256x16_avx512(&mut move_scores, move_count);
 
         let mut move_list = [0u16; 256];
         for i in 0..move_count {

@@ -526,10 +526,14 @@ fn sort256(
     }
 }
 
+/// Sorts a fixed-allocation array of n elements (up to 256) in const time
+/// using avx512 accelerated bitonic sorting networks. Sorting is applied
+/// in ascending order. The array is sorted in-place, padding the array with 0xFFFF
+/// or another sentinel value should be done by the caller.
 #[inline(always)]
-pub fn sort_218x16_avx512(buf_218: &mut [u16; 256], n: usize) {
+pub fn sort_256x16_avx512(buf: &mut [u16; 256], n: usize) {
     if n <= 8 {
-        sort8(&mut buf_218[0..8]);
+        sort8(&mut buf[0..8]);
         return;
     }
 
@@ -538,30 +542,30 @@ pub fn sort_218x16_avx512(buf_218: &mut [u16; 256], n: usize) {
     unsafe {
         match seg_size {
             16 => {
-                let mut input_x16 = _mm256_loadu_si256(buf_218.as_ptr() as *const __m256i);
+                let mut input_x16 = _mm256_loadu_si256(buf.as_ptr() as *const __m256i);
                 sort16(&mut input_x16);
-                _mm256_storeu_si256(buf_218.as_mut_ptr() as *mut __m256i, input_x16);
+                _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, input_x16);
             }
             32 => {
-                let mut input_x32 = _mm512_loadu_si512(buf_218.as_ptr() as *const __m512i);
+                let mut input_x32 = _mm512_loadu_si512(buf.as_ptr() as *const __m512i);
                 sort32(&mut input_x32);
-                _mm512_storeu_si512(buf_218.as_mut_ptr() as *mut __m512i, input_x32);
+                _mm512_storeu_si512(buf.as_mut_ptr() as *mut __m512i, input_x32);
             }
             64 => {
-                let ptr = buf_218.as_ptr() as *const __m512i;
+                let ptr = buf.as_ptr() as *const __m512i;
 
                 let mut input_x32_0 = _mm512_loadu_si512(ptr);
                 let mut input_x32_1 = _mm512_loadu_si512(ptr.add(1));
 
                 sort64(&mut input_x32_0, &mut input_x32_1);
 
-                _mm512_storeu_si512(buf_218.as_mut_ptr() as *mut __m512i, input_x32_0);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(32) as *mut __m512i, input_x32_1);
+                _mm512_storeu_si512(buf.as_mut_ptr() as *mut __m512i, input_x32_0);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(32) as *mut __m512i, input_x32_1);
             }
             128 => {
                 std::hint::cold_path();
 
-                let ptr = buf_218.as_ptr() as *const __m512i;
+                let ptr = buf.as_ptr() as *const __m512i;
 
                 let mut input_x32_0 = _mm512_loadu_si512(ptr);
                 let mut input_x32_1 = _mm512_loadu_si512(ptr.add(1));
@@ -575,15 +579,15 @@ pub fn sort_218x16_avx512(buf_218: &mut [u16; 256], n: usize) {
                     &mut input_x32_3,
                 );
 
-                _mm512_storeu_si512(buf_218.as_mut_ptr() as *mut __m512i, input_x32_0);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(32) as *mut __m512i, input_x32_1);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(64) as *mut __m512i, input_x32_2);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(96) as *mut __m512i, input_x32_3);
+                _mm512_storeu_si512(buf.as_mut_ptr() as *mut __m512i, input_x32_0);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(32) as *mut __m512i, input_x32_1);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(64) as *mut __m512i, input_x32_2);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(96) as *mut __m512i, input_x32_3);
             }
             _ => {
                 std::hint::cold_path();
 
-                let ptr = buf_218.as_ptr() as *const __m512i;
+                let ptr = buf.as_ptr() as *const __m512i;
 
                 let mut input_x32_0 = _mm512_loadu_si512(ptr);
                 let mut input_x32_1 = _mm512_loadu_si512(ptr.add(1));
@@ -592,7 +596,7 @@ pub fn sort_218x16_avx512(buf_218: &mut [u16; 256], n: usize) {
                 let mut input_x32_4 = _mm512_loadu_si512(ptr.add(4));
                 let mut input_x32_5 = _mm512_loadu_si512(ptr.add(5));
                 let mut input_x32_6 = _mm512_loadu_si512(ptr.add(6));
-                // let mut input_x32_7 = _mm512_loadu_si512(ptr.add(7));
+                let mut input_x32_7 = _mm512_loadu_si512(ptr.add(7));
 
                 sort256(
                     &mut input_x32_0,
@@ -602,17 +606,17 @@ pub fn sort_218x16_avx512(buf_218: &mut [u16; 256], n: usize) {
                     &mut input_x32_4,
                     &mut input_x32_5,
                     &mut input_x32_6,
-                    &mut _mm512_set1_epi16(0xFFFFu16 as i16),
+                    &mut input_x32_7,
                 );
 
-                _mm512_storeu_si512(buf_218.as_mut_ptr() as *mut __m512i, input_x32_0);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(32) as *mut __m512i, input_x32_1);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(64) as *mut __m512i, input_x32_2);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(96) as *mut __m512i, input_x32_3);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(128) as *mut __m512i, input_x32_4);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(160) as *mut __m512i, input_x32_5);
-                _mm512_storeu_si512(buf_218.as_mut_ptr().add(192) as *mut __m512i, input_x32_6);
-                // _mm512_storeu_si512(buf_218.as_mut_ptr().add(224) as *mut __m512i, input_x32_7);
+                _mm512_storeu_si512(buf.as_mut_ptr() as *mut __m512i, input_x32_0);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(32) as *mut __m512i, input_x32_1);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(64) as *mut __m512i, input_x32_2);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(96) as *mut __m512i, input_x32_3);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(128) as *mut __m512i, input_x32_4);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(160) as *mut __m512i, input_x32_5);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(192) as *mut __m512i, input_x32_6);
+                _mm512_storeu_si512(buf.as_mut_ptr().add(224) as *mut __m512i, input_x32_7);
             }
         }
     }
@@ -627,8 +631,8 @@ mod tests {
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-        for _ in 0..64 {
-            for arr_size in 0..218 {
+        for _ in 0..128 {
+            for arr_size in 0..256 {
                 let mut random_arr = [0xFFFFu16; 256];
 
                 for i in 0..arr_size {
@@ -636,7 +640,7 @@ mod tests {
                 }
 
                 let mut arr_copy = random_arr;
-                sort_218x16_avx512(&mut arr_copy, arr_size);
+                sort_256x16_avx512(&mut arr_copy, arr_size);
 
                 assert!(
                     arr_copy[0..arr_size].is_sorted(),
@@ -651,12 +655,16 @@ mod tests {
                     &arr_copy[0..arr_size]
                 );
 
+                let mut array_vec = arr_copy.to_vec();
                 for i in 0..arr_size {
+                    let index = array_vec.iter().position(|&value| value == random_arr[i]);
                     assert!(
-                        arr_copy.contains(&random_arr[i]),
+                        index.is_some(),
                         "Element {} not found in sorted array",
                         random_arr[i]
                     );
+
+                    array_vec.remove(index.unwrap());
                 }
             }
         }
