@@ -1,7 +1,7 @@
 use crate::{
-    engine::tables::Tables,
+    engine::{chess, tables::Tables},
     pop_ls1b,
-    util::{self, Align64},
+    util::{self},
 };
 use std::arch::x86_64::*;
 
@@ -238,6 +238,38 @@ pub struct ChessGame {
     spt: [u8; 64],
 }
 const CHESS_GAME_SIZE_ASSERT: [u8; 256] = [0; std::mem::size_of::<ChessGame>()];
+
+impl From<chess::ChessGame> for ChessGame {
+    fn from(value: chess::ChessGame) -> Self {
+        let mut v2 = ChessGame::new();
+
+        for piece_id in util::PieceId::WhiteKing as usize..=util::PieceId::BlackPawn as usize {
+            let piece_id = util::PieceId::from(piece_id);
+            let piece_index: PieceIndex = piece_id.into();
+
+            v2.board.bitboards[piece_index as usize] = value.board.bitboards[piece_id as usize];
+        }
+
+        v2.b_move = value.b_move;
+        v2.castles = value.castles;
+        v2.en_passant = value.en_passant.unwrap_or(0);
+        v2.half_moves = value.half_moves;
+        v2.full_moves = value.full_moves;
+        v2.zobrist_key = value.zobrist_key;
+        v2.material[0] = value.material[0];
+        v2.material[1] = value.material[1];
+
+        for sq in 0..64 {
+            if value.spt[sq] == 0 {
+                continue;
+            }
+            let piece_index = PieceIndex::from(util::PieceId::from(value.spt[sq] as usize - 1));
+            v2.spt[sq] = piece_index as u8;
+        }
+
+        v2
+    }
+}
 
 impl ChessGame {
     pub fn new() -> Self {
@@ -719,7 +751,7 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn in_check_slow(&self, tables: &Tables, b_move: bool) -> bool {
+    pub fn in_check(&self, tables: &Tables, b_move: bool) -> bool {
         let king_sq = self.board.bitboards
             [PieceIndex::WhiteKing as usize + ((b_move as usize) << 3)]
             .trailing_zeros() as u8;
@@ -1302,7 +1334,7 @@ impl ChessGame {
         for mv_index in 0..move_count {
             let mv = move_list[mv_index];
 
-            if unsafe { self.make_move(mv, tables) } && !self.in_check_slow(tables, !self.b_move) {
+            if unsafe { self.make_move(mv, tables) } && !self.in_check(tables, !self.b_move) {
                 if INTEGRITY_CHECK {
                     assert!(
                         self.zobrist_key == self.calc_initial_zobrist_key(tables),
@@ -1363,7 +1395,7 @@ impl ChessGame {
                 move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
-            if unsafe { self.make_move(mv, tables) } && !self.in_check_slow(tables, !self.b_move) {
+            if unsafe { self.make_move(mv, tables) } && !self.in_check(tables, !self.b_move) {
                 if INTEGRITY_CHECK {
                     assert!(
                         self.zobrist_key == self.calc_initial_zobrist_key(tables),
@@ -1696,7 +1728,7 @@ impl ChessGame {
         b_move: bool,
     ) -> GameState {
         if side_to_move_no_legal_moves {
-            if self.in_check_slow(tables, b_move) {
+            if self.in_check(tables, b_move) {
                 GameState::Checkmate(util::Side::from(!b_move))
             } else {
                 GameState::Stalemate
@@ -2166,7 +2198,7 @@ mod tests {
                 let mut board_copy = board.clone();
 
                 let is_legal_move = unsafe { board_copy.make_move(mv, &tables) }
-                    && !board_copy.in_check_slow(&tables, !board_copy.b_move());
+                    && !board_copy.in_check(&tables, !board_copy.b_move());
 
                 if !is_legal_move {
                     continue;
@@ -2229,7 +2261,7 @@ mod tests {
                     let board_copy = board.clone();
 
                     let is_legal_move = unsafe { board.make_move(mv, &tables) }
-                        && !board.in_check_slow(&tables, !board.b_move());
+                        && !board.in_check(&tables, !board.b_move());
 
                     if !is_legal_move {
                         *board = board_copy;
@@ -2442,7 +2474,7 @@ mod tests {
             let start = rdtscp();
 
             std::hint::black_box(unsafe { board.make_move(mv, &tables) });
-            std::hint::black_box(board.in_check_slow(&tables, b));
+            std::hint::black_box(board.in_check(&tables, b));
             // std::hint::black_box(board.gen_moves_slow(&tables, &mut move_list));
 
             let end = rdtscp();

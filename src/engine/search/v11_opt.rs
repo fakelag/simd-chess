@@ -289,7 +289,7 @@ impl<'a> Search<'a> {
             return self.quiescence(alpha, beta, ply as u32);
         }
 
-        let in_check = self.chess.in_check_slow(self.tables, self.chess.b_move());
+        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
         depth += in_check as u8;
 
         let depth_pruning = depth >= 3 && !in_check;
@@ -384,8 +384,7 @@ impl<'a> Search<'a> {
                 self.chess.make_move(mv, self.tables)
             };
 
-            let is_valid_move =
-                move_ok && !self.chess.in_check_slow(self.tables, !self.chess.b_move());
+            let is_valid_move = move_ok && !self.chess.in_check(self.tables, !self.chess.b_move());
 
             if !is_valid_move {
                 self.chess = board_copy;
@@ -598,8 +597,7 @@ impl<'a> Search<'a> {
                 self.chess.make_move(mv, self.tables)
             };
 
-            let is_valid_move =
-                move_ok && !self.chess.in_check_slow(self.tables, !self.chess.b_move());
+            let is_valid_move = move_ok && !self.chess.in_check(self.tables, !self.chess.b_move());
 
             if !is_valid_move {
                 self.chess = board_copy;
