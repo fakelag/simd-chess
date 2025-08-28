@@ -601,7 +601,7 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str(
             format!(
-                "go wtime {} btime {}\n",
+                "go wtime {} btime {} movetime 100\n",
                 self.versus_wtime_ms, self.versus_btime_ms
             )
             .as_str(),
