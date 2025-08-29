@@ -13,19 +13,58 @@ use crate::{
         },
         tables::{self},
     },
-    util::{self, Align64},
+    util::{self, Align64, table_mirror, table_negate_i8},
 };
 
 type Eval = i16;
 
 const SCORE_INF: Eval = i16::MAX - 1;
-const WEIGHT_KING: Eval = 10000;
+const WEIGHT_KING: Eval = 0;
 const WEIGHT_QUEEN: Eval = 1000;
 const WEIGHT_ROOK: Eval = 525;
 const WEIGHT_BISHOP: Eval = 350;
 const WEIGHT_KNIGHT: Eval = 350;
 const WEIGHT_PAWN: Eval = 100;
 const PV_DEPTH: usize = 64;
+
+const WEIGHT_TABLE_MGEG: [[Eval; PieceIndex::PieceIndexMax as usize]; 2] = [
+    [
+        0,
+        WEIGHT_KING,
+        WEIGHT_QUEEN,
+        WEIGHT_ROOK,
+        WEIGHT_BISHOP,
+        WEIGHT_KNIGHT,
+        WEIGHT_PAWN,
+        0,
+        0,
+        -WEIGHT_KING,
+        -WEIGHT_QUEEN,
+        -WEIGHT_ROOK,
+        -WEIGHT_BISHOP,
+        -WEIGHT_KNIGHT,
+        -WEIGHT_PAWN,
+        0,
+    ],
+    [
+        0,
+        WEIGHT_KING,
+        WEIGHT_QUEEN + 50,
+        WEIGHT_ROOK + 30,
+        WEIGHT_BISHOP - 30,
+        WEIGHT_KNIGHT - 30,
+        WEIGHT_PAWN + 20,
+        0,
+        0,
+        -WEIGHT_KING,
+        -(WEIGHT_QUEEN + 50),
+        -(WEIGHT_ROOK + 30),
+        -(WEIGHT_BISHOP - 30),
+        -(WEIGHT_KNIGHT - 30),
+        -(WEIGHT_PAWN + 20),
+        0,
+    ],
+];
 
 const WEIGHT_TABLE: [Eval; 12] = [
     WEIGHT_KING,
@@ -41,6 +80,163 @@ const WEIGHT_TABLE: [Eval; 12] = [
     -WEIGHT_KNIGHT,
     -WEIGHT_PAWN,
 ];
+
+/*
+    Evals for white pieces in square format. Black pieces are mirrored
+    and inverted for quick negative scoring. MG = midgame, EG = endgame.
+    [a8, b8, c8, d8, e8, f8, g8, h8,
+    a7, b7, c7, d7, e7, f7, g7, h7,
+    a6, b6, c6, d6, e6, f6, g6, h6,
+    a5, b5, c5, d5, e5, f5, g5, h5,
+    a4, b4, c4, d4, e4, f4, g4, h4,
+    a3, b3, c3, d3, e3, f3, g3, h3,
+    a2, b2, c2, d2, e2, f2, g2, h2,
+    a1, b1, c1, d1, e1, f1, g1, h1]
+*/
+#[cfg_attr(any(), rustfmt::skip)]
+pub const EVAL_TABLES_INV_MGEG: Align64<[[[i8; 64]; 16]; 2]> = const {
+    let eval_white_king_mg = [
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -30,-40,-40,-50,-50,-40,-40,-30,
+        -20,-30,-30,-40,-40,-30,-30,-20,
+        -10,-20,-20,-20,-20,-20,-20,-10,
+        20, 20,  0,  0,  0,  0, 20, 20,
+        20, 30, 10,  0,  0, 10, 30, 20
+    ];
+    let eval_white_king_eg = [
+        -50,-40,-30,-20,-20,-30,-40,-50,
+        -30,-20,-10,  0,  0,-10,-20,-30,
+        -30,-10, 20, 30, 30, 20,-10,-30,
+        -30,-10, 30, 40, 40, 30,-10,-30,
+        -30,-10, 30, 40, 40, 30,-10,-30,
+        -30,-10, 20, 30, 30, 20,-10,-30,
+        -30,-30,  0,  0,  0,  0,-30,-30,
+        -50,-30,-30,-30,-30,-30,-30,-50
+    ];
+
+    let eval_white_queen_mg = [
+        -20,-10,-10, -5, -5,-10,-10,-20,
+        -10,  0,  0,  0,  0,  0,  0,-10,
+        -10,  0,  5,  5,  5,  5,  0,-10,
+        -5,   0,  5,  5,  5,  5,  0, -5,
+         0,   0,  5,  5,  5,  5,  0, -5,
+        -10,  5,  5,  5,  5,  5,  0,-10,
+        -10,  0,  5,  0,  0,  0,  0,-10,
+        -20,-10,-10, 0, 0,-10,-10,-20
+    ];
+    let eval_white_queen_eg = [
+        -20,-10,-10, -5, -5,-10,-10,-20,
+        -10,  0,  0,  0,  0,  0,  0,-10,
+        -10,  0,  5,  5,  5,  5,  0,-10,
+        -5,   0,  5,  5,  5,  5,  0, -5,
+         0,   0,  5,  5,  5,  5,  0, -5,
+        -10,  5,  5,  5,  5,  5,  0,-10,
+        -10,  0,  5,  0,  0,  0,  0,-10,
+        -20,-10,-10, -10, -10,-10,-10,-20
+    ];
+
+    let eval_white_rook = [
+        0,  0,  0,  0,  0,  0,  0,  0,
+        5, 10, 10, 10, 10, 10, 10,  5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        0,  0,  0,  5,  5,  0,  0,  0
+    ];
+    let eval_white_bishop = [
+        -20,-10,-10,-10,-10,-10,-10,-20,
+        -10,  0,  0,  0,  0,  0,  0,-10,
+        -10,  0,  5, 10, 10,  5,  0,-10,
+        -10,  5,  5, 10, 10,  5,  5,-10,
+        -10,  0, 10, 10, 10, 10,  0,-10,
+        -10, 10, 10, 10, 10, 10, 10,-10,
+        -10,  5,  0,  0,  0,  0,  5,-10,
+        -20,-10,-10,-10,-10,-10,-10,-20,
+    ];
+    let eval_white_knight = [
+        -50,-40,-30,-30,-30,-30,-40,-50,
+        -40,-20,  0,  0,  0,  0,-20,-40,
+        -30,  0, 10, 15, 15, 10,  0,-30,
+        -30,  5, 15, 20, 20, 15,  5,-30,
+        -30,  0, 15, 20, 20, 15,  0,-30,
+        -30,  5, 10, 15, 15, 10,  5,-30,
+        -40,-20,  0,  5,  5,  0,-20,-40,
+        -50,-40,-30,-30,-30,-30,-40,-50,
+    ];
+
+    let eval_white_pawn_mg = [
+        0,   0,  0,  0,  0,  0,  0,  0,
+        30, 30, 30, 30, 30, 30, 30, 30,
+        10, 10, 20, 30, 30, 20, 10, 10,
+        5,   5, 10, 25, 25, 10,  5,  5,
+        0,   0,  0, 20, 20,  0,  0,  0,
+        5,  -5,-10,  0,  0,-10, -5,  5,
+        5,  10, 10,-20,-20, 10, 10,  5,
+        0,   0,  0,  0,  0,  0,  0,  0,
+    ];
+    let eval_white_pawn_eg = [
+        0,  0,  0,  0,  0,  0,  0,  0,
+        100,100,100,100,100,100,100,100,
+        90,  90, 90, 90, 90, 90, 90, 90,
+        80,  80, 80, 80, 80, 80, 80, 80,
+        0,    0, 10, 20, 20, 10,  0,  0,
+        5,   -5,-10,  0,  0,-10, -5,  5,
+        5,   10, 10,-20,-20, 10, 10,  5,
+        0,    0,  0,  0,  0,  0,  0,  0,
+    ];
+    let tabl_zero = [
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0
+    ];
+
+    Align64([
+        [
+        tabl_zero,
+        // Mirror white pieces to LERF endianness
+        table_mirror(eval_white_king_mg, 8),
+        table_mirror(eval_white_queen_mg, 8),
+        table_mirror(eval_white_rook, 8),
+        table_mirror(eval_white_bishop, 8),
+        table_mirror(eval_white_knight, 8),
+        table_mirror(eval_white_pawn_mg, 8),
+        tabl_zero,
+        tabl_zero,
+        table_negate_i8(eval_white_king_mg),
+        table_negate_i8(eval_white_queen_mg),
+        table_negate_i8(eval_white_rook),
+        table_negate_i8(eval_white_bishop),
+        table_negate_i8(eval_white_knight),
+        table_negate_i8(eval_white_pawn_mg),
+        tabl_zero,
+    ], [
+        tabl_zero,
+        table_mirror(eval_white_king_eg, 8),
+        table_mirror(eval_white_queen_eg, 8),
+        table_mirror(eval_white_rook, 8),
+        table_mirror(eval_white_bishop, 8),
+        table_mirror(eval_white_knight, 8),
+        table_mirror(eval_white_pawn_eg, 8),
+        tabl_zero,
+        tabl_zero,
+        table_negate_i8(eval_white_king_eg),
+        table_negate_i8(eval_white_queen_eg),
+        table_negate_i8(eval_white_rook),
+        table_negate_i8(eval_white_bishop),
+        table_negate_i8(eval_white_knight),
+        table_negate_i8(eval_white_pawn_eg),
+        tabl_zero,
+    ]])
+};
 
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES: [[usize; 16]; 16] = [
@@ -151,9 +347,9 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
         'outer: for depth in 1..=target_depth {
             self.ply = 0;
 
-            if self.params.debug {
-                println!("Search depth {}", depth);
-            }
+            // if self.params.debug {
+            //     println!("Search depth {}", depth);
+            // }
 
             let score = self.go(-Eval::MAX, Eval::MAX, depth);
 
@@ -414,16 +610,16 @@ impl<'a> Search<'a> {
             };
             // let score = -self.go(-beta, -alpha, depth - 1);
 
-            if ply == 0 && self.params.debug {
-                println!(
-                    "move {}: score {} lmr {} raise alpha {} raise beta {}",
-                    util::move_string_dbg(mv),
-                    score,
-                    late_move_reduction,
-                    score > alpha,
-                    score >= beta
-                );
-            }
+            // if ply == 0 && self.params.debug {
+            //     println!(
+            //         "move {}: score {} lmr {} raise alpha {} raise beta {}",
+            //         util::move_string_dbg(mv),
+            //         score,
+            //         late_move_reduction,
+            //         score > alpha,
+            //         score >= beta
+            //     );
+            // }
 
             self.ply -= 1;
             self.chess = board_copy;
@@ -664,107 +860,141 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
+    pub fn calc_board_phase(&self) -> f32 {
+        let material = self.chess.material();
+
+        const MAT_MAX: u16 = 5320; // 5600 - 4 pawns
+        const MAT_MIN: u16 = 280; // minor piece + pawn
+
+        (((material[0] + material[1] + MAT_MIN) as f32) / ((MAT_MAX + MAT_MIN) as f32))
+            .max(0.0)
+            .min(1.0)
+    }
+
+    #[inline(always)]
     pub fn evaluate(&self) -> Eval {
         use std::arch::x86_64::*;
 
-        let mut score: Eval = 0;
-
         let bitboards = self.chess.bitboards_new();
 
-        const PST: &Align64<[[i8; 64]; 16]> = &tables::Tables::EVAL_TABLES_INV_I8;
+        let mut bonuses_mg: Eval = 0;
+        let mut bonuses_eg: Eval = 0;
 
         unsafe {
-            let is_endgame = self.is_endgame() as usize;
-            let endgame_offset = is_endgame << 6;
+            let mut bonuses_mg_x64 = _mm512_setzero_si512();
+            let mut bonuses_eg_x64 = _mm512_setzero_si512();
 
-            let mut bonuses_vec = _mm512_setzero_si512();
-
-            macro_rules! acc_piece_bonus_white_avx512 {
-                ($piece_id:expr) => {
-                    bonuses_vec = _mm512_mask_blend_epi8(
+            macro_rules! acc_piece_bonus_avx512 {
+                ($bonus_vec:ident,$is_eg:expr,$piece_id:expr) => {
+                    $bonus_vec = _mm512_mask_blend_epi8(
                         bitboards[$piece_id as usize],
-                        bonuses_vec,
-                        _mm512_load_epi64(PST.0[$piece_id as usize + 1].as_ptr() as *const i64),
-                    );
-                };
-            }
-            macro_rules! acc_piece_bonus_black_avx512 {
-                ($piece_id:expr) => {
-                    bonuses_vec = _mm512_mask_blend_epi8(
-                        bitboards[$piece_id as usize],
-                        bonuses_vec,
-                        _mm512_load_epi64(PST.0[$piece_id as usize + 1].as_ptr() as *const i64),
-                    );
+                        $bonus_vec,
+                        _mm512_loadu_epi8(
+                            EVAL_TABLES_INV_MGEG.0[$is_eg][$piece_id as usize].as_ptr()
+                                as *const i8,
+                        ),
+                    )
                 };
             }
 
-            bonuses_vec = _mm512_mask_blend_epi8(
-                bitboards[PieceIndex::WhiteKing as usize],
-                bonuses_vec,
-                _mm512_loadu_epi8(
-                    PST.0[PieceIndex::WhiteKing as usize]
-                        .as_ptr()
-                        .add(endgame_offset) as *const i8,
-                ),
-            );
+            macro_rules! sum_bonus_avx512 {
+                ($bonus_acc:ident,$bonus_vec:ident) => {
+                    let bonuses_lsb = _mm512_castsi512_si256($bonus_vec);
+                    let bonuses_msb = _mm512_extracti64x4_epi64($bonus_vec, 1);
+                    let bonuses_lsb_i16 = _mm512_cvtepi8_epi16(bonuses_lsb);
+                    let bonuses_msb_i16 = _mm512_cvtepi8_epi16(bonuses_msb);
+                    let summed_bonuses = _mm512_add_epi16(bonuses_lsb_i16, bonuses_msb_i16);
+                    let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
+                    let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
 
-            acc_piece_bonus_white_avx512!(PieceIndex::WhiteQueen);
-            acc_piece_bonus_white_avx512!(PieceIndex::WhiteRook);
-            acc_piece_bonus_white_avx512!(PieceIndex::WhiteBishop);
-            acc_piece_bonus_white_avx512!(PieceIndex::WhiteKnight);
-            acc_piece_bonus_white_avx512!(PieceIndex::WhitePawn);
+                    $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_lsb) as Eval;
+                    $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_msb) as Eval;
+                };
+            }
 
-            bonuses_vec = _mm512_mask_blend_epi8(
-                bitboards[PieceIndex::BlackKing as usize],
-                bonuses_vec,
-                _mm512_loadu_epi8(
-                    PST.0[PieceIndex::BlackKing as usize]
-                        .as_ptr()
-                        .add(endgame_offset) as *const i8,
-                ),
-            );
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKing);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteQueen);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteRook);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteBishop);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKnight);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhitePawn);
 
-            acc_piece_bonus_black_avx512!(PieceIndex::BlackQueen);
-            acc_piece_bonus_black_avx512!(PieceIndex::BlackRook);
-            acc_piece_bonus_black_avx512!(PieceIndex::BlackBishop);
-            acc_piece_bonus_black_avx512!(PieceIndex::BlackKnight);
-            acc_piece_bonus_black_avx512!(PieceIndex::BlackPawn);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKing);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackQueen);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackRook);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackBishop);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKnight);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackPawn);
 
-            let bonuses_lsb = _mm512_castsi512_si256(bonuses_vec);
-            let bonuses_msb = _mm512_extracti64x4_epi64(bonuses_vec, 1);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKing);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteQueen);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteRook);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteBishop);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKnight);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhitePawn);
 
-            let bonuses_lsb_i16 = _mm512_cvtepi8_epi16(bonuses_lsb);
-            let bonuses_msb_i16 = _mm512_cvtepi8_epi16(bonuses_msb);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKing);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackQueen);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackRook);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackBishop);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKnight);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackPawn);
 
-            let summed_bonuses = _mm512_add_epi16(bonuses_lsb_i16, bonuses_msb_i16);
-
-            let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
-            let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
-
-            score += _mm256_reduce_add_epi16(summed_bonuses_lsb) as Eval;
-            score += _mm256_reduce_add_epi16(summed_bonuses_msb) as Eval;
+            sum_bonus_avx512!(bonuses_mg, bonuses_mg_x64);
+            sum_bonus_avx512!(bonuses_eg, bonuses_eg_x64);
         }
 
-        // There is always 1 king on the board, skip king weight itself which would be +-0
-        score += (bitboards[PieceIndex::WhiteQueen as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackQueen as usize].count_ones() as Eval)
-            * WEIGHT_QUEEN;
+        let wb = bitboards[PieceIndex::WhiteBishop as usize].count_ones();
+        let bb = bitboards[PieceIndex::BlackBishop as usize].count_ones();
 
-        score += (bitboards[PieceIndex::WhiteRook as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackRook as usize].count_ones() as Eval)
-            * WEIGHT_ROOK;
+        let wq_bq = bitboards[PieceIndex::WhiteQueen as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackQueen as usize].count_ones() as Eval;
 
-        score += (bitboards[PieceIndex::WhiteBishop as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackBishop as usize].count_ones() as Eval)
-            * WEIGHT_BISHOP;
+        let wr_br = bitboards[PieceIndex::WhiteRook as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackRook as usize].count_ones() as Eval;
 
-        score += (bitboards[PieceIndex::WhiteKnight as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackKnight as usize].count_ones() as Eval)
-            * WEIGHT_KNIGHT;
+        let wb_bb = wb as Eval - bb as Eval;
 
-        score += (bitboards[PieceIndex::WhitePawn as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackPawn as usize].count_ones() as Eval)
-            * WEIGHT_PAWN;
+        let wn_bn = bitboards[PieceIndex::WhiteKnight as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackKnight as usize].count_ones() as Eval;
+
+        let wp_bp = bitboards[PieceIndex::WhitePawn as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackPawn as usize].count_ones() as Eval;
+
+        let mut score_mg = bonuses_mg
+            + wq_bq * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteQueen as usize]
+            + wr_br * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteRook as usize]
+            + wb_bb * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteBishop as usize]
+            + wn_bn * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteKnight as usize]
+            + wp_bp * WEIGHT_TABLE_MGEG[0][PieceIndex::WhitePawn as usize];
+
+        let mut score_eg = bonuses_eg
+            + wq_bq * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteQueen as usize]
+            + wr_br * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteRook as usize]
+            + wb_bb * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteBishop as usize]
+            + wn_bn * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteKnight as usize]
+            + wp_bp * WEIGHT_TABLE_MGEG[1][PieceIndex::WhitePawn as usize];
+
+        let phase = self.calc_board_phase();
+
+        if wb > 1 {
+            score_mg += 24;
+            score_eg += 48;
+        }
+        if bb > 1 {
+            score_mg -= 24;
+            score_eg -= 48;
+        }
+
+        let w_moves = self.chess.estimate_move_count(false, &self.tables);
+        let b_moves = self.chess.estimate_move_count(true, &self.tables);
+        let move_ratio = w_moves as Eval - b_moves as Eval;
+
+        // let all_pawns =
+        //     bitboards[PieceIndex::WhitePawn as usize] | bitboards[PieceIndex::BlackPawn as usize];
+
+        let score =
+            ((score_mg as f32 * phase + score_eg as f32 * (1.0 - phase)) as Eval) + move_ratio * 10;
 
         let final_score = score * if self.chess.b_move() { -1 } else { 1 };
 

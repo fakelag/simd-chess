@@ -17,6 +17,7 @@ pub mod transposition_v2;
 
 pub mod v10_mvcache;
 pub mod v11_opt;
+pub mod v12_eval;
 pub mod v1_negamax;
 pub mod v2_alphabeta;
 pub mod v3_itdep;
@@ -64,7 +65,7 @@ mod tests {
             params.depth = Some(std::hint::black_box(10));
 
             let mut search_engine =
-                v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
+                v12_eval::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
 
             // let tx = tx.clone();
             // std::thread::spawn(move || {

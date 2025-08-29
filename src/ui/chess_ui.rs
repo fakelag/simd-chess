@@ -1,5 +1,5 @@
 use crate::{
-    engine::*,
+    engine::{search::search_params::SearchParams, *},
     matchmaking::matchmaking::{Matchmaking, NEXT_MATCH_DELAY_SECONDS, VersusState},
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
@@ -12,6 +12,7 @@ pub struct ChessUi {
     ask_promotion: Option<(u8, u8)>,
     matchmaking: Matchmaking,
     squares: Vec<SquareUi>,
+    tt: search::transposition_v2::TranspositionTable,
 
     input_fen: ImguiTextInput,
     input_white_engine: ImguiTextInput,
@@ -204,6 +205,7 @@ impl ChessUi {
             squares,
             from_square: None,
             ask_promotion: None,
+            tt: search::transposition_v2::TranspositionTable::new(4),
             input_fen: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
                 Some("startpos moves e2e4"),
@@ -211,12 +213,12 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v8_quiesc_v1.exe"),
+                Some("simd-chess.exe"),
                 None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v7_mvvlva.exe"),
+                Some("v10_mvcache_ab.exe"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(
@@ -446,11 +448,31 @@ impl ChessUi {
                     ));
 
                     ui.text(format!(
-                        "is_endgame: {}",
-                        (((self.matchmaking.board.material()[0] & (!1023))
-                            | (self.matchmaking.board.material()[1] & (!1023)))
-                            == 0) as usize
+                        "material: {} / {}",
+                        self.matchmaking.board.material()[0],
+                        self.matchmaking.board.material()[1]
                     ));
+
+                    {
+                        let (_, rx) = crossbeam::channel::unbounded();
+                        let search_engine = search::v12_eval::Search::new(
+                            SearchParams::new(),
+                            chess_v2::ChessGame::from(self.matchmaking.board),
+                            &self.matchmaking.tables,
+                            &mut self.tt,
+                            search::repetition_v2::RepetitionTable::new(),
+                            &rx,
+                        );
+                        ui.text(format!("v12 static_eval: {}", search_engine.evaluate()));
+                    }
+
+                    // ui.text(format!(
+                    //     "estimated move count: {}",
+                    //     chess_v2::ChessGame::from(self.matchmaking.board).estimate_move_count(
+                    //         self.matchmaking.board.b_move(),
+                    //         &self.matchmaking.tables
+                    //     )
+                    // ));
 
                     if ui.button("Copy FEN") {
                         let fen = self.matchmaking.board.gen_fen();
