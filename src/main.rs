@@ -54,9 +54,9 @@ fn chess_ui() -> anyhow::Result<()> {
 fn search_thread(
     rx_search: channel::Receiver<GoCommand>,
     tables: &tables::Tables,
-    tt: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
+    transposition_table: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) {
-    let tt = unsafe { &mut *tt.get() };
+    let tt = unsafe { &mut *transposition_table.get() };
     loop {
         match rx_search.recv() {
             Ok(go) => {
@@ -66,7 +66,7 @@ fn search_thread(
 
                 assert!(chess.zobrist_key() == chess.calc_initial_zobrist_key(tables));
 
-                let mut search_engine = search::v11_opt::Search::new(
+                let mut search_engine = search::v12_eval::Search::new(
                     go.params,
                     chess,
                     tables,
@@ -136,13 +136,22 @@ fn search_thread(
 
                 let best_move = search_engine.search();
 
+                println!(
+                    "bestmove {}",
+                    if best_move != 0 {
+                        util::move_string(best_move)
+                    } else {
+                        "0000".to_string()
+                    }
+                );
+
                 if debug {
                     let elapsed = go.start_time.elapsed();
+
                     let search_nodes = search_engine.num_nodes_searched();
                     let search_depth = search_engine.get_depth();
                     let search_score = search_engine.search_score();
-
-                    let tt_stats = tt.calc_stats();
+                    let tt_stats = unsafe { &mut *transposition_table.get() }.calc_stats();
 
                     println!(
                         "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy)",
@@ -154,16 +163,16 @@ fn search_thread(
                         search_score,
                         (tt_stats.1 + tt_stats.2 + tt_stats.3) as f64 / (tt_stats.0 as f64) * 100.0
                     );
-                }
 
-                println!(
-                    "bestmove {}",
-                    if best_move != 0 {
-                        util::move_string(best_move)
-                    } else {
-                        "0000".to_string()
-                    }
-                );
+                    // println!(
+                    //     "info pv {:?}",
+                    //     search_engine
+                    //         .get_pv()
+                    //         .iter()
+                    //         .map(|mv| util::move_string_dbg(*mv))
+                    //         .collect::<Vec<String>>()
+                    // );
+                }
             }
             Err(_) => {
                 println!("info search thread terminated");
@@ -178,7 +187,7 @@ fn chess_uci(
     tables: &tables::Tables,
     tt: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) -> anyhow::Result<()> {
-    let mut debug = false;
+    let mut debug = true;
     let mut game_board: Option<chess::ChessGame> = None;
     let mut repetition_table: Option<search::repetition_v2::RepetitionTable> = None;
 
@@ -219,6 +228,7 @@ fn chess_uci(
                 Some("off") => debug = false,
                 _ => panic!("Expected 'on' or 'off' after debug command"),
             },
+            Some("ucinewgame") => {}
             Some("stop") => abort_search_uci(debug, &mut context),
             Some("isready") => println!("readyok"),
             Some("position") => {
@@ -262,38 +272,76 @@ fn chess_uci(
                     timeout_handle: None,
                 };
 
+                let chess = game_board
+                    .take()
+                    .expect("Expected position command to be sent before go");
+
                 let mut search_params = search_params::SearchParams::from_iter(input);
                 search_params.debug = debug;
+
+                let infinite = search_params.infinite;
+                let movetime = search_params.movetime;
+                // let movestogo = search_params.movestogo;
+                let time = if chess.b_move {
+                    search_params.btime
+                } else {
+                    search_params.wtime
+                };
+                let inc = if chess.b_move {
+                    search_params.binc
+                } else {
+                    search_params.winc
+                };
 
                 tx_search.send(GoCommand {
                     start_time,
                     params: search_params,
-                    chess: game_board
-                        .take()
-                        .expect("Expected position command to be sent before go"),
+                    chess,
                     repetition_table: repetition_table
                         .take()
                         .expect("Expected position command to be sent before go"),
                     sig: rx_abort,
                 })?;
 
-                // @todo - Calc thinking time
-                let think_time = std::time::Duration::from_millis(100);
+                if !infinite {
+                    let movetime_ms = if let Some(movetime) = movetime {
+                        Some(movetime)
+                    } else {
+                        // base / 20 + inc / 2
+                        time.and_then(|t| Some(t / 20 + inc.unwrap_or(0) / 2))
+                    };
 
-                // Timeout thread
-                let tx_abort = new_context.tx_abort.clone();
+                    /*
+                        position startpos moves d2d4 g8f6 c2c4 e7e6 b1c3 f8b4 f2f3 d7d5 a2a3 b4c3 b2c3 e8g8 c4d5 e6d5 e2e3 c7c5 f1d3                                                                                                                                  engine.py:950
+                        go wtime 187750 btime 126970 winc 1000 binc 1000
+                    */
 
-                new_context.timeout_handle = Some(std::thread::spawn(move || {
-                    match rx_stop.recv_timeout(think_time) {
-                        Ok(_) => {}
-                        Err(channel::RecvTimeoutError::Timeout) => {
-                            let _ = tx_abort.try_send(SigAbort {});
-                        }
-                        Err(channel::RecvTimeoutError::Disconnected) => {
-                            panic!("Timeout thread disconnected")
+                    if let Some(mut movetime_ms) = movetime_ms {
+                        movetime_ms = movetime_ms.max(1);
+
+                        let think_time = std::time::Duration::from_millis(movetime_ms as u64);
+
+                        // Timeout thread
+                        let tx_abort = new_context.tx_abort.clone();
+
+                        new_context.timeout_handle =
+                            Some(std::thread::spawn(move || {
+                                match rx_stop.recv_timeout(think_time) {
+                                    Ok(_) => {}
+                                    Err(channel::RecvTimeoutError::Timeout) => {
+                                        let _ = tx_abort.try_send(SigAbort {});
+                                    }
+                                    Err(channel::RecvTimeoutError::Disconnected) => {
+                                        panic!("Timeout thread disconnected")
+                                    }
+                                }
+                            }));
+
+                        if debug {
+                            println!("info movetime ms {}", movetime_ms);
                         }
                     }
-                }));
+                }
 
                 context = Some(new_context);
             }
