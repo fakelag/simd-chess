@@ -1,6 +1,6 @@
 use std::io::BufRead;
 
-use crate::engine::{chess, tables};
+use crate::engine::{chess_v2, tables};
 
 #[derive(Debug, Clone)]
 pub struct OpeningMoves {
@@ -61,7 +61,7 @@ impl Iterator for OpeningBook {
 }
 
 pub fn load_openings_from_dir(
-    board: &chess::ChessGame,
+    board: &chess_v2::ChessGame,
     tables: &tables::Tables,
     opening_list: &mut Vec<OpeningMoves>,
 ) -> anyhow::Result<()> {
@@ -137,27 +137,30 @@ pub fn load_openings_from_dir(
 }
 
 /// Returns true if side2move is checkmated
-fn is_board_checkmated(board: &chess::ChessGame, tables: &tables::Tables) -> bool {
-    let mut is_checkmate = false;
+fn is_board_checkmated(board: &chess_v2::ChessGame, tables: &tables::Tables) -> bool {
+    if !board.in_check(tables, board.b_move()) {
+        return false;
+    }
 
     let mut move_list = [0u16; 256];
-    if board.in_check_slow(tables, board.b_move()) {
-        is_checkmate = (0..board.gen_moves_slow(tables, &mut move_list)).all(|mv_index| {
+
+    // No need to try all promotion variants
+    let is_checkmate =
+        (0..board.gen_moves_avx512::<false>(tables, &mut move_list)).all(|mv_index| {
             let mv = move_list[mv_index];
 
             let mut board_copy = board.clone();
 
-            if !board_copy.make_move_slow(mv, tables) {
+            if unsafe { !board_copy.make_move(mv, tables, None) } {
                 return true;
             }
 
-            if board_copy.in_check_slow(tables, !board_copy.b_move()) {
+            if board_copy.in_check(tables, !board_copy.b_move()) {
                 return true;
             }
 
             false
         });
-    }
 
     is_checkmate
 }

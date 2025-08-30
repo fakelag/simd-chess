@@ -4,7 +4,7 @@ use crate::matchmaking::openings::OpeningBook;
 use crate::matchmaking::openings::OpeningMoves;
 use crate::matchmaking::openings::load_openings_from_dir;
 use crate::{
-    engine::{chess, tables},
+    engine::{chess_v2, tables},
     matchmaking::process::{EngineProcess, EngineState},
     util::{self},
 };
@@ -47,7 +47,7 @@ pub struct VersusMatch {
 
 pub struct Matchmaking {
     pub fen: String,
-    pub board: chess::ChessGame,
+    pub board: chess_v2::ChessGame,
     pub tables: tables::Tables,
     pub legal_moves: Vec<u16>,
 
@@ -76,7 +76,7 @@ impl Matchmaking {
         let mut mm = Self {
             fen: fen.to_string(),
             is_startpos: fen == util::FEN_STARTPOS,
-            board: chess::ChessGame::new(),
+            board: chess_v2::ChessGame::new(),
             tables: tables::Tables::new(),
             moves: Vec::new(),
             legal_moves: Vec::new(),
@@ -118,17 +118,30 @@ impl Matchmaking {
         self.legal_moves.clear();
 
         let mut move_list = [0u16; 256];
-        let move_count = self.board.gen_moves_slow(&self.tables, &mut move_list);
+        let move_count = self
+            .board
+            .gen_moves_avx512::<false>(&self.tables, &mut move_list);
 
         for i in 0..move_count {
             let mv = move_list[i];
 
             let mut board_copy = self.board.clone();
 
-            if board_copy.make_move_slow(mv, &self.tables)
-                && !board_copy.in_check_slow(&self.tables, !board_copy.b_move())
-            {
+            let move_ok = unsafe { board_copy.make_move(mv, &self.tables, None) };
+
+            if move_ok && !board_copy.in_check(&self.tables, !board_copy.b_move()) {
                 self.legal_moves.push(mv);
+
+                if (mv & chess_v2::MV_FLAGS_PR_MASK) == chess_v2::MV_FLAGS_PR_QUEEN {
+                    // Add underpromotions as legal moves too
+                    let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
+                    self.legal_moves
+                        .push(mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK);
+                    self.legal_moves
+                        .push(mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP);
+                    self.legal_moves
+                        .push(mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT);
+                }
             }
         }
     }
@@ -148,7 +161,7 @@ impl Matchmaking {
             return Err(anyhow::anyhow!("Move {} is not a legal move", mv_string));
         }
 
-        if !self.board.make_move_slow(mv, &self.tables) {
+        if unsafe { !self.board.make_move(mv, &self.tables, None) } {
             // Should not happen unless legal_moves is out of sync
             panic!("Failed to make move {}: Invalid move", mv_string);
         }
@@ -231,17 +244,17 @@ impl Matchmaking {
                 self.legal_moves.is_empty(),
                 self.board.b_move(),
             ) {
-                chess::GameState::Checkmate(side) => {
+                chess_v2::GameState::Checkmate(side) => {
                     let engine = self.get_engine_for_side_mut(side).unwrap();
                     engine.versus_wins += 1;
                 }
-                chess::GameState::Stalemate => {
+                chess_v2::GameState::Stalemate => {
                     self.versus_draws += 1;
                 }
-                chess::GameState::DrawByFiftyMoveRule => {
+                chess_v2::GameState::DrawByFiftyMoveRule => {
                     self.versus_draws += 1;
                 }
-                chess::GameState::Ongoing => {
+                chess_v2::GameState::Ongoing => {
                     return false;
                 }
             }

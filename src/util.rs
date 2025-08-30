@@ -1,6 +1,6 @@
 use crate::engine::{
     chess::{self},
-    search, tables,
+    chess_v2, search, tables,
 };
 
 pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -115,19 +115,23 @@ impl Into<char> for PieceId {
     }
 }
 
-pub const PICE_IMAGES: [&str; PieceId::PieceMax as usize] = [
+pub const PIECE_IMAGES: [&str; chess_v2::PieceIndex::PieceIndexMax as usize] = [
+    "", // Null White
     "assets/w_king.png",
     "assets/w_queen.png",
     "assets/w_rook.png",
     "assets/w_bishop.png",
     "assets/w_knight.png",
     "assets/w_pawn.png",
+    "", // Pad
+    "", // Null Black
     "assets/b_king.png",
     "assets/b_queen.png",
     "assets/b_rook.png",
     "assets/b_bishop.png",
     "assets/b_knight.png",
     "assets/b_pawn.png",
+    "", // Pad
 ];
 
 pub const fn table_mirror<T: Copy, const N: usize>(table: [T; N], stride: usize) -> [T; N] {

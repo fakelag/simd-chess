@@ -1,6 +1,9 @@
 use crate::{
-    engine::{chess, tables},
-    util::{self, PieceId, Side},
+    engine::{
+        chess_v2::{self, PieceIndex},
+        tables,
+    },
+    util::{self, Side},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -11,7 +14,7 @@ enum PgnState {
 
 pub fn parse_pgn<'a>(
     parts: &mut impl Iterator<Item = &'a str>,
-    board: &mut chess::ChessGame,
+    board: &mut chess_v2::ChessGame,
     tables: &tables::Tables,
 ) -> anyhow::Result<Vec<u16>> {
     let mut moves = Vec::new();
@@ -37,7 +40,27 @@ pub fn parse_pgn<'a>(
             }
             (PgnState::Move(side, both_moves), part) => {
                 let mut move_list = [0u16; 256];
-                let move_count = board.gen_moves_slow(&tables, &mut move_list);
+
+                let move_list = (0..board.gen_moves_avx512::<false>(&tables, &mut move_list))
+                    .map(|mv_index| -> Vec<u16> {
+                        let mv = move_list[mv_index];
+
+                        if (mv & chess_v2::MV_FLAGS_PR_MASK) != chess_v2::MV_FLAGS_PR_QUEEN {
+                            return vec![mv];
+                        }
+
+                        let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
+
+                        vec![
+                            mv_unpromoted | chess_v2::MV_FLAGS_PR_QUEEN,
+                            mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK,
+                            mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP,
+                            mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT,
+                        ]
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                let move_count = move_list.len();
 
                 let pseudolegal_moves = match part {
                     "O-O" | "O-O-O" => {
@@ -46,12 +69,12 @@ pub fn parse_pgn<'a>(
                                 let mv = move_list[mv_index];
 
                                 let castle_flag = match part {
-                                    "O-O" => chess::MV_FLAGS_CASTLE_KING,
-                                    "O-O-O" => chess::MV_FLAGS_CASTLE_QUEEN,
+                                    "O-O" => chess_v2::MV_FLAGS_CASTLE_KING,
+                                    "O-O-O" => chess_v2::MV_FLAGS_CASTLE_QUEEN,
                                     _ => unreachable!(),
                                 };
 
-                                if mv & chess::MV_FLAGS == castle_flag {
+                                if mv & chess_v2::MV_FLAGS == castle_flag {
                                     Some(mv)
                                 } else {
                                     None
@@ -66,7 +89,7 @@ pub fn parse_pgn<'a>(
                         let mut src_file: Option<u8> = None;
                         let mut src_rank: Option<u8> = None;
                         let mut dst_rank: Option<u8> = None;
-                        let mut piece = PieceId::WhitePawn;
+                        let mut piece = chess_v2::PieceIndex::WhitePawn;
                         let mut is_capture = false;
                         let mut is_checkmate = false;
                         let mut is_check = false;
@@ -93,12 +116,12 @@ pub fn parse_pgn<'a>(
                                 }
                                 'N' | 'B' | 'R' | 'Q' | 'K' => {
                                     piece = match move_part {
-                                        'N' => PieceId::WhiteKnight,
-                                        'B' => PieceId::WhiteBishop,
-                                        'R' => PieceId::WhiteRook,
-                                        'Q' => PieceId::WhiteQueen,
-                                        'K' => PieceId::WhiteKing,
-                                        'P' => PieceId::WhitePawn,
+                                        'N' => chess_v2::PieceIndex::WhiteKnight,
+                                        'B' => chess_v2::PieceIndex::WhiteBishop,
+                                        'R' => chess_v2::PieceIndex::WhiteRook,
+                                        'Q' => chess_v2::PieceIndex::WhiteQueen,
+                                        'K' => chess_v2::PieceIndex::WhiteKing,
+                                        'P' => chess_v2::PieceIndex::WhitePawn,
                                         _ => {
                                             return Err(anyhow::anyhow!(
                                                 "Invalid piece in opening: {}",
@@ -132,7 +155,7 @@ pub fn parse_pgn<'a>(
                         }
 
                         // Fix piece for side
-                        piece = PieceId::from((piece as usize) + (side as usize * 6));
+                        piece = chess_v2::PieceIndex::from((piece as usize) + (side as usize * 8));
 
                         let found_moves = (0..move_count)
                             .filter_map(|mv_index| {
@@ -162,21 +185,15 @@ pub fn parse_pgn<'a>(
                                 }
 
                                 if is_capture
-                                    && mv & chess::MV_FLAG_EPCAP != chess::MV_FLAG_EPCAP
-                                    && board.piece_at_slow(1 << dst_sq) == 0
+                                    && (mv & chess_v2::MV_FLAG_EPCAP) != chess_v2::MV_FLAG_EPCAP
+                                    && board.piece_at(dst_sq) == PieceIndex::WhiteNullPiece as usize
                                 {
                                     return None;
                                 }
 
-                                let sq_piece = board.piece_at_slow(1 << src_sq);
+                                let sq_piece = board.piece_at(src_sq);
 
-                                let sq_piece = if sq_piece == 0 {
-                                    return None;
-                                } else {
-                                    PieceId::from(sq_piece - 1)
-                                };
-
-                                if sq_piece != piece {
+                                if sq_piece != piece as usize {
                                     return None;
                                 }
 
@@ -193,11 +210,11 @@ pub fn parse_pgn<'a>(
                     .filter(|&&mv| {
                         let mut board_copy = board.clone();
 
-                        if !board_copy.make_move_slow(mv, tables) {
+                        if unsafe { !board_copy.make_move(mv, tables, None) } {
                             return false;
                         }
 
-                        if board_copy.in_check_slow(tables, !board_copy.b_move()) {
+                        if board_copy.in_check(tables, !board_copy.b_move()) {
                             return false;
                         }
 
@@ -222,7 +239,7 @@ pub fn parse_pgn<'a>(
 
                 moves.push(move_to_make);
 
-                if !board.make_move_slow(move_to_make, &tables) {
+                if unsafe { !board.make_move(move_to_make, &tables, None) } {
                     return Err(anyhow::anyhow!(
                         "Invalid move in opening: {}, move: {}",
                         part,
@@ -230,7 +247,7 @@ pub fn parse_pgn<'a>(
                     ));
                 }
 
-                if board.in_check_slow(&tables, !board.b_move()) {
+                if board.in_check(&tables, !board.b_move()) {
                     return Err(anyhow::anyhow!(
                         "Opening move {} leaves the king in check",
                         part

@@ -14,7 +14,7 @@ use winit::{
     window::Window,
 };
 
-use crate::{clipb, ui::chess_ui::ChessUi, util::PICE_IMAGES};
+use crate::{clipb, ui::chess_ui::ChessUi, util::PIECE_IMAGES};
 
 struct ImguiState {
     context: imgui::Context,
@@ -37,13 +37,13 @@ struct AppWindow {
 
 pub struct DrawCtx<'a> {
     pub ui: &'a mut imgui::Ui,
-    pub textures: [imgui::TextureId; 12],
+    pub textures: [imgui::TextureId; 16],
 }
 
 pub struct App {
     window: Option<AppWindow>,
     chess_ui: ChessUi,
-    textures: Option<[imgui::TextureId; 12]>,
+    textures: Option<[imgui::TextureId; 16]>,
 }
 
 impl AppWindow {
@@ -106,10 +106,14 @@ impl AppWindow {
         }
     }
 
-    fn setup_textures(&mut self) -> Option<[imgui::TextureId; 12]> {
-        let texture_ids = PICE_IMAGES
+    fn setup_textures(&mut self) -> Option<[imgui::TextureId; 16]> {
+        let texture_ids = PIECE_IMAGES
             .iter()
             .map(|&path| {
+                if path.is_empty() {
+                    return TextureId::from(0);
+                }
+
                 let dynamic_image = image::load_from_memory(
                     fs::read(path)
                         .expect("Failed to read image file")

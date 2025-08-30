@@ -2,4 +2,8 @@
 /bin
 /openings
 *.bat
-
+*.txt
+*.zip
+*.png
+*.bin
+*.binpack

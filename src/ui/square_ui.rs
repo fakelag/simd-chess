@@ -1,6 +1,6 @@
 use crate::{
-    engine::chess,
-    util::{PieceId, hex_to_f4_color, square_name},
+    engine::chess_v2,
+    util::{hex_to_f4_color, square_name},
 };
 
 const CLR_DARK_SQUARE: [f32; 4] = hex_to_f4_color(0xce8747, 1.0);
@@ -12,7 +12,7 @@ const CLR_HIGHLIGHT_LIGHT: [f32; 4] = hex_to_f4_color(0x9bcefc, 1.0);
 pub struct SquareUi {
     sq_min: [f32; 2],
     sq_max: [f32; 2],
-    sq_piece: Option<PieceId>,
+    sq_piece: chess_v2::PieceIndex,
     primary_clr: [f32; 4],
     secondary_clr: [f32; 4],
     highlight_clr: [f32; 4],
@@ -40,7 +40,7 @@ impl SquareUi {
             sq_max: [0.0; 2],
             mouse_xy: [0.0; 2],
             sq_bit_index,
-            sq_piece: None,
+            sq_piece: chess_v2::PieceIndex::WhiteNullPiece,
             primary_clr,
             secondary_clr,
             highlight_clr,
@@ -94,19 +94,13 @@ impl SquareUi {
     pub fn update(
         &mut self,
         ui: &imgui::Ui,
-        board: &chess::ChessGame,
+        board: &chess_v2::ChessGame,
         sq_from: &mut Option<u8>,
     ) -> bool {
         self.reset_moving();
         self.mouse_xy = ui.io().mouse_pos;
 
-        let sq_piece = board.piece_at_slow(1 << self.sq_bit_index);
-
-        self.sq_piece = if sq_piece == 0 {
-            None
-        } else {
-            Some(PieceId::from(sq_piece - 1))
-        };
+        self.sq_piece = chess_v2::PieceIndex::from(board.piece_at(self.sq_bit_index));
 
         self.is_hovering = ui.is_mouse_hovering_rect(self.sq_min, self.sq_max);
 
@@ -124,7 +118,9 @@ impl SquareUi {
             if self.sq_bit_index == *sq_from {
                 self.is_moving = true;
 
-                if self.sq_piece.is_some() && ui.is_mouse_down(imgui::MouseButton::Left) {
+                if self.sq_piece != chess_v2::PieceIndex::WhiteNullPiece
+                    && ui.is_mouse_down(imgui::MouseButton::Left)
+                {
                     self.is_dragging = true;
                 }
             }
@@ -140,7 +136,7 @@ impl SquareUi {
             }
         }
 
-        if self.sq_piece.is_some() {
+        if self.sq_piece != chess_v2::PieceIndex::WhiteNullPiece {
             if self.is_hovering && ui.is_mouse_clicked(imgui::MouseButton::Left) {
                 if let Some(from_square) = sq_from {
                     if *from_square == self.sq_bit_index {
@@ -157,14 +153,14 @@ impl SquareUi {
         false
     }
 
-    pub fn draw_highlights(&self, ui: &imgui::Ui, piece_tex: &[imgui::TextureId; 12]) {
+    pub fn draw_highlights(&self, ui: &imgui::Ui, piece_tex: &[imgui::TextureId; 16]) {
         if self.is_moving {
             ui.get_window_draw_list()
                 .add_rect(self.sq_min, self.sq_max, CLR_HIGHLIGHT)
                 .filled(true)
                 .build();
 
-            if let Some(sq_piece) = self.sq_piece {
+            if self.sq_piece != chess_v2::PieceIndex::WhiteNullPiece {
                 if self.is_dragging {
                     let mouse_xy = self.mouse_xy;
                     let tex_min = [
@@ -176,7 +172,7 @@ impl SquareUi {
                         mouse_xy[1] + self.sq_height() / 2.0,
                     ];
                     ui.get_window_draw_list()
-                        .add_image(piece_tex[sq_piece as usize], tex_min, tex_max)
+                        .add_image(piece_tex[self.sq_piece as usize], tex_min, tex_max)
                         .col([1.0, 1.0, 1.0, 0.75])
                         .build();
                 }
@@ -198,10 +194,10 @@ impl SquareUi {
             .build();
     }
 
-    pub fn draw_texture(&self, ui: &imgui::Ui, piece_tex: &[imgui::TextureId; 12]) {
-        if let Some(sq_piece) = self.sq_piece {
+    pub fn draw_texture(&self, ui: &imgui::Ui, piece_tex: &[imgui::TextureId; 16]) {
+        if self.sq_piece != chess_v2::PieceIndex::WhiteNullPiece {
             ui.get_window_draw_list()
-                .add_image(piece_tex[sq_piece as usize], self.sq_min, self.sq_max)
+                .add_image(piece_tex[self.sq_piece as usize], self.sq_min, self.sq_max)
                 .build();
         }
     }

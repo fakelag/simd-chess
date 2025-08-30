@@ -1,9 +1,9 @@
 use crate::{
-    engine::{search::search_params::SearchParams, *},
+    engine::*,
     matchmaking::matchmaking::{Matchmaking, NEXT_MATCH_DELAY_SECONDS, VersusState},
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
-    util::{self, PieceId},
+    util::{self},
     window,
 };
 
@@ -441,10 +441,9 @@ impl ChessUi {
 
                     ui.text(format!(
                         "in_check: {}",
-                        self.matchmaking.board.in_check_slow(
-                            &self.matchmaking.tables,
-                            self.matchmaking.board.b_move()
-                        )
+                        self.matchmaking
+                            .board
+                            .in_check(&self.matchmaking.tables, self.matchmaking.board.b_move())
                     ));
 
                     ui.text(format!(
@@ -454,16 +453,7 @@ impl ChessUi {
                     ));
 
                     {
-                        let (_, rx) = crossbeam::channel::unbounded();
-                        let search_engine = search::v12_eval::Search::new(
-                            SearchParams::new(),
-                            chess_v2::ChessGame::from(self.matchmaking.board),
-                            &self.matchmaking.tables,
-                            &mut self.tt,
-                            search::repetition_v2::RepetitionTable::new(),
-                            &rx,
-                        );
-                        ui.text(format!("v12 static_eval: {}", search_engine.evaluate()));
+                        // ui.text(format!("v12 static_eval: {}", search_engine.evaluate()));
                     }
 
                     // ui.text(format!(
@@ -567,7 +557,7 @@ impl ChessUi {
                         self.matchmaking.legal_moves.is_empty(),
                         self.matchmaking.board.b_move(),
                     ) {
-                        chess::GameState::Checkmate(side) => {
+                        chess_v2::GameState::Checkmate(side) => {
                             let engine_name = self
                                 .matchmaking
                                 .get_engine_for_side(side)
@@ -584,13 +574,13 @@ impl ChessUi {
                                 engine_name
                             ));
                         }
-                        chess::GameState::Stalemate => {
+                        chess_v2::GameState::Stalemate => {
                             ui.text_wrapped("Result: Stalemate");
                         }
-                        chess::GameState::DrawByFiftyMoveRule => {
+                        chess_v2::GameState::DrawByFiftyMoveRule => {
                             ui.text_wrapped("Result: Draw by fifty-move rule");
                         }
-                        chess::GameState::Ongoing => {}
+                        chess_v2::GameState::Ongoing => {}
                     }
                 });
 
@@ -620,8 +610,8 @@ impl ChessUi {
                     .enumerate()
                     .for_each(|(i, flag)| {
                         let texture_id = ctx.textures[i
-                            + PieceId::WhiteQueen as usize
-                            + self.matchmaking.board.b_move() as usize * 6];
+                            + chess_v2::PieceIndex::WhiteQueen as usize
+                            + self.matchmaking.board.b_move() as usize * 8];
 
                         let [option_x, option_y] =
                             [selector_x + square_wh[0] * i as f32, selector_y];
