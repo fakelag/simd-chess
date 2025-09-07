@@ -25,6 +25,8 @@ use crate::{
 mod clipb;
 mod engine;
 mod matchmaking;
+mod pgn;
+mod scripts;
 mod ui;
 mod uicomponents;
 mod util;
@@ -364,6 +366,54 @@ fn main() {
     let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
 
     let result = match mode.as_str() {
+        "db" => {
+            let path = std::env::args()
+                .nth(2)
+                .expect("Expected path to Lichess database");
+            let it = scripts::lichess_parser::parse_lichess_database(&path).unwrap();
+
+            for game in it {
+                // println!("Event: {:?}", game.event());
+                // println!("Site: {:?}", game.site());
+                // println!("White: {:?}", game.white());
+                // println!("Black: {:?}", game.black());
+                // println!("Result: {:?}", game.result());
+                // println!("UTCDate: {:?}", game.utc_date());
+                // println!("UTCTime: {:?}", game.utc_time());
+                // println!("WhiteElo: {:?}", game.white_elo());
+                // println!("BlackElo: {:?}", game.black_elo());
+                // println!("WhiteRatingDiff: {:?}", game.white_rating_diff());
+                // println!("BlackRatingDiff: {:?}", game.black_rating_diff());
+                // println!("ECO: {:?}", game.eco());
+                // println!("Opening: {:?}", game.opening());
+                // println!("TimeControl: {:?}", game.time_control());
+                // println!("Termination: {:?}", game.termination());
+
+                // println!("site: {:?}", game.site());
+                std::hint::black_box(game.event());
+                std::hint::black_box(game.site());
+                std::hint::black_box(game.white());
+                std::hint::black_box(game.black());
+                std::hint::black_box(game.result());
+                std::hint::black_box(game.utc_date());
+                std::hint::black_box(game.utc_time());
+                std::hint::black_box(game.white_elo());
+                std::hint::black_box(game.black_elo());
+                std::hint::black_box(game.white_rating_diff());
+                std::hint::black_box(game.black_rating_diff());
+                std::hint::black_box(game.eco());
+                std::hint::black_box(game.opening());
+                std::hint::black_box(game.time_control());
+                std::hint::black_box(game.termination());
+                // break;
+                // if let Some("https://lichess.org/3rIn3t4O") = game.site() {
+                //     println!("Found game");
+                //     break;
+                // }
+            }
+
+            Ok(())
+        }
         "gui" => chess_ui(),
         "uci" => {
             let (tx_search, rx_search) = channel::bounded(1);
