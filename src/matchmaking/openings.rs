@@ -109,7 +109,9 @@ pub fn load_openings_from_dir(
 
             let eco = parts.next().expect("Missing ECO code in opening line");
             let name = parts.next().expect("Missing opening name in opening line");
-            let moves = match super::pgn::parse_pgn(&mut parts, &mut opening_board, tables) {
+            let move_str = parts.next().expect("Missing moves in opening line");
+
+            let moves = match crate::pgn::parse_pgn(move_str, &mut opening_board, tables) {
                 Ok(moves) => moves,
                 Err(e) => {
                     eprintln!(
