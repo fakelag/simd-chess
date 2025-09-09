@@ -1,10 +1,10 @@
 use std::{
-    fs::File,
-    io::{BufReader, Read},
+    fs::{self, File},
+    io::{BufReader, Read, Write},
 };
 
-const CHUNK_SIZE: usize = 1024 * 1024 * 2;
-const BACKBUF_SIZE: usize = 1024 * 1024 * 2;
+pub const CHUNK_SIZE: usize = 1024 * 1024 * 4; // 4 MB
+pub const BACKBUF_SIZE: usize = 1024 * 32; // 32 KB
 
 #[derive(PartialEq, Eq)]
 enum LichessIteratorState {
@@ -33,9 +33,21 @@ pub enum LichessGameTermination {
     Unterminated,
 }
 
-#[derive(Default, Debug)]
-pub struct LichessGame {
-    data: Vec<u8>,
+pub struct LichessDatabaseBuf {
+    buf: Vec<u8>,
+}
+
+impl LichessDatabaseBuf {
+    pub fn new() -> Self {
+        LichessDatabaseBuf {
+            buf: vec![0u8; CHUNK_SIZE + BACKBUF_SIZE],
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LichessGame<'a> {
+    data: &'a [u8],
     event: Option<(usize, usize)>,
     site: Option<(usize, usize)>,
     white: Option<(usize, usize)>,
@@ -64,7 +76,28 @@ macro_rules! game_getter {
     };
 }
 
-impl LichessGame {
+impl<'a> LichessGame<'a> {
+    pub fn new(d: &'a [u8]) -> Self {
+        LichessGame {
+            data: d,
+            event: None,
+            site: None,
+            white: None,
+            black: None,
+            result: None,
+            utc_date: None,
+            utc_time: None,
+            white_elo: None,
+            black_elo: None,
+            white_rating_diff: None,
+            black_rating_diff: None,
+            eco: None,
+            opening: None,
+            time_control: None,
+            termination: None,
+        }
+    }
+
     game_getter!(event, &str, event);
     game_getter!(site, &str, site);
     game_getter!(white, &str, white);
@@ -110,150 +143,165 @@ impl LichessGame {
     }
 }
 
-pub struct LichessGameIterator {
+pub struct LichessDatabaseReader {
     reader: BufReader<File>,
-    buf: Vec<u8>,
-    chunk_range: Option<(usize, usize)>,
-    // remaining_range: Option<(usize, usize)>,
-    buf2: Vec<u8>,
-
     state: LichessIteratorState,
-    chunk_start_at: usize,
 }
 
-impl LichessGameIterator {
+pub struct LichessGameIterator<'a> {
+    reader: LichessDatabaseReader,
+    r_start: usize,
+    r_size: usize,
+
+    buf: Vec<u8>,
+    // games: Vec<LichessGame<'a>>,
+    __marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl LichessDatabaseReader {
     pub fn new(file: File) -> Self {
-        LichessGameIterator {
+        LichessDatabaseReader {
             reader: BufReader::new(file),
-            buf: vec![0u8; CHUNK_SIZE + BACKBUF_SIZE],
-            buf2: vec![0u8; CHUNK_SIZE + BACKBUF_SIZE],
-            // remaining_range: None,
-            chunk_range: None,
-            chunk_start_at: BACKBUF_SIZE,
             state: LichessIteratorState::Reading,
         }
     }
 
-    fn next_chunk(&mut self) -> bool {
+    pub fn next_chunk(
+        &mut self,
+        remainder_start: usize,
+        remainder_size: usize,
+        buf: &mut [u8],
+    ) -> anyhow::Result<Option<(usize, usize, usize)>> {
         if self.state == LichessIteratorState::End {
-            return false;
+            return Ok(None);
         }
-        //  println!("nextchunk");
 
-        // if let Some((start, end)) = self.remaining_range.take() {
-        //     println!("rem");
-        //     self.chunk_start_at = BACKBUF_SIZE - (end - start);
-        //     let (first, second) = self.buf.split_at_mut(BACKBUF_SIZE);
-        //     first[self.chunk_start_at..]
-        //         .copy_from_slice(&second[start - BACKBUF_SIZE..end - BACKBUF_SIZE]);
-        // }
+        let (pre, post) = buf.split_at_mut(BACKBUF_SIZE);
+
+        if remainder_start > 0 {
+            let remainder_start = remainder_start - BACKBUF_SIZE;
+            pre[BACKBUF_SIZE - remainder_size..BACKBUF_SIZE]
+                .copy_from_slice(&post[remainder_start..remainder_start + remainder_size]);
+        }
+
+        let mut ch_start = BACKBUF_SIZE - remainder_size;
 
         loop {
-            let n = self.reader.read(&mut self.buf[BACKBUF_SIZE..]);
+            let n = self.reader.read(post);
 
-            let chunk = match n {
+            let n = match n {
                 Ok(0) => {
                     self.state = LichessIteratorState::End;
-                    self.chunk_range = None;
-
-                    println!("over");
-                    return false;
+                    return Ok(None);
                 }
-                Ok(n) => &mut self.buf[0..BACKBUF_SIZE + n],
+                Ok(n) => n,
                 Err(e) => panic!("Error reading from file: {}", e),
             };
 
-            let bp = (self.chunk_start_at..chunk.len()).rev().find_map(|i| {
-                if chunk[i] != b'\n' {
-                    return None;
+            let bp = (2..n).rev().find_map(|i| {
+                if post[i] == b'\n' && post[i - 1] == b'\n' && post[i - 2] != b']' {
+                    return Some(i);
                 }
-                return Some(i);
+                return None;
             });
 
             let bp = if let Some(bp) = bp {
-                bp
+                bp + 1
             } else {
-                println!("Line too long");
-                if (chunk.len() - self.chunk_start_at) > BACKBUF_SIZE {
-                    panic!("Line too long");
+                for i in 0..BACKBUF_SIZE - n {
+                    pre[i] = pre[i + n];
                 }
-                for i in self.chunk_start_at..chunk.len() {
-                    chunk[BACKBUF_SIZE - (chunk.len() - i)] = chunk[i];
+
+                for i in 0..n {
+                    pre[BACKBUF_SIZE - n + i] = post[i];
                 }
-                self.chunk_start_at = BACKBUF_SIZE - (chunk.len() - self.chunk_start_at);
+
+                if ch_start < n {
+                    return Err(anyhow::anyhow!("Backbuf too small, ch_start={}", ch_start));
+                }
+
+                ch_start -= n;
                 continue;
             };
 
-            let (to_process, remaining) = chunk.split_at_mut(bp + 1);
+            let next_remsize = n - bp;
 
-            self.chunk_range = Some((self.chunk_start_at, bp + 1));
-            // self.remaining_range = if remaining.len() > 0 {
-            //     Some((bp + 1, bp + 1 + remaining.len()))
-            // } else {
-            //     None
-            // };
+            if next_remsize > BACKBUF_SIZE {
+                return Err(anyhow::anyhow!(
+                    "Backbuf too small, remsize={}",
+                    next_remsize
+                ));
+            }
 
-            // println!(
-            //     "debug: {}",
-            //     std::str::from_utf8(
-            //         &to_process[self.chunk_range.unwrap().0..self.chunk_range.unwrap().0 + 60]
-            //     )
-            //     .unwrap()
-            // );
-
-            self.buf2[self.chunk_range.unwrap().0..self.chunk_range.unwrap().1].copy_from_slice(
-                &to_process[self.chunk_range.unwrap().0..self.chunk_range.unwrap().1],
-            );
-
-            self.chunk_start_at = BACKBUF_SIZE - remaining.len();
-            to_process[BACKBUF_SIZE - remaining.len()..BACKBUF_SIZE].copy_from_slice(remaining);
-
-            // println!(
-            //     "debug2: {}",
-            //     std::str::from_utf8(
-            //         &to_process[self.chunk_range.unwrap().0..self.chunk_range.unwrap().0 + 60]
-            //     )
-            //     .unwrap()
-            // );
-
-            // let content = &to_process[s..];
-
-            // self.buf_line_iter = Some(std::str::from_utf8(content).unwrap().lines());
-
-            return true;
+            return Ok(Some((ch_start, BACKBUF_SIZE + bp, next_remsize)));
         }
     }
 }
 
-impl Iterator for LichessGameIterator {
-    type Item = LichessGame;
+impl<'a> LichessGameIterator<'a> {
+    pub fn new(file: File) -> Self {
+        LichessGameIterator {
+            reader: LichessDatabaseReader::new(file),
+            r_start: 0,
+            r_size: 0,
+            buf: vec![0u8; CHUNK_SIZE + BACKBUF_SIZE],
+            // games: Vec::new(),
+            __marker: std::marker::PhantomData,
+        }
+    }
+}
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.state == LichessIteratorState::End {
-            return None;
+impl<'a> LichessGameIterator<'a> {
+    pub fn next<'b>(
+        &mut self,
+        storage: &'b mut LichessDatabaseBuf,
+        games: &'b mut Vec<LichessGame<'b>>,
+    ) {
+        if self.reader.state == LichessIteratorState::End {
+            return;
         }
 
-        if self.chunk_range.is_none() {
-            if !self.next_chunk() {
-                return None;
-            }
-        }
+        // if let Some(game) = self.games.pop() {
+        //     return Some(game);
+        // }
 
-        let mut range = self.chunk_range.unwrap();
+        let (ch_start, ch_end, rsize) =
+            match self
+                .reader
+                .next_chunk(self.r_start, self.r_size, storage.buf.as_mut_slice())
+            {
+                Ok(Some((ch_start, ch_end, rsize))) => (ch_start, ch_end, rsize),
+                Ok(None) => {
+                    println!("End of file");
+                    return;
+                }
+                Err(e) => {
+                    panic!("Error reading chunk: {}", e);
+                }
+            };
+
+        // self.buf.split_at()
+
+        // let lol = &self.buf[ch_start..ch_end];
 
         let mut game_state = LichessGameState::Tags;
-        let mut game = LichessGame::default();
-        game.data = self.buf2[range.0..range.1].to_vec();
 
-        let mut start_at = 0;
-        let mut num_bytes_read = 0;
+        let mut buf = storage.buf.as_slice();
+
         loop {
-            let mut lines = std::str::from_utf8(&game.data[start_at..]).unwrap().lines();
+            if buf.is_empty() {
+                break;
+            }
+
+            // &self.buf[ch_start..ch_end];
+            let mut game = LichessGame::new(&[]);
+            let mut lines = std::str::from_utf8(buf).unwrap().lines();
+
+            let mut num_bytes_read = 0;
 
             for line in &mut lines {
-                // println!("Line({start_at}): {}", line);
-                start_at += line.len() + 1;
                 num_bytes_read += line.len() + 1;
+
                 match game_state {
                     LichessGameState::Tags => {
                         if line.is_empty() {
@@ -269,7 +317,7 @@ impl Iterator for LichessGameIterator {
                         let tag = parts.next().unwrap();
                         let value = parts.next().unwrap_or("").trim_matches('"');
 
-                        let val_start = value.as_ptr() as usize - game.data.as_ptr() as usize;
+                        let val_start = value.as_ptr() as usize - self.buf.as_ptr() as usize;
                         let val = Some((val_start, val_start + value.len()));
 
                         // println!("Tag: {} Value: {}", tag, value);
@@ -294,38 +342,122 @@ impl Iterator for LichessGameIterator {
                         }
                     }
                     LichessGameState::Moves => {
-                        // println!("Moves line: {}", line);
                         if line.is_empty() {
-                            // let range = self.chunk_range.unwrap();
-                            self.chunk_range = Some((range.0 + num_bytes_read, range.1));
-                            if self.chunk_range.unwrap().0 >= self.chunk_range.unwrap().1 {
-                                println!("reset chunk range");
-                                self.chunk_range = None;
-                            }
-                            return Some(game);
+                            let (game_slice, rest) = buf.split_at(num_bytes_read);
+
+                            game.data = game_slice;
+                            games.push(game);
+                            // self.games.push(game);
+
+                            buf = &rest;
+
+                            break;
                         }
                     }
                 }
             }
-
-            println!("foo: ");
-            if !self.next_chunk() {
-                panic!("Unexpected end of file");
-            }
-            range = self.chunk_range.unwrap();
-            game.data.extend_from_slice(&self.buf2[range.0..range.1]);
-            // println!(
-            //     "next chunk: {}...",
-            //     std::str::from_utf8(&self.buf[range.0..range.0 + 30]).unwrap()
-            // );
-            num_bytes_read = 0;
         }
 
-        unreachable!();
+        println!("Read {} games", games.len());
+
+        self.r_start = ch_end;
+        self.r_size = rsize;
+
+        // self.games.pop()
+
+        // if self.chunk_range.is_none() {
+        //     if !self.next_chunk() {
+        //         return None;
+        //     }
+        // }
+
+        // let mut range = self.chunk_range.unwrap();
+
+        // let mut game_state = LichessGameState::Tags;
+        // let mut game = LichessGame::default();
+        // game.data = self.buf2[range.0..range.1].to_vec();
+
+        // let mut start_at = 0;
+        // let mut num_bytes_read = 0;
+        // loop {
+        //     let mut lines = std::str::from_utf8(&game.data[start_at..]).unwrap().lines();
+
+        //     for line in &mut lines {
+        //         // println!("Line({start_at}): {}", line);
+        //         start_at += line.len() + 1;
+        //         num_bytes_read += line.len() + 1;
+        //         match game_state {
+        //             LichessGameState::Tags => {
+        //                 if line.is_empty() {
+        //                     game_state = LichessGameState::Moves;
+        //                     continue;
+        //                 }
+
+        //                 if !line.starts_with('[') || !line.ends_with(']') {
+        //                     panic!("Invalid tag line: {}", line);
+        //                 }
+
+        //                 let mut parts = line[1..line.len() - 1].splitn(2, ' ');
+        //                 let tag = parts.next().unwrap();
+        //                 let value = parts.next().unwrap_or("").trim_matches('"');
+
+        //                 let val_start = value.as_ptr() as usize - game.data.as_ptr() as usize;
+        //                 let val = Some((val_start, val_start + value.len()));
+
+        //                 // println!("Tag: {} Value: {}", tag, value);
+
+        //                 match tag {
+        //                     "Event" => game.event = val,
+        //                     "Site" => game.site = val,
+        //                     "White" => game.white = val,
+        //                     "Black" => game.black = val,
+        //                     "Result" => game.result = val,
+        //                     "UTCDate" => game.utc_date = val,
+        //                     "UTCTime" => game.utc_time = val,
+        //                     "WhiteElo" => game.white_elo = val,
+        //                     "BlackElo" => game.black_elo = val,
+        //                     "WhiteRatingDiff" => game.white_rating_diff = val,
+        //                     "BlackRatingDiff" => game.black_rating_diff = val,
+        //                     "ECO" => game.eco = val,
+        //                     "Opening" => game.opening = val,
+        //                     "TimeControl" => game.time_control = val,
+        //                     "Termination" => game.termination = val,
+        //                     _ => {}
+        //                 }
+        //             }
+        //             LichessGameState::Moves => {
+        //                 // println!("Moves line: {}", line);
+        //                 if line.is_empty() {
+        //                     // let range = self.chunk_range.unwrap();
+        //                     self.chunk_range = Some((range.0 + num_bytes_read, range.1));
+        //                     if self.chunk_range.unwrap().0 >= self.chunk_range.unwrap().1 {
+        //                         println!("reset chunk range");
+        //                         self.chunk_range = None;
+        //                     }
+        //                     return Some(game);
+        //                 }
+        //             }
+        //         }
+        //     }
+
+        //     println!("foo: ");
+        //     if !self.next_chunk() {
+        //         panic!("Unexpected end of file");
+        //     }
+        //     range = self.chunk_range.unwrap();
+        //     game.data.extend_from_slice(&self.buf2[range.0..range.1]);
+        //     // println!(
+        //     //     "next chunk: {}...",
+        //     //     std::str::from_utf8(&self.buf[range.0..range.0 + 30]).unwrap()
+        //     // );
+        //     num_bytes_read = 0;
+        // }
+
+        // unreachable!();
     }
 }
 
-pub fn parse_lichess_database(path: &str) -> anyhow::Result<LichessGameIterator> {
+pub fn parse_lichess_database(path: &str) -> anyhow::Result<LichessGameIterator<'_>> {
     let input = File::open(path)?;
 
     Ok(LichessGameIterator::new(input))
