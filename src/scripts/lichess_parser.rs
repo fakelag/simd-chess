@@ -147,7 +147,7 @@ impl LichessGame {
         None
     }
 
-    pub fn moves(
+    pub fn parse_moves(
         &self,
         st: &LichessDatabaseBuf,
         board: &ChessGame,
@@ -282,13 +282,8 @@ impl LichessGameParser {
                 .next_chunk(self.r_start, self.r_size, storage.buf.as_mut_slice())
             {
                 Ok(Some((ch_start, ch_end, rsize))) => (ch_start, ch_end, rsize),
-                Ok(None) => {
-                    println!("End of file");
-                    return false;
-                }
-                Err(e) => {
-                    panic!("Error reading chunk: {}", e);
-                }
+                Ok(None) => return false,
+                Err(e) => panic!("Error reading chunk: {}", e),
             };
 
         let buf = storage.buf.as_slice()[ch_start..ch_end].as_ref();
