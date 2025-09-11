@@ -65,41 +65,9 @@ pub fn parse_pgn<'a>(
                 }
             }
             (PgnState::Move(side, both_moves), part) => {
-                let mut legal_moves = [0u16; 218];
-                let mut legal_moves_count = 0;
-                {
-                    let board_copy = board.clone();
-                    let mut move_list = [0u16; 256];
-                    for mv_index in 0..board.gen_moves_avx512::<false>(&tables, &mut move_list) {
-                        let mv = move_list[mv_index];
-
-                        let is_legal = unsafe { board.make_move(mv, tables, None) }
-                            && !board.in_check(tables, !board.b_move());
-
-                        *board = board_copy;
-
-                        if is_legal {
-                            if (mv & chess_v2::MV_FLAGS_PR_MASK) != chess_v2::MV_FLAGS_PR_QUEEN {
-                                legal_moves[legal_moves_count] = mv;
-                                legal_moves_count += 1;
-                            } else {
-                                let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
-                                legal_moves[legal_moves_count] =
-                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_QUEEN;
-                                legal_moves_count += 1;
-                                legal_moves[legal_moves_count] =
-                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK;
-                                legal_moves_count += 1;
-                                legal_moves[legal_moves_count] =
-                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP;
-                                legal_moves_count += 1;
-                                legal_moves[legal_moves_count] =
-                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
-                                legal_moves_count += 1;
-                            }
-                        }
-                    }
-                }
+                let mut pseudolegal_moves = [0u16; 256];
+                let pseudolegal_moves_count =
+                    board.gen_moves_avx512::<false>(&tables, &mut pseudolegal_moves);
 
                 let part_len = part.len();
 
@@ -107,8 +75,8 @@ pub fn parse_pgn<'a>(
                 let castle_king = part_len > 2 && &part[0..3] == "O-O";
 
                 let move_to_make = if castle_king || castle_queen {
-                    let mv_index = (0..legal_moves_count).find(|&mv_index| {
-                        let mv = legal_moves[mv_index];
+                    let mv_index = (0..pseudolegal_moves_count).find(|&mv_index| {
+                        let mv = pseudolegal_moves[mv_index];
 
                         let castle_flag = if castle_queen {
                             chess_v2::MV_FLAGS_CASTLE_QUEEN
@@ -117,14 +85,19 @@ pub fn parse_pgn<'a>(
                         };
 
                         if mv & chess_v2::MV_FLAGS == castle_flag {
-                            return true;
+                            let mut board_copy = board.clone();
+
+                            let is_legal = unsafe { board_copy.make_move(mv, tables, None) }
+                                && !board_copy.in_check(tables, !board_copy.b_move());
+
+                            return is_legal;
                         }
 
                         false
                     });
 
                     match mv_index {
-                        Some(mv_index) => legal_moves[mv_index],
+                        Some(mv_index) => pseudolegal_moves[mv_index],
                         None => {
                             return Err(anyhow::anyhow!(
                                 "No legal castling move found for pgn move: {}",
@@ -251,9 +224,11 @@ pub fn parse_pgn<'a>(
                             piece =
                                 chess_v2::PieceIndex::from((piece as usize) + (side as usize * 8));
 
+                            let board_copy = board.clone();
+
                             let mut found_move = None;
-                            for mv_index in 0..legal_moves_count {
-                                let mv = legal_moves[mv_index];
+                            for mv_index in 0..pseudolegal_moves_count {
+                                let mut mv = pseudolegal_moves[mv_index];
 
                                 let src_sq = (mv & 0x3F) as u8;
                                 let dst_sq = ((mv >> 6) & 0x3F) as u8;
@@ -292,31 +267,36 @@ pub fn parse_pgn<'a>(
                                 }
 
                                 if let Some(promote_to) = promote_to {
-                                    match (promote_to, mv & chess_v2::MV_FLAGS_PR_MASK) {
-                                        (
-                                            chess_v2::PieceIndex::WhiteQueen,
-                                            chess_v2::MV_FLAGS_PR_QUEEN,
-                                        )
-                                        | (
-                                            chess_v2::PieceIndex::WhiteRook,
-                                            chess_v2::MV_FLAGS_PR_ROOK,
-                                        )
-                                        | (
-                                            chess_v2::PieceIndex::WhiteBishop,
-                                            chess_v2::MV_FLAGS_PR_BISHOP,
-                                        )
-                                        | (
-                                            chess_v2::PieceIndex::WhiteKnight,
-                                            chess_v2::MV_FLAGS_PR_KNIGHT,
-                                        ) => {}
-                                        _ => {
-                                            continue;
-                                        }
+                                    let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
+                                    match mv & chess_v2::MV_FLAGS_PR_MASK {
+                                        chess_v2::MV_FLAGS_PR_QUEEN => match promote_to {
+                                            chess_v2::PieceIndex::WhiteQueen => {}
+                                            chess_v2::PieceIndex::WhiteRook => {
+                                                mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK;
+                                            }
+                                            chess_v2::PieceIndex::WhiteBishop => {
+                                                mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP;
+                                            }
+                                            chess_v2::PieceIndex::WhiteKnight => {
+                                                mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
+                                            }
+                                            _ => continue,
+                                        },
+                                        _ => continue,
                                     }
+                                }
+
+                                let is_legal = unsafe { board.make_move(mv, tables, None) }
+                                    && !board.in_check(tables, !board.b_move());
+
+                                *board = board_copy;
+                                if !is_legal {
+                                    continue;
                                 }
 
                                 match found_move {
                                     Some(existing) => {
+                                        *board = board_copy;
                                         return Err(anyhow::anyhow!(
                                             "Expected exactly one move for opening part: {}, found multiple: {} and {}",
                                             part,
