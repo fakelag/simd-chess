@@ -370,47 +370,89 @@ fn main() {
             let path = std::env::args()
                 .nth(2)
                 .expect("Expected path to Lichess database");
-            let it = scripts::lichess_parser::parse_lichess_database(&path).unwrap();
 
-            for game in it {
-                // println!("Event: {:?}", game.event());
-                // println!("Site: {:?}", game.site());
-                // println!("White: {:?}", game.white());
-                // println!("Black: {:?}", game.black());
-                // println!("Result: {:?}", game.result());
-                // println!("UTCDate: {:?}", game.utc_date());
-                // println!("UTCTime: {:?}", game.utc_time());
-                // println!("WhiteElo: {:?}", game.white_elo());
-                // println!("BlackElo: {:?}", game.black_elo());
-                // println!("WhiteRatingDiff: {:?}", game.white_rating_diff());
-                // println!("BlackRatingDiff: {:?}", game.black_rating_diff());
-                // println!("ECO: {:?}", game.eco());
-                // println!("Opening: {:?}", game.opening());
-                // println!("TimeControl: {:?}", game.time_control());
-                // println!("Termination: {:?}", game.termination());
+            let mut it = scripts::lichess_parser::parse_lichess_database(&path).unwrap();
 
-                // println!("site: {:?}", game.site());
-                std::hint::black_box(game.event());
-                std::hint::black_box(game.site());
-                std::hint::black_box(game.white());
-                std::hint::black_box(game.black());
-                std::hint::black_box(game.result());
-                std::hint::black_box(game.utc_date());
-                std::hint::black_box(game.utc_time());
-                std::hint::black_box(game.white_elo());
-                std::hint::black_box(game.black_elo());
-                std::hint::black_box(game.white_rating_diff());
-                std::hint::black_box(game.black_rating_diff());
-                std::hint::black_box(game.eco());
-                std::hint::black_box(game.opening());
-                std::hint::black_box(game.time_control());
-                std::hint::black_box(game.termination());
-                // break;
-                // if let Some("https://lichess.org/3rIn3t4O") = game.site() {
-                //     println!("Found game");
-                //     break;
-                // }
+            let mut storage = scripts::lichess_parser::LichessDatabaseBuf::new();
+
+            let mut games = Vec::new();
+
+            loop {
+                if !it.next_batch(&mut storage, &mut games) {
+                    break;
+                }
+
+                for game in games.drain(..) {
+                    // println!("Game: {:?}", game.site(&storage));
+                    std::hint::black_box(game.site(&storage));
+                }
             }
+
+            // let mut r_start = 0;
+            // let mut r_size = 0;
+
+            // let mut buf = vec![
+            //     0u8;
+            //     scripts::lichess_parser::CHUNK_SIZE
+            //         + scripts::lichess_parser::BACKBUF_SIZE
+            // ];
+
+            // for i in 0..9999999999999u64 {
+            //     match it.next_chunk(r_start, r_size, buf.as_mut_slice()) {
+            //         Ok(Some((ch_start, ch_end, rsize))) => {
+            //             r_start = ch_end;
+            //             r_size = rsize;
+            //             // buf[ch_start..ch_end];
+            //         }
+            //         Ok(None) => {
+            //             println!("End of file");
+            //             break;
+            //         }
+            //         Err(e) => {
+            //             println!("Error: {}", e);
+            //             break;
+            //         }
+            //     }
+            // }
+            // for game in it {
+            //     // println!("Event: {:?}", game.event());
+            //     // println!("Site: {:?}", game.site());
+            //     // println!("White: {:?}", game.white());
+            //     // println!("Black: {:?}", game.black());
+            //     // println!("Result: {:?}", game.result());
+            //     // println!("UTCDate: {:?}", game.utc_date());
+            //     // println!("UTCTime: {:?}", game.utc_time());
+            //     // println!("WhiteElo: {:?}", game.white_elo());
+            //     // println!("BlackElo: {:?}", game.black_elo());
+            //     // println!("WhiteRatingDiff: {:?}", game.white_rating_diff());
+            //     // println!("BlackRatingDiff: {:?}", game.black_rating_diff());
+            //     // println!("ECO: {:?}", game.eco());
+            //     // println!("Opening: {:?}", game.opening());
+            //     // println!("TimeControl: {:?}", game.time_control());
+            //     // println!("Termination: {:?}", game.termination());
+
+            //     // println!("site: {:?}", game.site());
+            //     std::hint::black_box(game.event());
+            //     std::hint::black_box(game.site());
+            //     std::hint::black_box(game.white());
+            //     std::hint::black_box(game.black());
+            //     std::hint::black_box(game.result());
+            //     std::hint::black_box(game.utc_date());
+            //     std::hint::black_box(game.utc_time());
+            //     std::hint::black_box(game.white_elo());
+            //     std::hint::black_box(game.black_elo());
+            //     std::hint::black_box(game.white_rating_diff());
+            //     std::hint::black_box(game.black_rating_diff());
+            //     std::hint::black_box(game.eco());
+            //     std::hint::black_box(game.opening());
+            //     std::hint::black_box(game.time_control());
+            //     std::hint::black_box(game.termination());
+            //     // break;
+            //     // if let Some("https://lichess.org/3rIn3t4O") = game.site() {
+            //     //     println!("Found game");
+            //     //     break;
+            //     // }
+            // }
 
             Ok(())
         }
