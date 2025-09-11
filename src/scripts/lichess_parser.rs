@@ -3,9 +3,14 @@ use std::{
     io::{BufReader, Read, Write},
 };
 
+use rand::Rng;
+
 use crate::{
-    engine::{chess_v2::ChessGame, tables},
-    pgn,
+    engine::{
+        chess_v2::{self, ChessGame},
+        tables,
+    },
+    pgn, util,
 };
 
 pub const CHUNK_SIZE: usize = 1024 * 1024 * 4; // 4 MB
@@ -36,6 +41,20 @@ pub enum LichessGameTermination {
     Abandoned,
     RulesInfraction,
     Unterminated,
+}
+
+pub enum MovePick {
+    First,
+    Random,
+}
+
+pub struct ExtractParams {
+    pub fcompleted_only: bool,
+    pub ffrom_ply: usize,
+    pub fto_ply: usize,
+    pub fmin_ply: usize,
+    pub fnumpositions: usize,
+    pub fpick: MovePick,
 }
 
 pub struct LichessDatabaseBuf {
@@ -354,8 +373,88 @@ impl LichessGameParser {
     }
 }
 
-pub fn parse_lichess_database(path: &str) -> anyhow::Result<LichessGameParser> {
-    let input = File::open(path)?;
+pub fn parse_lichess_database(db_path: &str) -> anyhow::Result<LichessGameParser> {
+    let input = File::open(db_path)?;
 
     Ok(LichessGameParser::new(input))
+}
+
+pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
+    let mut rng = rand::rng();
+
+    let mut it = parse_lichess_database(&db_path).unwrap();
+    let mut storage = LichessDatabaseBuf::new();
+    let mut games = Vec::new();
+
+    let tables = tables::Tables::new();
+    let mut board = chess_v2::ChessGame::new();
+    assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
+
+    let mut moves = Vec::new();
+    let mut buffer = String::new();
+    let mut game_count = 0;
+
+    'outer: loop {
+        if !it.next_batch(&mut storage, &mut games) {
+            break;
+        }
+
+        for game in games.drain(..) {
+            moves.clear();
+
+            if params.fcompleted_only
+                && game.termination(&storage) != Some(LichessGameTermination::Normal)
+            {
+                continue;
+            }
+
+            match game.parse_moves(&storage, &board, &tables, &mut moves) {
+                Some(Ok(())) => {
+                    if moves.len() < params.fmin_ply || moves.len() < params.ffrom_ply {
+                        continue;
+                    }
+
+                    let to_move = match params.fpick {
+                        MovePick::First => params.ffrom_ply,
+                        MovePick::Random => {
+                            let min = params.ffrom_ply;
+                            let max = moves.len().min(params.fto_ply);
+
+                            if min >= max {
+                                continue;
+                            }
+
+                            rng.random_range(min..max)
+                        }
+                    };
+
+                    let mut game_board = board.clone();
+
+                    for mv in moves.iter().take(to_move) {
+                        unsafe { game_board.make_move(*mv, &tables, None) };
+                    }
+
+                    buffer.push_str(&format!("{}\n", game_board.gen_fen()));
+                    game_count += 1;
+                }
+                Some(Err(e)) => {
+                    eprintln!(
+                        "Failed to parse moves for game {:?}: {}",
+                        game.site(&storage),
+                        e
+                    );
+                    continue;
+                }
+                None => continue,
+            };
+
+            if game_count >= params.fnumpositions {
+                break 'outer;
+            }
+        }
+    }
+
+    println!("Extracted {} games", game_count);
+
+    fs::write(out_path, buffer).unwrap();
 }

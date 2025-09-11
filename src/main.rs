@@ -4,19 +4,17 @@
 #![feature(cold_path)]
 #![feature(slice_swap_unchecked)]
 
-use std::arch::x86_64::*;
-use std::hint::black_box;
 use std::{cell::SyncUnsafeCell, thread::JoinHandle};
 
 use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use crate::engine::chess_v2::PieceIndex;
 use crate::engine::search::{SearchStrategy, transposition_v2};
+use crate::scripts::lichess_parser::{self};
 use crate::{
     engine::{
         chess, chess_v2,
-        search::{self, AbortSignal, SigAbort, search_params, transposition},
+        search::{self, AbortSignal, SigAbort, search_params},
         tables,
     },
     ui::chess_ui::ChessUi,
@@ -25,6 +23,7 @@ use crate::{
 mod clipb;
 mod engine;
 mod matchmaking;
+mod nnue;
 mod pgn;
 mod scripts;
 mod ui;
@@ -68,7 +67,7 @@ fn search_thread(
 
                 assert!(chess.zobrist_key() == chess.calc_initial_zobrist_key(tables));
 
-                let mut search_engine = search::v12_eval::Search::new(
+                let mut search_engine = search::v13_nnue::Search::new(
                     go.params,
                     chess,
                     tables,
@@ -76,6 +75,15 @@ fn search_thread(
                     go.repetition_table,
                     &go.sig,
                 );
+
+                // let mut search_engine = search::v12_eval::Search::new(
+                //     go.params,
+                //     chess,
+                //     tables,
+                //     tt,
+                //     go.repetition_table,
+                //     &go.sig,
+                // );
                 // let mut search_engine = search::v10_mvcache::Search::new(
                 //     go.params,
                 //     go.chess,
@@ -363,96 +371,45 @@ fn chess_uci(
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
+    let mode = std::env::args().nth(1).unwrap_or("gui".to_string());
 
     let result = match mode.as_str() {
-        "db" => {
-            let path = std::env::args()
-                .nth(2)
-                .expect("Expected path to Lichess database");
+        "lext" => {
+            let mut params = lichess_parser::ExtractParams {
+                ffrom_ply: 0,
+                fto_ply: 300,
+                fmin_ply: 0,
+                fnumpositions: 100,
+                fcompleted_only: false,
+                fpick: lichess_parser::MovePick::Random,
+            };
 
-            let mut it = scripts::lichess_parser::parse_lichess_database(&path).unwrap();
+            let mut arg_it = std::env::args().skip(2);
 
-            let mut storage = scripts::lichess_parser::LichessDatabaseBuf::new();
-
-            let mut games = Vec::new();
-
+            let mut in_path = None;
+            let mut out_path = None;
             loop {
-                if !it.next_batch(&mut storage, &mut games) {
-                    break;
-                }
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
 
-                for game in games.drain(..) {
-                    // println!("Game: {:?}", game.site(&storage));
-                    std::hint::black_box(game.site(&storage));
+                match arg.as_str() {
+                    "--from-ply" => params.ffrom_ply = arg_it.next().unwrap().parse().unwrap(),
+                    "--to-ply" => params.fto_ply = arg_it.next().unwrap().parse().unwrap(),
+                    "--min-ply" => params.fmin_ply = arg_it.next().unwrap().parse().unwrap(),
+                    "--count" => params.fnumpositions = arg_it.next().unwrap().parse().unwrap(),
+                    "--completed-only" => params.fcompleted_only = true,
+                    "--db" => in_path = Some(arg_it.next().unwrap()),
+                    "--out" => out_path = Some(arg_it.next().unwrap()),
+                    _ => panic!("Unknown argument: {}", arg),
                 }
             }
 
-            // let mut r_start = 0;
-            // let mut r_size = 0;
+            let in_path = in_path.expect("Expected path to Lichess database");
+            let out_path = out_path.expect("Expected output path");
 
-            // let mut buf = vec![
-            //     0u8;
-            //     scripts::lichess_parser::CHUNK_SIZE
-            //         + scripts::lichess_parser::BACKBUF_SIZE
-            // ];
-
-            // for i in 0..9999999999999u64 {
-            //     match it.next_chunk(r_start, r_size, buf.as_mut_slice()) {
-            //         Ok(Some((ch_start, ch_end, rsize))) => {
-            //             r_start = ch_end;
-            //             r_size = rsize;
-            //             // buf[ch_start..ch_end];
-            //         }
-            //         Ok(None) => {
-            //             println!("End of file");
-            //             break;
-            //         }
-            //         Err(e) => {
-            //             println!("Error: {}", e);
-            //             break;
-            //         }
-            //     }
-            // }
-            // for game in it {
-            //     // println!("Event: {:?}", game.event());
-            //     // println!("Site: {:?}", game.site());
-            //     // println!("White: {:?}", game.white());
-            //     // println!("Black: {:?}", game.black());
-            //     // println!("Result: {:?}", game.result());
-            //     // println!("UTCDate: {:?}", game.utc_date());
-            //     // println!("UTCTime: {:?}", game.utc_time());
-            //     // println!("WhiteElo: {:?}", game.white_elo());
-            //     // println!("BlackElo: {:?}", game.black_elo());
-            //     // println!("WhiteRatingDiff: {:?}", game.white_rating_diff());
-            //     // println!("BlackRatingDiff: {:?}", game.black_rating_diff());
-            //     // println!("ECO: {:?}", game.eco());
-            //     // println!("Opening: {:?}", game.opening());
-            //     // println!("TimeControl: {:?}", game.time_control());
-            //     // println!("Termination: {:?}", game.termination());
-
-            //     // println!("site: {:?}", game.site());
-            //     std::hint::black_box(game.event());
-            //     std::hint::black_box(game.site());
-            //     std::hint::black_box(game.white());
-            //     std::hint::black_box(game.black());
-            //     std::hint::black_box(game.result());
-            //     std::hint::black_box(game.utc_date());
-            //     std::hint::black_box(game.utc_time());
-            //     std::hint::black_box(game.white_elo());
-            //     std::hint::black_box(game.black_elo());
-            //     std::hint::black_box(game.white_rating_diff());
-            //     std::hint::black_box(game.black_rating_diff());
-            //     std::hint::black_box(game.eco());
-            //     std::hint::black_box(game.opening());
-            //     std::hint::black_box(game.time_control());
-            //     std::hint::black_box(game.termination());
-            //     // break;
-            //     // if let Some("https://lichess.org/3rIn3t4O") = game.site() {
-            //     //     println!("Found game");
-            //     //     break;
-            //     // }
-            // }
+            lichess_parser::lichess_extract(&in_path, &out_path, params);
 
             Ok(())
         }
