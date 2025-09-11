@@ -76,6 +76,8 @@ pub fn load_openings_from_dir(
         })
         .map(|entry| entry.path());
 
+    let mut moves_buf = Vec::new();
+
     for file_path in opening_files {
         let file = match std::fs::File::open(&file_path) {
             Ok(file) => file,
@@ -111,16 +113,19 @@ pub fn load_openings_from_dir(
             let name = parts.next().expect("Missing opening name in opening line");
             let move_str = parts.next().expect("Missing moves in opening line");
 
-            let moves = match crate::pgn::parse_pgn(move_str, &mut opening_board, tables) {
-                Ok(moves) => moves,
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse opening \"{}\" line in file {:?}: {}",
-                        name, file_path, e
-                    );
-                    continue;
-                }
-            };
+            moves_buf.clear();
+
+            let moves =
+                match crate::pgn::parse_pgn(move_str, &mut opening_board, tables, &mut moves_buf) {
+                    Ok(_) => &moves_buf,
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to parse opening \"{}\" line in file {:?}: {}",
+                            name, file_path, e
+                        );
+                        continue;
+                    }
+                };
 
             if is_board_checkmated(&opening_board, tables) {
                 // Skip checkmate openings
@@ -130,7 +135,7 @@ pub fn load_openings_from_dir(
             opening_list.push(OpeningMoves {
                 eco: eco.to_string(),
                 name: name.to_string(),
-                moves,
+                moves: moves.clone(),
             });
         }
     }

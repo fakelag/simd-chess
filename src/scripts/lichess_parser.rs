@@ -3,6 +3,11 @@ use std::{
     io::{BufReader, Read, Write},
 };
 
+use crate::{
+    engine::{chess_v2::ChessGame, tables},
+    pgn,
+};
+
 pub const CHUNK_SIZE: usize = 1024 * 1024 * 4; // 4 MB
 pub const BACKBUF_SIZE: usize = 1024 * 32; // 32 KB
 
@@ -62,6 +67,7 @@ pub struct LichessGame {
     opening: Option<(usize, usize)>,
     time_control: Option<(usize, usize)>,
     termination: Option<(usize, usize)>,
+    moves: Option<(usize, usize)>,
 }
 
 macro_rules! game_getter {
@@ -93,6 +99,7 @@ impl LichessGame {
             opening: None,
             time_control: None,
             termination: None,
+            moves: None,
         }
     }
 
@@ -138,6 +145,23 @@ impl LichessGame {
             });
         }
         None
+    }
+
+    pub fn moves(
+        &self,
+        st: &LichessDatabaseBuf,
+        board: &ChessGame,
+        tables: &tables::Tables,
+        moves: &mut Vec<u16>,
+    ) -> Option<anyhow::Result<()>> {
+        let moves_str = if let Some((start, end)) = self.moves {
+            unsafe { std::mem::transmute::<&[u8], &str>(&st.buf[start..end]) }
+        } else {
+            return None;
+        };
+
+        let result = pgn::parse_pgn(moves_str, &mut board.clone(), tables, moves);
+        Some(result)
     }
 }
 
@@ -316,7 +340,14 @@ impl LichessGameParser {
                         games.push(game);
                         game = LichessGame::new();
                         game_state = LichessGameState::Tags;
+                        continue;
                     }
+
+                    if !line.starts_with("1.") {
+                        continue;
+                    }
+                    let val_start = line.as_ptr() as usize - buf.as_ptr() as usize;
+                    game.moves = Some((ch_start + val_start, ch_start + val_start + line.len()));
                 }
             }
         }
