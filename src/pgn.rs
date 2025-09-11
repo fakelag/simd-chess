@@ -34,7 +34,7 @@ pub fn parse_pgn<'a>(
             (PgnState::Comment, _) => continue,
             (PgnState::MoveNumber, part) => {
                 match part {
-                    "1-0" | "0-1" | "1/2-1/2" => break,
+                    "1-0" | "0-1" | "1/2-1/2" | "*" => break,
                     _ => {}
                 }
                 if part.starts_with('{') {
@@ -111,7 +111,7 @@ pub fn parse_pgn<'a>(
                             pgn_state = PgnState::Comment;
                             continue;
                         }
-                        "1-0" | "0-1" | "1/2-1/2" => break,
+                        "1-0" | "0-1" | "1/2-1/2" | "*" => break,
                         _ => {
                             let mut dst_file: Option<u8> = None;
                             let mut src_file: Option<u8> = None;
