@@ -65,54 +65,73 @@ pub fn parse_pgn<'a>(
                 }
             }
             (PgnState::Move(side, both_moves), part) => {
-                let mut move_list = [0u16; 256];
-
-                let move_list = (0..board.gen_moves_avx512::<false>(&tables, &mut move_list))
-                    .map(|mv_index| -> Vec<u16> {
+                let mut legal_moves = [0u16; 218];
+                let mut legal_moves_count = 0;
+                {
+                    let board_copy = board.clone();
+                    let mut move_list = [0u16; 256];
+                    for mv_index in 0..board.gen_moves_avx512::<false>(&tables, &mut move_list) {
                         let mv = move_list[mv_index];
 
-                        if (mv & chess_v2::MV_FLAGS_PR_MASK) != chess_v2::MV_FLAGS_PR_QUEEN {
-                            return vec![mv];
+                        let is_legal = unsafe { board.make_move(mv, tables, None) }
+                            && !board.in_check(tables, !board.b_move());
+
+                        *board = board_copy;
+
+                        if is_legal {
+                            if (mv & chess_v2::MV_FLAGS_PR_MASK) != chess_v2::MV_FLAGS_PR_QUEEN {
+                                legal_moves[legal_moves_count] = mv;
+                                legal_moves_count += 1;
+                            } else {
+                                let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
+                                legal_moves[legal_moves_count] =
+                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_QUEEN;
+                                legal_moves_count += 1;
+                                legal_moves[legal_moves_count] =
+                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK;
+                                legal_moves_count += 1;
+                                legal_moves[legal_moves_count] =
+                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP;
+                                legal_moves_count += 1;
+                                legal_moves[legal_moves_count] =
+                                    mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
+                                legal_moves_count += 1;
+                            }
                         }
-
-                        let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
-
-                        vec![
-                            mv_unpromoted | chess_v2::MV_FLAGS_PR_QUEEN,
-                            mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK,
-                            mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP,
-                            mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT,
-                        ]
-                    })
-                    .flatten()
-                    .collect::<Vec<_>>();
-                let move_count = move_list.len();
+                    }
+                }
 
                 let part_len = part.len();
 
                 let castle_queen = part_len > 4 && &part[0..5] == "O-O-O";
                 let castle_king = part_len > 2 && &part[0..3] == "O-O";
 
-                let pseudolegal_moves = if castle_king || castle_queen {
-                    let found_moves = (0..move_count)
-                        .filter_map(|mv_index| {
-                            let mv = move_list[mv_index];
+                let move_to_make = if castle_king || castle_queen {
+                    let mv_index = (0..legal_moves_count).find(|&mv_index| {
+                        let mv = legal_moves[mv_index];
 
-                            let castle_flag = if castle_queen {
-                                chess_v2::MV_FLAGS_CASTLE_QUEEN
-                            } else {
-                                chess_v2::MV_FLAGS_CASTLE_KING
-                            };
+                        let castle_flag = if castle_queen {
+                            chess_v2::MV_FLAGS_CASTLE_QUEEN
+                        } else {
+                            chess_v2::MV_FLAGS_CASTLE_KING
+                        };
 
-                            if mv & chess_v2::MV_FLAGS == castle_flag {
-                                Some(mv)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>();
+                        if mv & chess_v2::MV_FLAGS == castle_flag {
+                            return true;
+                        }
 
-                    found_moves
+                        false
+                    });
+
+                    match mv_index {
+                        Some(mv_index) => legal_moves[mv_index],
+                        None => {
+                            return Err(anyhow::anyhow!(
+                                "No legal castling move found for pgn move: {}",
+                                part
+                            ));
+                        }
+                    }
                 } else {
                     match part {
                         "{" => {
@@ -232,112 +251,97 @@ pub fn parse_pgn<'a>(
                             piece =
                                 chess_v2::PieceIndex::from((piece as usize) + (side as usize * 8));
 
-                            let found_moves = (0..move_count)
-                                .filter_map(|mv_index| {
-                                    let mv = move_list[mv_index];
+                            let mut found_move = None;
+                            for mv_index in 0..legal_moves_count {
+                                let mv = legal_moves[mv_index];
 
-                                    let src_sq = (mv & 0x3F) as u8;
-                                    let dst_sq = ((mv >> 6) & 0x3F) as u8;
+                                let src_sq = (mv & 0x3F) as u8;
+                                let dst_sq = ((mv >> 6) & 0x3F) as u8;
 
-                                    if let Some(src_file) = src_file {
-                                        if src_sq % 8 != src_file {
-                                            return None;
+                                if let Some(src_file) = src_file {
+                                    if src_sq % 8 != src_file {
+                                        continue;
+                                    }
+                                }
+
+                                if let Some(src_rank) = src_rank {
+                                    if src_sq / 8 != src_rank {
+                                        continue;
+                                    }
+                                }
+
+                                if dst_sq % 8 != dst_file.unwrap() {
+                                    continue;
+                                }
+
+                                if dst_sq / 8 != dst_rank.unwrap() {
+                                    continue;
+                                }
+
+                                if is_capture
+                                    && (mv & chess_v2::MV_FLAG_EPCAP) != chess_v2::MV_FLAG_EPCAP
+                                    && board.piece_at(dst_sq) == PieceIndex::WhiteNullPiece as usize
+                                {
+                                    continue;
+                                }
+
+                                let sq_piece = board.piece_at(src_sq);
+
+                                if sq_piece != piece as usize {
+                                    continue;
+                                }
+
+                                if let Some(promote_to) = promote_to {
+                                    match (promote_to, mv & chess_v2::MV_FLAGS_PR_MASK) {
+                                        (
+                                            chess_v2::PieceIndex::WhiteQueen,
+                                            chess_v2::MV_FLAGS_PR_QUEEN,
+                                        )
+                                        | (
+                                            chess_v2::PieceIndex::WhiteRook,
+                                            chess_v2::MV_FLAGS_PR_ROOK,
+                                        )
+                                        | (
+                                            chess_v2::PieceIndex::WhiteBishop,
+                                            chess_v2::MV_FLAGS_PR_BISHOP,
+                                        )
+                                        | (
+                                            chess_v2::PieceIndex::WhiteKnight,
+                                            chess_v2::MV_FLAGS_PR_KNIGHT,
+                                        ) => {}
+                                        _ => {
+                                            continue;
                                         }
                                     }
+                                }
 
-                                    if let Some(src_rank) = src_rank {
-                                        if src_sq / 8 != src_rank {
-                                            return None;
-                                        }
+                                match found_move {
+                                    Some(existing) => {
+                                        return Err(anyhow::anyhow!(
+                                            "Expected exactly one move for opening part: {}, found multiple: {} and {}",
+                                            part,
+                                            util::move_string(existing),
+                                            util::move_string(mv),
+                                        ));
                                     }
-
-                                    if dst_sq % 8 != dst_file.unwrap() {
-                                        return None;
+                                    None => {
+                                        found_move = Some(mv);
                                     }
+                                }
+                            }
 
-                                    if dst_sq / 8 != dst_rank.unwrap() {
-                                        return None;
-                                    }
-
-                                    if is_capture
-                                        && (mv & chess_v2::MV_FLAG_EPCAP) != chess_v2::MV_FLAG_EPCAP
-                                        && board.piece_at(dst_sq)
-                                            == PieceIndex::WhiteNullPiece as usize
-                                    {
-                                        return None;
-                                    }
-
-                                    let sq_piece = board.piece_at(src_sq);
-
-                                    if sq_piece != piece as usize {
-                                        return None;
-                                    }
-
-                                    if let Some(promote_to) = promote_to {
-                                        match (promote_to, mv & chess_v2::MV_FLAGS_PR_MASK) {
-                                            (
-                                                chess_v2::PieceIndex::WhiteQueen,
-                                                chess_v2::MV_FLAGS_PR_QUEEN,
-                                            )
-                                            | (
-                                                chess_v2::PieceIndex::WhiteRook,
-                                                chess_v2::MV_FLAGS_PR_ROOK,
-                                            )
-                                            | (
-                                                chess_v2::PieceIndex::WhiteBishop,
-                                                chess_v2::MV_FLAGS_PR_BISHOP,
-                                            )
-                                            | (
-                                                chess_v2::PieceIndex::WhiteKnight,
-                                                chess_v2::MV_FLAGS_PR_KNIGHT,
-                                            ) => {}
-                                            _ => {
-                                                return None;
-                                            }
-                                        }
-                                    }
-
-                                    Some(mv)
-                                })
-                                .collect::<Vec<_>>();
-
-                            found_moves
+                            match found_move {
+                                Some(mv) => mv,
+                                None => {
+                                    return Err(anyhow::anyhow!(
+                                        "Expected exactly one move for opening part: {}, found none",
+                                        part,
+                                    ));
+                                }
+                            }
                         }
                     }
                 };
-
-                let legal_moves = pseudolegal_moves
-                    .iter()
-                    .filter(|&&mv| {
-                        let mut board_copy = board.clone();
-
-                        if unsafe { !board_copy.make_move(mv, tables, None) } {
-                            return false;
-                        }
-
-                        if board_copy.in_check(tables, !board_copy.b_move()) {
-                            return false;
-                        }
-
-                        true
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-
-                if legal_moves.len() != 1 {
-                    return Err(anyhow::anyhow!(
-                        "Expected exactly one move for opening part: {}, found: {} ({})",
-                        part,
-                        legal_moves.len(),
-                        legal_moves
-                            .iter()
-                            .map(|mv| util::move_string(*mv))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-
-                let move_to_make = legal_moves[0];
 
                 moves_out.push(move_to_make);
 
@@ -416,7 +420,7 @@ mod tests {
             super::parse_pgn(pgn, &mut board, &tables, &mut moves)
                 .unwrap_err()
                 .to_string(),
-            "Expected exactly one move for opening part: Nf7, found: 0 ()"
+            "Expected exactly one move for opening part: Nf7, found none"
         );
     }
 
