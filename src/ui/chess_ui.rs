@@ -1,6 +1,9 @@
 use crate::{
     engine::*,
-    matchmaking::matchmaking::{Matchmaking, NEXT_MATCH_DELAY_SECONDS, VersusState},
+    matchmaking::{
+        self,
+        matchmaking::{Matchmaking, NEXT_MATCH_DELAY_SECONDS, VersusState},
+    },
     ui::square_ui::SquareUi,
     uicomponents::text_input::ImguiTextInput,
     util::{self},
@@ -12,7 +15,6 @@ pub struct ChessUi {
     ask_promotion: Option<(u8, u8)>,
     matchmaking: Matchmaking,
     squares: Vec<SquareUi>,
-    tt: search::transposition_v2::TranspositionTable,
 
     input_fen: ImguiTextInput,
     input_white_engine: ImguiTextInput,
@@ -51,12 +53,6 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
         util::time_format(black_ms as u64),
         black_engine.path
     ));
-
-    if let Some(opening) = &matchmaking.versus_current_opening {
-        ui.text_wrapped(format!("Opening ({}): {}", opening.eco, opening.name));
-    } else {
-        ui.text_wrapped("Opening: None");
-    }
 
     ui.separator();
 
@@ -102,7 +98,7 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
                         "Done"
                     },
                     games_played,
-                    versus_match.num_matches
+                    stats.num_matches
                 );
                 ui.set_cursor_pos([
                     content_region_avail[0] / 2.0 - ui.calc_text_size(&status_text)[0] / 2.0,
@@ -182,7 +178,7 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
                         index + 1,
                         match_info.stats.engine1_name,
                         match_info.stats.engine2_name,
-                        match_info.num_matches
+                        match_info.stats.num_matches
                     ));
                 }
             }
@@ -198,6 +194,11 @@ impl ChessUi {
             }
         }
 
+        // let writer =
+        //     sfbinpack::CompressedTrainingDataEntryWriter::new("nnue/test.binpack", false).unwrap();
+
+        // let matchmaking =
+        //     Matchmaking::new_with_collector(fen, Arc::new(Mutex::new(writer))).unwrap();
         let matchmaking = Matchmaking::new(fen).unwrap();
 
         Self {
@@ -205,7 +206,6 @@ impl ChessUi {
             squares,
             from_square: None,
             ask_promotion: None,
-            tt: search::transposition_v2::TranspositionTable::new(4),
             input_fen: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
                 Some("startpos moves e2e4"),
@@ -213,12 +213,12 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("simd-chess.exe"),
+                Some("v13_nnue.exe"),
                 None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v10_mvcache_ab.exe"),
+                Some("v11_opt.exe"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(
@@ -452,10 +452,6 @@ impl ChessUi {
                         self.matchmaking.board.material()[1]
                     ));
 
-                    {
-                        // ui.text(format!("v12 static_eval: {}", search_engine.evaluate()));
-                    }
-
                     // ui.text(format!(
                     //     "estimated move count: {}",
                     //     chess_v2::ChessGame::from(self.matchmaking.board).estimate_move_count(
@@ -485,10 +481,7 @@ impl ChessUi {
                             let stats = self.matchmaking.versus_stats();
                             ui.text(format!(
                                 "Versus match in progress (game {} of {})",
-                                (stats.stats.engine1_wins
-                                    + stats.stats.engine2_wins
-                                    + stats.stats.draws)
-                                    + 1,
+                                (stats.engine1_wins + stats.engine2_wins + stats.draws) + 1,
                                 stats.num_matches
                             ));
                             if ui.button("End Versus") {
@@ -503,10 +496,7 @@ impl ChessUi {
                             let stats = self.matchmaking.versus_stats();
                             ui.text(format!(
                                 "Versus match paused (game {} of {})",
-                                (stats.stats.engine1_wins
-                                    + stats.stats.engine2_wins
-                                    + stats.stats.draws)
-                                    + 1,
+                                (stats.engine1_wins + stats.engine2_wins + stats.draws) + 1,
                                 stats.num_matches
                             ));
                             if ui.button("End Versus") {
@@ -525,9 +515,7 @@ impl ChessUi {
                             let stats = self.matchmaking.versus_stats();
                             ui.text(format!(
                                 "Versus match done (game {} of {})",
-                                stats.stats.engine1_wins
-                                    + stats.stats.engine2_wins
-                                    + stats.stats.draws,
+                                stats.engine1_wins + stats.engine2_wins + stats.draws,
                                 stats.num_matches
                             ));
                             if ui.button("Reset Versus") {
@@ -672,12 +660,20 @@ impl ChessUi {
             ui.checkbox("Start paused", &mut self.input_start_paused);
 
             if ui.button("Queue Versus Match") {
+                let feeder: Option<Box<dyn matchmaking::matchmaking::PositionFeeder>> =
+                    if self.input_use_opening_book {
+                        Some(Box::new(
+                            matchmaking::openings::OpeningFeeder::new().unwrap(),
+                        ))
+                    } else {
+                        None
+                    };
                 if let Err(err) = self.matchmaking.versus_start(
                     &self.input_white_engine.buf,
                     &self.input_black_engine.buf,
                     self.input_num_games.buf.parse().unwrap_or(1),
                     self.input_start_paused,
-                    self.input_use_opening_book,
+                    feeder,
                 ) {
                     eprintln!("Failed to spawn engines: {}", err);
                 }

@@ -1,3 +1,3 @@
 pub mod matchmaking;
-mod openings;
+pub mod openings;
 mod process;

@@ -1,8 +1,5 @@
 use std::collections::VecDeque;
 
-use crate::matchmaking::openings::OpeningBook;
-use crate::matchmaking::openings::OpeningMoves;
-use crate::matchmaking::openings::load_openings_from_dir;
 use crate::{
     engine::{chess_v2, tables},
     matchmaking::process::{EngineProcess, EngineState},
@@ -10,6 +7,10 @@ use crate::{
 };
 
 pub const NEXT_MATCH_DELAY_SECONDS: u64 = 1;
+
+pub trait PositionFeeder {
+    fn next_position(&mut self) -> Option<String>;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersusState {
@@ -34,14 +35,13 @@ pub struct VersusStats {
     pub engine1_wins: usize,
     pub engine2_wins: usize,
     pub draws: usize,
+    pub num_matches: usize,
 }
 
-#[derive(Debug, Clone)]
 pub struct VersusMatch {
     pub stats: VersusStats,
-    pub num_matches: usize,
     pub start_paused: bool,
-    pub use_opening_book: bool,
+    pub feeder: Option<Box<dyn PositionFeeder>>,
     pub is_ongoing: bool,
 }
 
@@ -56,16 +56,13 @@ pub struct Matchmaking {
     engine_white: usize,
     is_startpos: bool,
     engine_command_buf: String,
-    opening_book: OpeningBook,
 
-    pub versus_current_opening: Option<OpeningMoves>,
     pub versus_state: VersusState,
     pub versus_matches_left: usize,
     pub versus_draws: usize,
     pub versus_btime_ms: usize,
     pub versus_wtime_ms: usize,
     pub versus_move_start_time: Option<std::time::Instant>,
-    pub versus_opening_book_after_matches: Option<u8>,
 
     pub versus_queue: VecDeque<VersusMatch>,
     pub versus_matches: VecDeque<VersusMatch>,
@@ -83,8 +80,6 @@ impl Matchmaking {
             engines: [None, None],
             engine_white: 0,
             engine_command_buf: String::new(),
-            opening_book: OpeningBook::new(Vec::new()),
-            versus_current_opening: None,
 
             versus_state: VersusState::Idle,
             versus_matches_left: 0,
@@ -92,7 +87,6 @@ impl Matchmaking {
             versus_btime_ms: 0,
             versus_wtime_ms: 0,
             versus_move_start_time: None,
-            versus_opening_book_after_matches: None,
 
             versus_queue: VecDeque::new(),
             versus_matches: VecDeque::new(),
@@ -239,11 +233,13 @@ impl Matchmaking {
                 .unwrap();
             engine.versus_wins += 1;
         } else {
-            match self.board.check_game_state(
+            let game_state = self.board.check_game_state(
                 &self.tables,
                 self.legal_moves.is_empty(),
                 self.board.b_move(),
-            ) {
+            );
+
+            match game_state {
                 chess_v2::GameState::Checkmate(side) => {
                     let engine = self.get_engine_for_side_mut(side).unwrap();
                     engine.versus_wins += 1;
@@ -293,7 +289,7 @@ impl Matchmaking {
         engine_black: &str,
         num_matches: usize,
         start_paused: bool,
-        use_opening_book: bool,
+        feeder: Option<Box<dyn PositionFeeder>>,
     ) -> anyhow::Result<()> {
         self.versus_queue.push_back(VersusMatch {
             stats: VersusStats {
@@ -302,10 +298,10 @@ impl Matchmaking {
                 engine1_wins: 0,
                 engine2_wins: 0,
                 draws: 0,
+                num_matches,
             },
-            num_matches,
+            feeder,
             start_paused,
-            use_opening_book,
             is_ongoing: false,
         });
 
@@ -336,16 +332,7 @@ impl Matchmaking {
         self.engines[0] = Some(EngineProcess::new(&next_versus.stats.engine1_name)?);
         self.engines[1] = Some(EngineProcess::new(&next_versus.stats.engine2_name)?);
         self.engine_white = 0;
-        self.versus_opening_book_after_matches = if next_versus.use_opening_book && self.is_startpos
-        {
-            // Use openings after playing 2 games from startpos
-            Some(2)
-        } else {
-            None
-        };
-        self.versus_matches_left = next_versus.num_matches;
-
-        self.load_openings()?;
+        self.versus_matches_left = next_versus.stats.num_matches;
 
         let start_paused = next_versus.start_paused;
         next_versus.is_ongoing = true;
@@ -433,8 +420,6 @@ impl Matchmaking {
         self.engines[0] = None;
         self.engines[1] = None;
         self.engine_white = 0;
-        self.versus_opening_book_after_matches = None;
-        self.versus_current_opening = None;
         self.reset_timers();
 
         let fen_copy = self.fen.clone();
@@ -456,85 +441,51 @@ impl Matchmaking {
         self.engines[engine_white_index].as_mut()
     }
 
-    pub fn versus_stats(&self) -> VersusMatch {
+    pub fn versus_stats(&self) -> VersusStats {
         self.versus_matches.front().map_or(
-            VersusMatch {
-                stats: VersusStats {
-                    engine1_name: "<none>".to_string(),
-                    engine2_name: "<none>".to_string(),
-                    engine1_wins: 0,
-                    engine2_wins: 0,
-                    draws: 0,
-                },
+            VersusStats {
+                engine1_name: "<none>".to_string(),
+                engine2_name: "<none>".to_string(),
+                engine1_wins: 0,
+                engine2_wins: 0,
+                draws: 0,
                 num_matches: 0,
-                start_paused: false,
-                use_opening_book: false,
-                is_ongoing: false,
             },
-            |match_info| match_info.clone(),
+            |match_info| match_info.stats.clone(),
         )
     }
 
-    fn load_openings(&mut self) -> anyhow::Result<()> {
-        if self.is_startpos {
-            let mut opening_list = Vec::new();
-            load_openings_from_dir(&self.board, &self.tables, &mut opening_list)?;
-
-            self.opening_book = OpeningBook::new(opening_list);
-        } else {
-            println!(
-                "Not loading openings for a non-startpos FEN \"{}\"",
-                self.fen
-            );
-            self.opening_book = OpeningBook::new(Vec::new());
-        }
-
-        Ok(())
-    }
-
     fn on_new_match(&mut self) -> bool {
-        let current_match = self.versus_matches.front().unwrap();
+        let current_match = self.versus_matches.front_mut().unwrap();
 
         println!(
             "Starting a new match match between {} vs {}",
             current_match.stats.engine1_name, current_match.stats.engine2_name,
         );
 
-        match self.versus_opening_book_after_matches {
-            Some(0) => {}
-            Some(matches_left) => {
-                self.versus_opening_book_after_matches = Some(matches_left - 1);
-                return true;
-            }
+        let feeder = match &mut current_match.feeder {
+            Some(feeder) => feeder,
+            None => return true,
+        };
+
+        let next_position = match feeder.next_position() {
+            Some(fen) => fen,
             None => {
-                self.versus_current_opening = None;
-                return true;
+                println!("Feeder has no more positions, ending versus mode");
+                return false;
             }
-        }
+        };
 
-        if self.versus_current_opening.is_none() || self.versus_matches_left % 2 == 0 {
-            let next_opening = self.opening_book.next();
+        println!("Feeder provided position: {}", next_position);
 
-            match next_opening {
-                Some(opening) => {
-                    println!("Using opening: {}", opening.name);
-                    self.versus_current_opening = Some(opening);
-                }
-                None => {
-                    println!("Opening book exhausted, signaling versus mode to end");
-                    return false;
-                }
-            }
-        }
-
-        let opening = self.versus_current_opening.as_ref().unwrap().clone();
-
-        for mv in &opening.moves {
-            if self.make_move_with_validation(*mv).is_err() {
-                panic!(
-                    "Failed to make move {} from opening book",
-                    util::move_string(*mv)
+        match self.load_fen(&next_position) {
+            Ok(()) => {}
+            Err(e) => {
+                println!(
+                    "Failed to load position from feeder: {}, ending versus mode",
+                    e
                 );
+                return false;
             }
         }
 

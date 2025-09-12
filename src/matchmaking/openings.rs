@@ -1,6 +1,83 @@
 use std::io::BufRead;
 
-use crate::engine::{chess_v2, tables};
+use crate::{
+    engine::{chess_v2, tables},
+    matchmaking::matchmaking::PositionFeeder,
+    util,
+};
+
+pub struct OpeningFeeder {
+    opening_book: OpeningBook,
+    tables: tables::Tables,
+    startpos: chess_v2::ChessGame,
+    fen: String,
+    next_op: usize,
+}
+
+impl OpeningFeeder {
+    pub fn new() -> anyhow::Result<Self> {
+        let tables = tables::Tables::new();
+        let mut startpos = chess_v2::ChessGame::new();
+
+        startpos
+            .load_fen(util::FEN_STARTPOS, &tables)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load startpos FEN ({}): {}",
+                    util::FEN_STARTPOS,
+                    e
+                )
+            })?;
+
+        let mut opening_list = Vec::new();
+        load_openings_from_dir(&startpos, &tables, &mut opening_list)?;
+
+        Ok(Self {
+            tables,
+            startpos,
+            opening_book: OpeningBook::new(opening_list),
+            fen: util::FEN_STARTPOS.to_string(),
+            next_op: 2, // Return startpos for first two calls
+        })
+    }
+}
+
+impl PositionFeeder for OpeningFeeder {
+    fn next_position(&mut self) -> Option<String> {
+        if self.next_op > 0 {
+            self.next_op -= 1;
+            return Some(self.fen.clone());
+        }
+
+        let opening = match self.opening_book.next() {
+            Some(opening) => opening,
+            None => return None,
+        };
+
+        let mut board = self.startpos.clone();
+
+        for mv in opening.moves {
+            if unsafe { !board.make_move(mv, &self.tables, None) } {
+                panic!(
+                    "Failed to make opening move {} for opening \"{}\"",
+                    mv, opening.name
+                );
+            }
+
+            if board.in_check(&self.tables, !board.b_move()) {
+                panic!(
+                    "Opening move {} leaves king in check for opening \"{}\"",
+                    mv, opening.name
+                );
+            }
+        }
+
+        self.fen = board.gen_fen();
+        self.next_op = 1; // Repeat this position once
+
+        Some(self.fen.clone())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OpeningMoves {
