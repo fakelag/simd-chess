@@ -19,6 +19,7 @@ struct EngineInternal {
 
 pub struct EngineProcess {
     pub path: String,
+    pub go_params: String,
     pub versus_wins: usize,
 
     read_handle: Option<std::thread::JoinHandle<()>>,
@@ -49,7 +50,7 @@ impl EngineInternal {
                 self.bestmove = Some(bestmove.to_string());
             }
             _ => {
-                eprintln!("[{}] stdout: {}", self.name, line);
+                // eprintln!("[{}] stdout: {}", self.name, line);
             }
         }
 
@@ -97,6 +98,7 @@ impl EngineProcess {
 
         let engine = EngineProcess {
             int,
+            go_params: String::new(),
             path: path.to_string(),
             read_handle: Some(read_handle),
             versus_wins: 0,
@@ -127,10 +129,12 @@ impl EngineProcess {
 
         // @todo - Hack to preserve wins status, move wins outside of process.rs eventually
         let wins = self.versus_wins;
+        let args = self.go_params.clone();
 
         *self = EngineProcess::new(&self.path)?;
 
         self.versus_wins = wins;
+        self.go_params = args;
 
         Ok(())
     }

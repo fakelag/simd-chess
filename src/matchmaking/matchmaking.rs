@@ -51,7 +51,7 @@ pub struct Matchmaking {
     pub tables: tables::Tables,
     pub legal_moves: Vec<u16>,
 
-    moves: Vec<String>,
+    pub moves: Vec<String>,
     engines: [Option<EngineProcess>; 2],
     engine_white: usize,
     is_startpos: bool,
@@ -63,6 +63,7 @@ pub struct Matchmaking {
     pub versus_btime_ms: usize,
     pub versus_wtime_ms: usize,
     pub versus_move_start_time: Option<std::time::Instant>,
+    pub versus_autostart: bool,
 
     pub versus_queue: VecDeque<VersusMatch>,
     pub versus_matches: VecDeque<VersusMatch>,
@@ -87,6 +88,7 @@ impl Matchmaking {
             versus_btime_ms: 0,
             versus_wtime_ms: 0,
             versus_move_start_time: None,
+            versus_autostart: true,
 
             versus_queue: VecDeque::new(),
             versus_matches: VecDeque::new(),
@@ -169,31 +171,10 @@ impl Matchmaking {
     pub fn poll(&mut self) {
         match self.versus_state {
             VersusState::NextMatch(start_time, start_paused) => {
-                if start_time.elapsed().as_secs() >= NEXT_MATCH_DELAY_SECONDS {
-                    // Reset board and swap sides
-                    let fen_copy = self.fen.clone();
-                    self.load_fen(&fen_copy)
-                        .expect("Failed to reset board after match end");
-                    self.engine_white = (self.engine_white + 1) % 2;
-                    self.versus_state = if start_paused {
-                        VersusState::Paused
-                    } else {
-                        VersusState::InProgress
-                    };
-
-                    if self.versus_matches_left > 0 {
-                        if self.on_new_match() {
-                            if self.versus_state == VersusState::InProgress {
-                                self.uci_nextmove();
-                            }
-                        } else {
-                            self.versus_matches_left = 0;
-                            self.versus_state = VersusState::Done;
-                        }
-                    } else {
-                        eprintln!("No matches left, ending versus mode");
-                        self.versus_state = VersusState::Done;
-                    }
+                if self.versus_autostart
+                    && start_time.elapsed().as_secs() >= NEXT_MATCH_DELAY_SECONDS
+                {
+                    self.versus_nextgame(start_paused);
                 }
 
                 return;
@@ -314,6 +295,11 @@ impl Matchmaking {
         Ok(())
     }
 
+    pub fn set_go_params(&mut self, params: &str) {
+        self.engines[0].as_mut().unwrap().go_params = params.to_string();
+        self.engines[1].as_mut().unwrap().go_params = params.to_string();
+    }
+
     pub fn next_versus(&mut self) -> anyhow::Result<()> {
         let mut next_versus = match self.versus_queue.pop_front() {
             Some(v) => v,
@@ -331,6 +317,9 @@ impl Matchmaking {
 
         self.engines[0] = Some(EngineProcess::new(&next_versus.stats.engine1_name)?);
         self.engines[1] = Some(EngineProcess::new(&next_versus.stats.engine2_name)?);
+
+        self.set_go_params("movetime 100");
+
         self.engine_white = 0;
         self.versus_matches_left = next_versus.stats.num_matches;
 
@@ -356,6 +345,33 @@ impl Matchmaking {
         }
 
         Ok(())
+    }
+
+    pub fn versus_nextgame(&mut self, start_paused: bool) {
+        // Reset board and swap sides
+        let fen_copy = self.fen.clone();
+        self.load_fen(&fen_copy)
+            .expect("Failed to reset board after match end");
+        self.engine_white = (self.engine_white + 1) % 2;
+        self.versus_state = if start_paused {
+            VersusState::Paused
+        } else {
+            VersusState::InProgress
+        };
+
+        if self.versus_matches_left > 0 {
+            if self.on_new_match() {
+                if self.versus_state == VersusState::InProgress {
+                    self.uci_nextmove();
+                }
+            } else {
+                self.versus_matches_left = 0;
+                self.versus_state = VersusState::Done;
+            }
+        } else {
+            eprintln!("No matches left, ending versus mode");
+            self.versus_state = VersusState::Done;
+        }
     }
 
     pub fn redeploy_engines(&mut self) -> anyhow::Result<()> {
@@ -459,8 +475,11 @@ impl Matchmaking {
         let current_match = self.versus_matches.front_mut().unwrap();
 
         println!(
-            "Starting a new match match between {} vs {}",
-            current_match.stats.engine1_name, current_match.stats.engine2_name,
+            "Starting a new match match between {} ({}) vs {} ({})",
+            current_match.stats.engine1_name,
+            current_match.stats.engine1_wins,
+            current_match.stats.engine2_name,
+            current_match.stats.engine2_wins
         );
 
         let feeder = match &mut current_match.feeder {
@@ -475,8 +494,6 @@ impl Matchmaking {
                 return false;
             }
         };
-
-        println!("Feeder provided position: {}", next_position);
 
         match self.load_fen(&next_position) {
             Ok(()) => {}
@@ -565,8 +582,8 @@ impl Matchmaking {
 
         self.engine_command_buf.push_str(
             format!(
-                "go wtime {} btime {} movetime 100\n",
-                self.versus_wtime_ms, self.versus_btime_ms
+                "go wtime {} btime {} {}\n",
+                self.versus_wtime_ms, self.versus_btime_ms, engine.go_params
             )
             .as_str(),
         );
