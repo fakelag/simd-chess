@@ -16,6 +16,22 @@ use crate::{
 pub const CHUNK_SIZE: usize = 1024 * 1024 * 4; // 4 MB
 pub const BACKBUF_SIZE: usize = 1024 * 32; // 32 KB
 
+pub enum MovePick {
+    First,
+    Random,
+}
+
+pub struct ExtractParams {
+    pub fcompleted_only: bool,
+    pub ffrom_ply: usize,
+    pub fto_ply: usize,
+    pub fmin_ply: usize,
+    pub fnum_positions: usize,
+    pub fdist_openings: bool,
+    pub fno_duplicates: bool,
+    pub fpick: MovePick,
+}
+
 #[derive(PartialEq, Eq)]
 enum LichessIteratorState {
     Reading,
@@ -41,20 +57,6 @@ pub enum LichessGameTermination {
     Abandoned,
     RulesInfraction,
     Unterminated,
-}
-
-pub enum MovePick {
-    First,
-    Random,
-}
-
-pub struct ExtractParams {
-    pub fcompleted_only: bool,
-    pub ffrom_ply: usize,
-    pub fto_ply: usize,
-    pub fmin_ply: usize,
-    pub fnumpositions: usize,
-    pub fpick: MovePick,
 }
 
 pub struct LichessDatabaseBuf {
@@ -394,6 +396,16 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
     let mut buffer = String::new();
     let mut game_count = 0;
 
+    let mut zobrist_set = std::collections::BTreeSet::new();
+    let mut opening_map = std::collections::BTreeMap::new();
+
+    let mut sum_openings = 0;
+    let mut count_openings = 0;
+
+    // File for appending extracted positions
+    let file = File::create(out_path).unwrap();
+    let mut writer = std::io::BufWriter::new(file);
+
     'outer: loop {
         if !it.next_batch(&mut storage, &mut games) {
             break;
@@ -406,6 +418,30 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
                 && game.termination(&storage) != Some(LichessGameTermination::Normal)
             {
                 continue;
+            }
+
+            if params.fdist_openings {
+                let op_entry = match game.opening(&storage) {
+                    Some(op) => {
+                        let key = op.to_string();
+                        opening_map.entry(key)
+                    }
+                    None => continue,
+                };
+
+                let op_count = op_entry.or_insert(0usize);
+
+                if *op_count == 0 {
+                    count_openings += 1;
+                }
+
+                sum_openings += 1;
+
+                if (*op_count as f32) < ((sum_openings / count_openings).max(1) as f32) {
+                    *op_count += 1;
+                } else {
+                    continue;
+                }
             }
 
             match game.parse_moves(&storage, &board, &tables, &mut moves) {
@@ -434,6 +470,11 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
                         unsafe { game_board.make_move(*mv, &tables, None) };
                     }
 
+                    if params.fno_duplicates && !zobrist_set.insert(game_board.zobrist_key()) {
+                        // println!("Skipping duplicate position {}", game_board.gen_fen());
+                        continue;
+                    }
+
                     buffer.push_str(&format!("{}\n", game_board.gen_fen()));
                     game_count += 1;
                 }
@@ -448,13 +489,18 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
                 None => continue,
             };
 
-            if game_count >= params.fnumpositions {
+            if buffer.len() >= 1024 * 1024 {
+                writer.write_all(buffer.as_bytes()).unwrap();
+                buffer.clear();
+            }
+
+            if game_count >= params.fnum_positions {
+                writer.write_all(buffer.as_bytes()).unwrap();
+                buffer.clear();
                 break 'outer;
             }
         }
     }
 
     println!("Extracted {} games", game_count);
-
-    fs::write(out_path, buffer).unwrap();
 }
