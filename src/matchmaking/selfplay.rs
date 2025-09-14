@@ -228,6 +228,9 @@ impl SelfplayTrainer {
 
         let stats = mm.versus_stats();
 
+        let mut b_move = board.b_move();
+        let mut ply = (board.full_moves() * 2 + if b_move { 1 } else { 0 }) as u16;
+
         let result = match stats.last_game_status {
             Some(GameResult::GameState(chess_v2::GameState::Checkmate(util::Side::White))) => 1,
             Some(GameResult::GameState(chess_v2::GameState::Checkmate(util::Side::Black))) => -1,
@@ -248,14 +251,11 @@ impl SelfplayTrainer {
             }
         };
 
-        let mut b_move = board.b_move();
-        let mut ply = (board.full_moves() * 2 + if b_move { 1 } else { 0 }) as u16;
-
         let mut last_entry = sfbinpack::TrainingDataEntry {
             pos: sfbinpack::chess::position::Position::from_fen(&first_fen),
             mv: SelfplayTrainer::convert_move(b_move, mm.moves_u16[1]),
             ply,
-            result,
+            result: if b_move { -result } else { result },
             score: 0,
         };
 
@@ -271,7 +271,7 @@ impl SelfplayTrainer {
                 pos: last_entry.pos.after_move(last_entry.mv),
                 mv,
                 ply,
-                result,
+                result: if b_move { -result } else { result },
                 score: 0,
             };
 
