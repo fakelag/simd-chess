@@ -375,9 +375,36 @@ fn main() {
 
     let result = match mode.as_str() {
         "selfplay" => {
-            let mut selfplay =
-                matchmaking::selfplay::SelfplayTrainer::new(".\\data\\selfplay-train.binpack");
-            selfplay.play(30, 20, ".\\data\\positions-comp-8to70-2017-1m.txt")
+            let mut arg_it = std::env::args().skip(2);
+            let mut from = None;
+            let mut count = None;
+            let mut threads = None;
+            let mut out_path = None;
+
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--from" => from = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--count" => count = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--out" => out_path = Some(arg_it.next().unwrap()),
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            let mut selfplay = matchmaking::selfplay::SelfplayTrainer::new(
+                &out_path.expect("Expected output path"),
+            );
+            selfplay.play(
+                threads.unwrap_or(1),
+                ".\\data\\positions-comp-8to70-2017-1m.txt",
+                from,
+                count,
+            )
         }
         "lext" => {
             let mut params = lichess_parser::ExtractParams {

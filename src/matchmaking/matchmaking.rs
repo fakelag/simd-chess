@@ -318,10 +318,16 @@ impl Matchmaking {
         }
 
         self.versus_state = VersusState::Done;
-        println!(
-            "Versus match ended: {} {} wins, {} {} wins, {} draws",
-            engine1.versus_wins, engine1.path, engine2.versus_wins, engine2.path, self.versus_draws
-        );
+        if self.versus_logging {
+            println!(
+                "Versus match ended: {} {} wins, {} {} wins, {} draws",
+                engine1.versus_wins,
+                engine1.path,
+                engine2.versus_wins,
+                engine2.path,
+                self.versus_draws
+            );
+        }
 
         self.next_versus().unwrap();
 
@@ -373,7 +379,9 @@ impl Matchmaking {
                     m.is_ongoing = false;
                     Some(m)
                 });
-                println!("No more matches in the queue");
+                if self.versus_logging {
+                    println!("No more matches in the queue");
+                }
                 return Ok(());
             }
         };

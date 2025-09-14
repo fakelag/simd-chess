@@ -35,54 +35,83 @@ impl SelfplayTrainer {
     pub fn play(
         &mut self,
         parallel_matches: usize,
-        thinktime_ms: u64,
         position_file_path: &str,
+        from: Option<usize>,
+        count: Option<usize>,
     ) -> anyhow::Result<()> {
-        // let mut reader =
-        //     sfbinpack::CompressedTrainingDataEntryReader::new(&self.binpack_path).unwrap();
-
-        // while reader.has_next() {
-        //     let entry = reader.next();
-
-        //     println!("{} {} {}", entry.ply, entry.mv.as_uci(), entry.pos.fen());
-        // }
-
-        // return Ok(());
-
-        let feeder = Box::new(SharedFenFeeder::new(position_file_path));
-
         let mut matchmakers = (0..parallel_matches)
             .map(|_i| matchmaking::Matchmaking::new(util::FEN_STARTPOS).unwrap())
             .collect::<Vec<_>>();
 
-        let num_positions_total = { feeder.inner.lock().unwrap().positions_total };
-        let num_games_per_matchmaker = num_positions_total / parallel_matches;
+        let feeder = Box::new(SharedFenFeeder::new(position_file_path));
 
-        for mm in &mut matchmakers {
-            mm.versus_autostart = false;
-            mm.versus_logging = false;
-            mm.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
-            mm.versus_start(
-                "v12_eval_fixed.exe",
-                "v12_eval_fixed.exe",
-                num_games_per_matchmaker,
-                false,
-                Some(feeder.clone()),
-            )?;
-            // mm.set_go_params(&format!("movetime {}", thinktime_ms));
-            mm.set_go_params(&format!("depth {}", 8));
+        if let Some(from) = from {
+            let mut lock = feeder.inner.lock().unwrap();
+            for _ in 0..from {
+                lock.next_position();
+            }
         }
 
-        let mut active_matchmakings = matchmakers
-            .iter()
-            .enumerate()
-            .map(|(i, _)| i)
-            .collect::<Vec<usize>>();
+        let num_positions_total = if let Some(count) = count {
+            let lock = feeder.inner.lock().unwrap();
+            lock.positions_total.min(count)
+        } else {
+            feeder.inner.lock().unwrap().positions_total
+        };
+        let num_games_per_matchmaker = num_positions_total / parallel_matches;
+        let overflow_games = num_positions_total % parallel_matches;
 
         println!(
             "Starting selfplay with {} parallel matches, {} total positions ({} per matchmaker)",
             parallel_matches, num_positions_total, num_games_per_matchmaker
         );
+
+        // for (index, mm) in matchmakers.iter_mut().enumerate() {
+        //     let extra = if index < overflow_games { 1 } else { 0 };
+        //     let games_to_play = num_games_per_matchmaker + extra;
+
+        //     mm.versus_autostart = false;
+        //     mm.versus_logging = false;
+        //     mm.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
+        //     mm.versus_start(
+        //         "v12_eval_fixed.exe",
+        //         "v12_eval_fixed.exe",
+        //         num_games_per_matchmaker + extra,
+        //         false,
+        //         Some(feeder.clone()),
+        //     )?;
+        //     // mm.set_go_params(&format!("movetime {}", thinktime_ms));
+        //     mm.set_go_params(&format!("depth {}", 8));
+        // }
+
+        let mut active_matchmakings = matchmakers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, mm)| {
+                let extra = if i < overflow_games { 1 } else { 0 };
+                let games_to_play = num_games_per_matchmaker + extra;
+
+                if games_to_play == 0 {
+                    return None;
+                }
+
+                mm.versus_autostart = false;
+                mm.versus_logging = false;
+                mm.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
+                mm.versus_start(
+                    "v12_eval_fixed.exe",
+                    "v12_eval_fixed.exe",
+                    games_to_play,
+                    false,
+                    Some(feeder.clone()),
+                )
+                .expect("Failed to start matchmaking");
+                // mm.set_go_params(&format!("movetime {}", thinktime_ms));
+                mm.set_go_params(&format!("depth {}", 8));
+
+                Some(i)
+            })
+            .collect::<Vec<usize>>();
 
         self.stats_flushed_at = std::time::Instant::now();
         self.stats_num_games_cp = 0;
@@ -101,7 +130,6 @@ impl SelfplayTrainer {
                     }
                     matchmaking::VersusState::Done => {
                         self.collect(&mm);
-                        println!("Matchmaking {} done", i);
                         return false;
                     }
                     matchmaking::VersusState::InProgress => {}
@@ -118,7 +146,7 @@ impl SelfplayTrainer {
             }
 
             if self.stats_flushed_at.elapsed().as_secs() >= 60 * 1 {
-                self.binpack_writer.flush().unwrap();
+                // self.binpack_writer.flush().unwrap();
 
                 let games_per_minute = self.stats_num_games_cp as f64
                     / (self.stats_flushed_at.elapsed().as_secs_f64() / 60.0);
@@ -142,11 +170,26 @@ impl SelfplayTrainer {
             }
         }
 
+        // self.binpack_writer.flush().unwrap();
+
+        println!(
+            "Selfplay done:\n{} total games\n{} total positions\nBinpack size: {}\nPosition reached: {}",
+            self.stats_num_games_total,
+            self.stats_positions_total,
+            util::byte_size_string(self.binpack_size_bytes()),
+            feeder.inner.lock().unwrap().cursor
+        );
+
         Ok(())
     }
 
     fn collect(&mut self, mm: &matchmaking::Matchmaking) {
         if mm.moves_u16.len() < 2 {
+            println!(
+                "Game too short during collection: {} - {} moves",
+                mm.fen,
+                mm.moves_u16.len()
+            );
             return;
         }
 
@@ -333,6 +376,7 @@ impl matchmaking::PositionFeeder for SharedFenFeeder {
 
 struct FenFeeder {
     positions_total: usize,
+    cursor: usize,
     chunk: Vec<String>,
     overflow: String,
     buf: Vec<u8>,
@@ -362,6 +406,7 @@ impl FenFeeder {
         let file = std::fs::File::open(path).expect("Failed to open FEN file");
 
         Self {
+            cursor: 0,
             positions_total: num_lines,
             chunk: Vec::new(),
             overflow: String::new(),
@@ -415,10 +460,18 @@ impl FenFeeder {
         let position = self.chunk.pop();
 
         match position {
-            Some(p) => Some(p),
+            Some(p) => {
+                self.cursor += 1;
+                Some(p)
+            }
             None => {
                 self.read_chunk();
-                self.chunk.pop()
+                if let Some(position) = self.chunk.pop() {
+                    self.cursor += 1;
+                    Some(position)
+                } else {
+                    None
+                }
             }
         }
     }
