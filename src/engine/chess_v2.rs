@@ -1,5 +1,6 @@
 use crate::{
     engine::{chess, tables::Tables},
+    nnue::nnue,
     pop_ls1b,
     util::{self},
 };
@@ -47,44 +48,6 @@ const MATERIAL_TABLE: [u16; 16] = [
     0, // Pad
 ];
 
-#[derive(Debug, Copy, Clone)]
-enum CaptureMoves {
-    PxQ,
-    NxQ,
-    BxQ,
-    RxQ,
-    QxQ,
-    KxQ,
-
-    PxR,
-    NxR,
-    BxR,
-    RxR,
-    QxR,
-    KxR,
-
-    PxB,
-    NxB,
-    BxB,
-    RxB,
-    QxB,
-    KxB,
-
-    PxN,
-    NxN,
-    BxN,
-    RxN,
-    QxN,
-    KxN,
-
-    PxP,
-    NxP,
-    BxP,
-    RxP,
-    QxP,
-    KxP,
-}
-
 const CASTLES_SQUARES: [u8; 64] = [
     0b1011, 0b1111, 0b1111, 0b1111, 0b0011, 0b1111, 0b1111, 0b0111, //
     0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
@@ -96,6 +59,7 @@ const CASTLES_SQUARES: [u8; 64] = [
     0b1110, 0b1111, 0b1111, 0b1111, 0b1100, 0b1111, 0b1111, 0b1101, //
 ];
 
+#[derive(Debug, Copy, Clone)]
 pub enum GameState {
     Ongoing,
     Checkmate(util::Side),
@@ -1253,6 +1217,11 @@ impl ChessGame {
         0
     }
 
+    #[inline(always)]
+    pub fn piece_at(&self, sq_index: u8) -> usize {
+        unsafe { *self.spt.get_unchecked(sq_index as usize) as usize }
+    }
+
     /// Makes a move on the board. If it returns true, the move was made, otherwise it was not and
     /// no state was changed.
     ///
@@ -1260,7 +1229,12 @@ impl ChessGame {
     /// the exception of leaving the king in check or castling without checking threats to the passed squares. In
     /// the latter case, the function returns false. The former case must be handled by the caller.
     #[inline(always)]
-    pub unsafe fn make_move(&mut self, mv: u16, tables: &Tables) -> bool {
+    pub unsafe fn make_move(
+        &mut self,
+        mv: u16,
+        tables: &Tables,
+        mut nnue: Option<&mut nnue::Nnue>,
+    ) -> bool {
         let zb_keys = &tables.zobrist_hash_keys;
 
         let from_sq = (mv & 0x3F) as u8;
@@ -1332,6 +1306,10 @@ impl ChessGame {
                     self.zobrist_key ^= rook_keys.get_unchecked(rook_from_sq);
                     self.zobrist_key ^= rook_keys.get_unchecked(rook_to_sq);
                 }
+
+                if let Some(nnue) = nnue.as_mut() {
+                    nnue.move_piece(rook_piece_id, rook_from_sq, rook_to_sq);
+                }
             }
             MV_FLAG_EPCAP => {
                 let (piece_id, cap_pawn_sq) = if self.b_move {
@@ -1359,6 +1337,10 @@ impl ChessGame {
                 }
 
                 self.material[!self.b_move as usize] -= MATERIAL_TABLE[piece_id];
+
+                if let Some(nnue) = nnue.as_mut() {
+                    nnue.remove_piece(piece_id, cap_pawn_sq as usize);
+                }
             }
             MV_FLAG_DPP => {
                 let new_ep_square = if self.b_move { to_sq + 8 } else { to_sq - 8 };
@@ -1412,6 +1394,11 @@ impl ChessGame {
                 .get_unchecked(self.en_passant as usize);
         }
 
+        if let Some(nnue) = nnue.as_mut() {
+            nnue.move_piece(from_piece, from_sq as usize, to_sq as usize);
+            nnue.remove_piece(to_piece, to_sq as usize);
+        }
+
         if move_flags & MV_FLAG_PROMOTION != 0 {
             let promotion_piece = match move_flags & MV_FLAGS_PR_MASK {
                 MV_FLAGS_PR_QUEEN => PieceIndex::WhiteQueen as usize + friendly_offset,
@@ -1442,6 +1429,11 @@ impl ChessGame {
                 self.material[self.b_move as usize] += MATERIAL_TABLE
                     .get_unchecked(promotion_piece)
                     - MATERIAL_TABLE.get_unchecked(from_piece);
+            }
+
+            if let Some(nnue) = nnue.as_mut() {
+                nnue.remove_piece(from_piece, to_sq as usize);
+                nnue.add_piece(promotion_piece, to_sq as usize);
             }
         }
 
@@ -1479,6 +1471,10 @@ impl ChessGame {
         self.b_move = !self.b_move;
         self.zobrist_key ^= zb_keys.hash_side_to_move;
 
+        if let Some(nnue) = nnue.as_mut() {
+            nnue.flip();
+        }
+
         // println!(
         //     "played move {} ({}), b_move: {}, zobrist_key: {:x}",
         //     util::move_string(mv),
@@ -1502,7 +1498,11 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn make_null_move(&mut self, tables: &Tables) -> u8 {
+    pub fn make_null_move(&mut self, tables: &Tables, nnue: Option<&mut nnue::Nnue>) -> u8 {
+        if let Some(nnue) = nnue {
+            nnue.flip();
+        }
+
         unsafe {
             let zb_keys = &tables.zobrist_hash_keys;
 
@@ -1520,7 +1520,16 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn rollback_null_move(&mut self, ep_square: u8, tables: &Tables) {
+    pub fn rollback_null_move(
+        &mut self,
+        ep_square: u8,
+        tables: &Tables,
+        nnue: Option<&mut nnue::Nnue>,
+    ) {
+        if let Some(nnue) = nnue {
+            nnue.flip();
+        }
+
         unsafe {
             let zb_keys = &tables.zobrist_hash_keys;
 
@@ -1554,7 +1563,7 @@ impl ChessGame {
         for mv_index in 0..move_count {
             let mv = move_list[mv_index];
 
-            if unsafe { self.make_move(mv, tables) } && !self.in_check(tables, !self.b_move) {
+            if unsafe { self.make_move(mv, tables, None) } && !self.in_check(tables, !self.b_move) {
                 if INTEGRITY_CHECK {
                     assert!(
                         self.zobrist_key == self.calc_initial_zobrist_key(tables),
@@ -1583,11 +1592,12 @@ impl ChessGame {
         node_count
     }
 
-    pub fn perft<const INTEGRITY_CHECK: bool>(
+    pub fn perft(
         &mut self,
         depth: u8,
         tables: &Tables,
         mut moves: Option<&mut Vec<(String, u64)>>,
+        mut nnue: Option<&mut nnue::Nnue>,
     ) -> u64 {
         if depth == 0 {
             return 1;
@@ -1600,6 +1610,7 @@ impl ChessGame {
         let move_count = self.gen_moves_avx512::<false>(tables, &mut move_list[2..]);
 
         let board_copy = self.clone();
+        let acc_copy = nnue.as_mut().map(|n| n.acc.clone());
 
         let mut i = 2;
         while i < move_count + 2 {
@@ -1615,34 +1626,48 @@ impl ChessGame {
                 move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
-            if unsafe { self.make_move(mv, tables) } && !self.in_check(tables, !self.b_move) {
-                if INTEGRITY_CHECK {
-                    assert!(
-                        self.zobrist_key == self.calc_initial_zobrist_key(tables),
-                        "Zobrist key mismatch after move {}",
+            if unsafe { self.make_move(mv, tables, nnue.as_mut().map(|n| &mut **n)) }
+                && !self.in_check(tables, !self.b_move)
+            {
+                assert!(
+                    self.zobrist_key == self.calc_initial_zobrist_key(tables),
+                    "Zobrist key mismatch after move {}",
+                    util::move_string_dbg(mv),
+                );
+                assert!(
+                    self.spt == self.calc_spt(),
+                    "Spt mismatch after move {}",
+                    util::move_string_dbg(mv),
+                );
+                assert!(
+                    self.material == self.calc_material(),
+                    "Material mismatch after move {}: {:?} vs {:?}",
+                    util::move_string_dbg(mv),
+                    self.material,
+                    self.calc_material(),
+                );
+                if let Some(nnue) = nnue.as_mut() {
+                    let mut expected_pair = nnue::AccumulatorPair::new();
+                    expected_pair.load(self, &nnue.net);
+                    assert_eq!(
+                        nnue.acc,
+                        expected_pair,
+                        "NNUE accumulator mismatch after move {}",
                         util::move_string_dbg(mv),
-                    );
-                    assert!(
-                        self.spt == self.calc_spt(),
-                        "Spt mismatch after move {}",
-                        util::move_string_dbg(mv),
-                    );
-                    assert!(
-                        self.material == self.calc_material(),
-                        "Material mismatch after move {}: {:?} vs {:?}",
-                        util::move_string_dbg(mv),
-                        self.material,
-                        self.calc_material(),
                     );
                 }
-                let nodes = self.perft::<INTEGRITY_CHECK>(depth - 1, tables, None);
+                let nodes = self.perft(depth - 1, tables, None, nnue.as_mut().map(|n| &mut **n));
                 node_count += nodes;
 
                 if let Some(ref mut moves) = moves {
                     moves.push((util::move_string(mv), nodes));
                 }
             }
+
             *self = board_copy;
+            if let Some(nnue) = nnue.as_mut() {
+                nnue.acc = acc_copy.unwrap();
+            }
         }
 
         node_count
@@ -2189,9 +2214,12 @@ mod tests {
     const PERFT_MOVE_VERIFICATION: bool = true;
     const MOVE_VERIFICATION_ENGINE: &str = "bin/stockfish.exe";
 
-    use std::collections::{BTreeSet, LinkedList};
+    use std::collections::BTreeSet;
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    use crate::nnue::nnue;
+    use crate::nnue_load;
 
     use super::*;
 
@@ -2273,15 +2301,18 @@ mod tests {
         depth: u8,
         fen: &'static str,
         moves: Vec<String>,
-        state_validation: bool,
+        nnue: Box<nnue::Nnue>,
     }
 
     impl PerftTestContext {
-        fn new(depth: u8, state_validation: bool, fen: &'static str) -> Self {
+        fn new(depth: u8, fen: &'static str) -> Self {
             let tables = Tables::new();
             let mut board = ChessGame::new();
 
             assert!(board.load_fen(fen, &tables).is_ok());
+
+            let mut nnue = nnue_load!("../../nnue/quantised.bin");
+            nnue.load(&board);
 
             Self {
                 board,
@@ -2289,7 +2320,7 @@ mod tests {
                 fen,
                 tables,
                 moves: Vec::new(),
-                state_validation,
+                nnue,
             }
         }
 
@@ -2300,13 +2331,12 @@ mod tests {
         fn perft_verification(&mut self, depth: u8) -> u64 {
             let mut perft_results = Vec::new();
 
-            let perft_result = if self.state_validation {
-                self.board
-                    .perft::<true>(depth, &self.tables, Some(&mut perft_results))
-            } else {
-                self.board
-                    .perft::<false>(depth, &self.tables, Some(&mut perft_results))
-            };
+            let perft_result = self.board.perft(
+                depth,
+                &self.tables,
+                Some(&mut perft_results),
+                Some(&mut self.nnue),
+            );
 
             if !PERFT_MOVE_VERIFICATION {
                 return perft_result;
@@ -2377,7 +2407,9 @@ mod tests {
                     let board_copy = self.board.clone();
 
                     let mv = self.board.fix_move(util::create_move(&move_str));
-                    assert!(unsafe { self.board.make_move(mv, &self.tables) });
+                    assert!(unsafe {
+                        self.board.make_move(mv, &self.tables, Some(&mut self.nnue))
+                    });
 
                     self.moves.push(move_str.clone());
 
@@ -2417,7 +2449,7 @@ mod tests {
 
                 let mut board_copy = board.clone();
 
-                let is_legal_move = unsafe { board_copy.make_move(mv, &tables) }
+                let is_legal_move = unsafe { board_copy.make_move(mv, &tables, None) }
                     && !board_copy.in_check(&tables, !board_copy.b_move());
 
                 if !is_legal_move {
@@ -2480,7 +2512,7 @@ mod tests {
 
                     let board_copy = board.clone();
 
-                    let is_legal_move = unsafe { board.make_move(mv, &tables) }
+                    let is_legal_move = unsafe { board.make_move(mv, &tables, None) }
                         && !board.in_check(&tables, !board.b_move());
 
                     if !is_legal_move {
@@ -2513,51 +2545,51 @@ mod tests {
     #[test]
     fn test_perft_rnbqkbnr_pppppppp_8_8_8_8_PPPPPPPP_RNBQKBNR() {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-        assert_eq!(PerftTestContext::new(5, true, fen).run(), 4_865_609);
+        assert_eq!(PerftTestContext::new(5, fen).run(), 4_865_609);
     }
 
     #[test]
     fn test_perft_r3k2r_p1ppqpb1_bn2pnp1_3PN3_1p2P3_2N2Q1p_PPPBBPPP_R3K2R() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
-        assert_eq!(PerftTestContext::new(5, false, fen).run(), 193_690_690);
+        assert_eq!(PerftTestContext::new(5, fen).run(), 193_690_690);
     }
 
     #[test]
     fn test_perft_8_2p5_3p4_KP5r_1R3p1k_8_4P1P1_8() {
         let fen = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1";
-        assert_eq!(PerftTestContext::new(7, true, fen).run(), 178_633_661);
+        assert_eq!(PerftTestContext::new(7, fen).run(), 178_633_661);
     }
 
     #[test]
     fn test_perft_r3k2r_Pppp1ppp_1b3nbN_nP6_BBP1P3_q4N2_Pp1P2PP_R2Q1RK1() {
         let fen = "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
         let mirrored = "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1";
-        assert_eq!(PerftTestContext::new(6, false, fen).run(), 706045033);
-        assert_eq!(PerftTestContext::new(6, false, mirrored).run(), 706045033);
+        assert_eq!(PerftTestContext::new(6, fen).run(), 706045033);
+        assert_eq!(PerftTestContext::new(6, mirrored).run(), 706045033);
     }
 
     #[test]
     fn test_perft_rnbq1k1r_pp1Pbppp_2p5_8_2B5_8_PPP1NnPP_RNBQK2R() {
         let fen = "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8";
-        assert_eq!(PerftTestContext::new(5, true, fen).run(), 89941194);
+        assert_eq!(PerftTestContext::new(5, fen).run(), 89941194);
     }
 
     #[test]
     fn test_perft_r4rk1_1pp1qppp_p1np1n2_2b1p1B1_2B1P1b1_P1NP1N2_1PP1QPPP_R4RK1() {
         let fen = "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10";
-        assert_eq!(PerftTestContext::new(5, true, fen).run(), 164_075_551);
+        assert_eq!(PerftTestContext::new(5, fen).run(), 164_075_551);
     }
 
     #[test]
     fn test_perft_8_PPP4k_8_8_8_8_4Kppp_8() {
         let fen = "8/PPP4k/8/8/8/8/4Kppp/8 w - -";
-        assert_eq!(PerftTestContext::new(6, true, fen).run(), 34336777);
+        assert_eq!(PerftTestContext::new(6, fen).run(), 34336777);
     }
 
     #[test]
     fn test_perft_n1n5_PPPk4_8_8_8_8_4Kppp_5N1N() {
         let fen = "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1";
-        assert_eq!(PerftTestContext::new(6, true, fen).run(), 71179139);
+        assert_eq!(PerftTestContext::new(6, fen).run(), 71179139);
     }
 
     #[test]
@@ -2582,7 +2614,7 @@ mod tests {
         ]
         .iter()
         .for_each(|(fen, depth, expected)| {
-            assert_eq!(PerftTestContext::new(*depth, true, fen).run(), *expected);
+            assert_eq!(PerftTestContext::new(*depth, fen).run(), *expected);
         });
     }
 
@@ -2605,142 +2637,5 @@ mod tests {
             let generated_fen = board.gen_fen();
             assert_eq!(generated_fen, fen);
         }
-    }
-
-    // #[test]
-    fn bench_perft() {
-        let fens = [
-            ("StartPos", 6, util::FEN_STARTPOS),
-            (
-                "MidGame",
-                5,
-                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-            ),
-            ("EndGame", 5, "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"),
-        ];
-        let tables = Tables::new();
-
-        let mut scratch: Box<[[u16; 8]; 30]> =
-            vec![[0u16; 8]; 30].into_boxed_slice().try_into().unwrap();
-
-        let bench = |fen: &'static str, depth: u8, it: usize, scratch: &mut [[u16; 8]; 30]| {
-            let mut board = ChessGame::new();
-            assert!(board.load_fen(std::hint::black_box(fen), &tables).is_ok());
-
-            let start = rdtscp();
-
-            let perft_result = 0; // board.perft::<false>(depth, &tables, None, scratch);
-
-            let end = rdtscp();
-
-            std::hint::black_box(perft_result);
-
-            let cycles = end - start;
-
-            println!("It#{} took {} Mcycles", it, cycles / 1_000_000);
-
-            cycles
-        };
-
-        const ITERATIONS: usize = 5;
-        let mut total_cycles = 0;
-
-        for fen in fens.iter() {
-            println!("{}:", fen.0);
-            for it in 0..ITERATIONS {
-                total_cycles += bench(fen.2, fen.1, it, &mut scratch);
-            }
-            println!();
-        }
-
-        println!(
-            "Average search time over {} iterations: {} Mcycles",
-            ITERATIONS,
-            total_cycles / ITERATIONS as u64 / 1_000_000
-        );
-    }
-
-    // #[test]
-    fn bench_makemove() {
-        use rand::{Rng, SeedableRng};
-
-        let fen = "1r2k2r/p1P1qpb1/b3pnp1/n2pP3/1p4N1/2N2Q1p/PPPBBPPP/R3K2R w KQk d6 0 5";
-        let tables = Tables::new();
-        let mut board = ChessGame::new();
-        assert!(board.load_fen(std::hint::black_box(fen), &tables).is_ok());
-        let board_copy = board.clone();
-
-        let moves = [
-            "d2h6",  // Bishop quiet
-            "f3d5",  // Queen cap
-            "c7b8q", // Promotion+Cap
-            "c7c8",  // Promotion
-            "e5f6",  // Pawn cap
-            "e5d6",  // EpCap
-            "e1g1",  // Kingside castle
-            "e1c1",  // Queenside castle
-        ];
-
-        let mut rng = rand::rngs::StdRng::seed_from_u64(std::hint::black_box(42));
-
-        let mvs = moves
-            .iter()
-            .enumerate()
-            .map(|(i, mv)| board.fix_move(util::create_move(mv)))
-            .collect::<Vec<_>>();
-
-        let mut bench = |mv_string: &str, mv: u16, b: bool, it: usize| {
-            //let mut move_list = [0u16; 256];
-            let start = rdtscp();
-
-            std::hint::black_box(unsafe { board.make_move(mv, &tables) });
-            std::hint::black_box(board.in_check(&tables, b));
-            // std::hint::black_box(board.gen_moves_slow(&tables, &mut move_list));
-
-            let end = rdtscp();
-
-            board = board_copy; // Reset the board state
-
-            let cycles = end - start;
-
-            cycles
-        };
-
-        const ITERATIONS: usize = 10000;
-
-        // Warmup
-        for it in 0..ITERATIONS {
-            for (index, mv_string) in moves.iter().enumerate() {
-                bench(mv_string, mvs[index], false, it);
-            }
-        }
-
-        let mut total_cycles = 0;
-        let mut cycle_total_vec = Vec::with_capacity(ITERATIONS);
-
-        let mut min = u64::MAX;
-        let mut max = 0;
-
-        for it in 0..ITERATIONS {
-            let index = rng.random_range(0..moves.len());
-            let b = rng.random_bool(0.5);
-            let cycles = bench(moves[index], mvs[index], b, it);
-
-            total_cycles += cycles;
-            cycle_total_vec.push(cycles);
-
-            min = min.min(cycles);
-            max = max.max(cycles);
-        }
-
-        cycle_total_vec.sort();
-
-        let avg = total_cycles / ITERATIONS as u64;
-        let median = cycle_total_vec[cycle_total_vec.len() / 2];
-
-        println!(
-            "Average cycles: {} (median {}), min: {}, max: {}",
-            avg, median, min, max
-        );
     }
 }
