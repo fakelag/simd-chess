@@ -374,6 +374,28 @@ fn main() {
     let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
 
     let result = match mode.as_str() {
+        "annotate" => {
+            let mut arg_it = std::env::args().skip(2);
+            let mut binpack_path = None;
+
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--binpack" => binpack_path = Some(arg_it.next().unwrap()),
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            let binpack_path = binpack_path.expect("Expected path to binpack");
+
+            let mut annotation = nnue::annotation::Annotator::new(binpack_path);
+
+            annotation.annotate()
+        }
         "selfplay" => {
             let mut arg_it = std::env::args().skip(2);
             let mut from = None;
