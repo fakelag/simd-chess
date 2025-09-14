@@ -1755,7 +1755,7 @@ impl ChessGame {
                             return Err(format!("Invalid en passant file '{}'", c));
                         }
 
-                        self.en_passant = file_index;
+                        self.en_passant = file_index + 1;
                     }
                     '1'..='8' => {
                         if self.en_passant == 0 {
@@ -1768,7 +1768,7 @@ impl ChessGame {
                             return Err(format!("Invalid en passant rank '{}'", c));
                         }
 
-                        self.en_passant = (rank_index * 8) | self.en_passant;
+                        self.en_passant = (rank_index * 8) | (self.en_passant - 1);
                     }
                     ' ' => {
                         state = FenState::MovesHalf;
