@@ -290,7 +290,33 @@ pub fn move_string_dbg(mv: u16) -> String {
 }
 
 pub fn time_format(ms: u64) -> String {
-    format!("{}:{:02}.{:03}", ms / 60000, (ms / 1000) % 60, ms % 1000,)
+    if ms < 3600000 {
+        format!("{}:{:02}.{:03}", ms / 60000, (ms / 1000) % 60, ms % 1000)
+    } else {
+        format!(
+            "{}:{:02}:{:02}.{:03}",
+            ms / 3600000,
+            (ms / 60000) % 60,
+            (ms / 1000) % 60,
+            ms % 1000
+        )
+    }
+}
+
+pub fn byte_size_string(bytes: usize) -> String {
+    let kb = bytes as f64 / 1024.0;
+    let mb = kb / 1024.0;
+    let gb = mb / 1024.0;
+
+    if gb >= 1.0 {
+        format!("{:.2} GB", gb)
+    } else if mb >= 1.0 {
+        format!("{:.2} MB", mb)
+    } else if kb >= 1.0 {
+        format!("{:.2} KB", kb)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 pub fn parse_position<'a>(
