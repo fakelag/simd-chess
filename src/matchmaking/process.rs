@@ -8,6 +8,7 @@ pub enum EngineState {
     ReadyOk,
     Thinking,
     Shutdown,
+    Exited(i32),
 }
 
 struct EngineInternal {
@@ -15,6 +16,8 @@ struct EngineInternal {
     process: std::process::Child,
     state: EngineState,
     bestmove: Option<String>,
+
+    last_command: Option<String>,
 }
 
 pub struct EngineProcess {
@@ -28,6 +31,12 @@ pub struct EngineProcess {
 
 impl EngineInternal {
     fn process_line(&mut self, line: &str) -> anyhow::Result<()> {
+        // if self.stdout_lines.len() >= MAX_STDOUT_LINES {
+        //     let remove_count = MAX_STDOUT_LINES / 5;
+        //     self.stdout_lines.drain(0..remove_count);
+        // }
+        // self.stdout_lines.push(line.to_string());
+
         let mut parts = line.split_whitespace();
 
         match (self.state, parts.next()) {
@@ -62,6 +71,7 @@ impl EngineInternal {
     }
 
     fn write_stdin(&mut self, buf: &str) -> anyhow::Result<()> {
+        self.last_command = Some(buf.to_string());
         self.process
             .stdin
             .as_mut()
@@ -86,6 +96,8 @@ impl EngineProcess {
             process: child_process,
             bestmove: None,
             state: EngineState::CheckUci,
+            last_command: None,
+            // stdout_lines: Vec::with_capacity(MAX_STDOUT_LINES),
         }));
 
         EngineProcess::write_stdin(int.clone(), "uci\n")?;
@@ -115,6 +127,13 @@ impl EngineProcess {
     pub fn get_state(&self) -> EngineState {
         self.int.lock().unwrap().state
     }
+
+    pub fn get_last_command(&self) -> Option<String> {
+        self.int.lock().unwrap().last_command.clone()
+    }
+    // pub fn get_stdout_buffer(&self) -> Option<Vec<String>> {
+    //     self.int.lock().unwrap().stdout_lines.clone().into()
+    // }
 
     pub fn send_position_and_go(&self, position: &str) -> anyhow::Result<()> {
         let mut int = self.int.lock().unwrap();
@@ -177,12 +196,24 @@ impl EngineProcess {
         };
 
         if let Ok(exit_code) = exit_result {
-            if !exit_code.success() && status != EngineState::Shutdown {
-                eprintln!(
-                    "[{}] Engine process exited with code: {:?}",
-                    int.lock().unwrap().name,
-                    exit_code.code()
-                );
+            if status != EngineState::Shutdown {
+                let mut lock = int.lock().unwrap();
+                lock.state = EngineState::Exited(exit_code.code().unwrap_or(-1));
+
+                if !exit_code.success() {
+                    lock.process.stderr.take().map(|mut stderr| {
+                        let mut err_output = String::new();
+                        use std::io::Read;
+                        stderr.read_to_string(&mut err_output).ok();
+                        eprintln!(
+                            "[{}] Engine exited unexpectedly with code {}. Last command: {:?}\nSTDERR:\n{}\n",
+                            lock.name,
+                            exit_code.code().unwrap_or(-1),
+                            lock.last_command.as_ref().map(|x| x.clone()).unwrap_or_else(|| "<None>".to_string()),
+                            err_output,
+                        );
+                    });
+                }
             }
         }
     }

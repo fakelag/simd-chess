@@ -194,12 +194,9 @@ impl ChessUi {
             }
         }
 
-        // let writer =
-        //     sfbinpack::CompressedTrainingDataEntryWriter::new("nnue/test.binpack", false).unwrap();
+        let mut matchmaking = Matchmaking::new(fen).unwrap();
 
-        // let matchmaking =
-        //     Matchmaking::new_with_collector(fen, Arc::new(Mutex::new(writer))).unwrap();
-        let matchmaking = Matchmaking::new(fen).unwrap();
+        matchmaking.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
 
         Self {
             matchmaking,

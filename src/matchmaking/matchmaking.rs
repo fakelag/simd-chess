@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::{
-    engine::{chess_v2, tables},
+    engine::{self, chess_v2, tables},
     matchmaking::process::{EngineProcess, EngineState},
     util::{self},
 };
@@ -26,6 +26,14 @@ enum EnginePollResult {
     MoveMade,
     NoAction,
     OutOfTime,
+    EngineShutdown(i32, usize), // exit_code, engine_index
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum GameResult {
+    GameState(chess_v2::GameState),
+    OutOfTime(util::Side),
+    ThreeFoldRepetition,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +44,7 @@ pub struct VersusStats {
     pub engine2_wins: usize,
     pub draws: usize,
     pub num_matches: usize,
+    pub last_game_status: Option<GameResult>,
 }
 
 pub struct VersusMatch {
@@ -51,6 +60,7 @@ pub struct Matchmaking {
     pub tables: tables::Tables,
     pub legal_moves: Vec<u16>,
 
+    pub moves_u16: Vec<u16>,
     pub moves: Vec<String>,
     engines: [Option<EngineProcess>; 2],
     engine_white: usize,
@@ -64,6 +74,8 @@ pub struct Matchmaking {
     pub versus_wtime_ms: usize,
     pub versus_move_start_time: Option<std::time::Instant>,
     pub versus_autostart: bool,
+    pub versus_logging: bool,
+    pub versus_3fr: Option<engine::search::repetition_v2::RepetitionTable>,
 
     pub versus_queue: VecDeque<VersusMatch>,
     pub versus_matches: VecDeque<VersusMatch>,
@@ -77,6 +89,7 @@ impl Matchmaking {
             board: chess_v2::ChessGame::new(),
             tables: tables::Tables::new(),
             moves: Vec::new(),
+            moves_u16: Vec::new(),
             legal_moves: Vec::new(),
             engines: [None, None],
             engine_white: 0,
@@ -89,6 +102,8 @@ impl Matchmaking {
             versus_wtime_ms: 0,
             versus_move_start_time: None,
             versus_autostart: true,
+            versus_logging: true,
+            versus_3fr: None,
 
             versus_queue: VecDeque::new(),
             versus_matches: VecDeque::new(),
@@ -106,7 +121,14 @@ impl Matchmaking {
         self.fen = fen.to_string();
         self.is_startpos = fen == util::FEN_STARTPOS;
         self.moves.clear();
+        self.moves_u16.clear();
         self.update_legal_moves();
+
+        if let Some(repetition_table) = &mut self.versus_3fr {
+            repetition_table.clear();
+            repetition_table.push_position(self.board.zobrist_key(), true);
+        }
+
         Ok(())
     }
 
@@ -163,7 +185,12 @@ impl Matchmaking {
         }
 
         self.moves.push(mv_string);
+        self.moves_u16.push(mv);
         self.update_legal_moves();
+
+        if let Some(repetition_table) = &mut self.versus_3fr {
+            repetition_table.push_position(self.board.zobrist_key(), self.board.half_moves() == 0);
+        }
 
         Ok(true)
     }
@@ -186,6 +213,28 @@ impl Matchmaking {
         let poll_result = self.uci_poll();
 
         match poll_result {
+            EnginePollResult::EngineShutdown(exit_code, engine_index) => {
+                let engine = match self.engines[engine_index].as_mut() {
+                    Some(engine) => engine,
+                    None => {
+                        eprintln!("Engine at index {} is not initialized", engine_index);
+                        return;
+                    }
+                };
+                eprintln!(
+                    "[{}] Engine exited unexpectedly with code {}",
+                    engine.path, exit_code,
+                );
+
+                self.redeploy_engines()
+                    .expect("Failed to redeploy engines after crash");
+
+                println!("Moving to next match if available...");
+                self.versus_state = VersusState::NextMatch(
+                    std::time::Instant::now(),
+                    self.versus_state == VersusState::Paused,
+                );
+            }
             EnginePollResult::MoveMade | EnginePollResult::OutOfTime => {}
             EnginePollResult::NoAction => return,
         }
@@ -208,34 +257,48 @@ impl Matchmaking {
     }
 
     fn versus_check_game_over(&mut self, start_paused: bool) -> bool {
-        if self.check_versus_timer() {
+        let game_end_status = if self.check_versus_timer() {
             let engine = self
                 .get_engine_for_side_mut(util::Side::from(!self.board.b_move()))
                 .unwrap();
             engine.versus_wins += 1;
+            Some(GameResult::OutOfTime(util::Side::from(self.board.b_move())))
         } else {
-            let game_state = self.board.check_game_state(
-                &self.tables,
-                self.legal_moves.is_empty(),
-                self.board.b_move(),
-            );
+            let is_3fr = if let Some(repetition_table) = &mut self.versus_3fr {
+                repetition_table.is_repeated_times(self.board.zobrist_key()) >= 3
+            } else {
+                false
+            };
 
-            match game_state {
-                chess_v2::GameState::Checkmate(side) => {
-                    let engine = self.get_engine_for_side_mut(side).unwrap();
-                    engine.versus_wins += 1;
+            if is_3fr {
+                self.versus_draws += 1;
+                Some(GameResult::ThreeFoldRepetition)
+            } else {
+                let game_state = self.board.check_game_state(
+                    &self.tables,
+                    self.legal_moves.is_empty(),
+                    self.board.b_move(),
+                );
+
+                match game_state {
+                    chess_v2::GameState::Checkmate(side) => {
+                        let engine = self.get_engine_for_side_mut(side).unwrap();
+                        engine.versus_wins += 1;
+                    }
+                    chess_v2::GameState::Stalemate => {
+                        self.versus_draws += 1;
+                    }
+                    chess_v2::GameState::DrawByFiftyMoveRule => {
+                        self.versus_draws += 1;
+                    }
+                    chess_v2::GameState::Ongoing => {
+                        return false;
+                    }
                 }
-                chess_v2::GameState::Stalemate => {
-                    self.versus_draws += 1;
-                }
-                chess_v2::GameState::DrawByFiftyMoveRule => {
-                    self.versus_draws += 1;
-                }
-                chess_v2::GameState::Ongoing => {
-                    return false;
-                }
+
+                Some(GameResult::GameState(game_state))
             }
-        }
+        };
 
         self.reset_timers();
         self.versus_matches_left -= 1;
@@ -247,6 +310,7 @@ impl Matchmaking {
         current_match.stats.engine1_wins = engine1.versus_wins;
         current_match.stats.engine2_wins = engine2.versus_wins;
         current_match.stats.draws = self.versus_draws;
+        current_match.stats.last_game_status = game_end_status;
 
         if self.versus_matches_left > 0 {
             self.versus_state = VersusState::NextMatch(std::time::Instant::now(), start_paused);
@@ -280,6 +344,7 @@ impl Matchmaking {
                 engine2_wins: 0,
                 draws: 0,
                 num_matches,
+                last_game_status: None,
             },
             feeder,
             start_paused,
@@ -466,6 +531,7 @@ impl Matchmaking {
                 engine2_wins: 0,
                 draws: 0,
                 num_matches: 0,
+                last_game_status: None,
             },
             |match_info| match_info.stats.clone(),
         )
@@ -474,13 +540,15 @@ impl Matchmaking {
     fn on_new_match(&mut self) -> bool {
         let current_match = self.versus_matches.front_mut().unwrap();
 
-        println!(
-            "Starting a new match match between {} ({}) vs {} ({})",
-            current_match.stats.engine1_name,
-            current_match.stats.engine1_wins,
-            current_match.stats.engine2_name,
-            current_match.stats.engine2_wins
-        );
+        if self.versus_logging {
+            println!(
+                "Starting a new match match between {} ({}) vs {} ({})",
+                current_match.stats.engine1_name,
+                current_match.stats.engine1_wins,
+                current_match.stats.engine2_name,
+                current_match.stats.engine2_wins
+            );
+        }
 
         let feeder = match &mut current_match.feeder {
             Some(feeder) => feeder,
@@ -603,6 +671,19 @@ impl Matchmaking {
             Some(engine) => engine,
             None => return EnginePollResult::NoAction,
         };
+
+        match engine.get_state() {
+            EngineState::Shutdown => {
+                return EnginePollResult::EngineShutdown(0, engine_index);
+            }
+            EngineState::Exited(code) => {
+                return EnginePollResult::EngineShutdown(code, engine_index);
+            }
+            EngineState::Thinking | EngineState::CheckUci | EngineState::WaitReadyOk => {
+                return EnginePollResult::NoAction;
+            }
+            _ => {}
+        }
 
         let bestmove = if let Some(bestmove) = engine.take_bestmove() {
             bestmove

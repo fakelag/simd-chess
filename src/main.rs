@@ -67,16 +67,7 @@ fn search_thread(
 
                 assert!(chess.zobrist_key() == chess.calc_initial_zobrist_key(tables));
 
-                let mut search_engine = search::v13_nnue::Search::new(
-                    go.params,
-                    chess,
-                    tables,
-                    tt,
-                    go.repetition_table,
-                    &go.sig,
-                );
-
-                // let mut search_engine = search::v12_eval::Search::new(
+                // let mut search_engine = search::v13_nnue::Search::new(
                 //     go.params,
                 //     chess,
                 //     tables,
@@ -84,6 +75,15 @@ fn search_thread(
                 //     go.repetition_table,
                 //     &go.sig,
                 // );
+
+                let mut search_engine = search::v12_eval::Search::new(
+                    go.params,
+                    chess,
+                    tables,
+                    tt,
+                    go.repetition_table,
+                    &go.sig,
+                );
                 // let mut search_engine = search::v10_mvcache::Search::new(
                 //     go.params,
                 //     go.chess,
@@ -216,7 +216,7 @@ fn chess_uci(
             if let Some(handle) = context.timeout_handle {
                 // Exit timeout thread
                 if !handle.is_finished() {
-                    context.tx_stop.try_send(SigAbort {}).unwrap();
+                    let _ = context.tx_stop.try_send(SigAbort {});
                     handle.join().unwrap();
                 }
             }
@@ -371,16 +371,23 @@ fn chess_uci(
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or("gui".to_string());
+    let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
 
     let result = match mode.as_str() {
+        "selfplay" => {
+            let mut selfplay =
+                matchmaking::selfplay::SelfplayTrainer::new(".\\data\\selfplay-train.binpack");
+            selfplay.play(30, 20, ".\\data\\positions-comp-8to70-2017-1m.txt")
+        }
         "lext" => {
             let mut params = lichess_parser::ExtractParams {
                 ffrom_ply: 0,
                 fto_ply: 300,
                 fmin_ply: 0,
-                fnumpositions: 100,
+                fnum_positions: 100,
                 fcompleted_only: false,
+                fdist_openings: false,
+                fno_duplicates: false,
                 fpick: lichess_parser::MovePick::Random,
             };
 
@@ -398,7 +405,9 @@ fn main() {
                     "--from-ply" => params.ffrom_ply = arg_it.next().unwrap().parse().unwrap(),
                     "--to-ply" => params.fto_ply = arg_it.next().unwrap().parse().unwrap(),
                     "--min-ply" => params.fmin_ply = arg_it.next().unwrap().parse().unwrap(),
-                    "--count" => params.fnumpositions = arg_it.next().unwrap().parse().unwrap(),
+                    "--count" => params.fnum_positions = arg_it.next().unwrap().parse().unwrap(),
+                    "--no-duplicates" => params.fno_duplicates = true,
+                    "--dist-openings" => params.fdist_openings = true,
                     "--completed-only" => params.fcompleted_only = true,
                     "--db" => in_path = Some(arg_it.next().unwrap()),
                     "--out" => out_path = Some(arg_it.next().unwrap()),
@@ -415,6 +424,14 @@ fn main() {
         }
         "gui" => chess_ui(),
         "uci" => {
+            // Register a panic hook to stop the process if any thread panics.
+            // @todo - Restructure code to make parent threads handle panics for their children
+            let panic_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |panic_info| {
+                panic_hook(panic_info);
+                std::process::exit(1);
+            }));
+
             let (tx_search, rx_search) = channel::bounded(1);
             let tables = tables::Tables::new();
 

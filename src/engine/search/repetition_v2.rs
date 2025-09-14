@@ -61,12 +61,36 @@ impl RepetitionTable {
 
         false
     }
+
+    #[inline(always)]
+    pub fn is_repeated_times(&mut self, hash: u64) -> u32 {
+        let cursor = self.cursor & (REPTABLE_SIZE - 1);
+        let mut num_repetitions = 0;
+
+        for i in (0..cursor).rev() {
+            if self.hashes[i] == hash {
+                num_repetitions += 1;
+            }
+            if (self.irreversible[i / 64] & (1 << (i & 63))) != 0 {
+                break;
+            }
+        }
+
+        num_repetitions
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        self.cursor = 0;
+        self.irreversible = [0; REPTABLE_SIZE / 64];
+        self.hashes.fill(0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        engine::{chess, tables},
+        engine::{chess, chess_v2, tables},
         util,
     };
 
@@ -196,6 +220,65 @@ mod tests {
         for i in 0..moves.len() {
             table.pop_position();
             assert_eq!(table.is_repeated(board.zobrist_key()), i <= 3);
+        }
+    }
+
+    #[test]
+    fn test_repetition_table_times() {
+        let tables = tables::Tables::new();
+        let mut board = chess_v2::ChessGame::new();
+
+        assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
+
+        let mut table = RepetitionTable::new();
+
+        let moves = [
+            ("e2e4", 0),
+            ("e7e5", 0),
+            ("g1f3", 0),
+            ("g8f6", 0),
+            ("f3h4", 0),
+            ("f6g8", 0),
+            ("h4f3", 1),
+            ("g8f6", 1),
+            ("f3h4", 1),
+            ("f6g8", 1),
+            ("h4f3", 2),
+            ("g8f6", 2),
+            ("f3h4", 2),
+            ("f6g8", 2),
+            ("h4f3", 3),
+            ("g8f6", 3),
+            ("f3h4", 3),
+            ("f6g8", 3),
+            ("h4f3", 4),
+            ("g8f6", 4),
+            ("f3h4", 4),
+            ("f6g8", 4),
+            ("h4g6", 0),
+            ("g8f6", 0),
+            ("g6h4", 5),
+            ("f6e4", 0),
+            ("h4f3", 0),
+            ("e4f6", 0),
+            ("f3h4", 0),
+        ];
+
+        table.push_position(board.zobrist_key(), true);
+
+        for (mv_string, rep_times) in moves {
+            let mv = board.fix_move(util::create_move(mv_string));
+            assert!(unsafe { board.make_move(mv, &tables, None) });
+
+            assert_eq!(
+                table.is_repeated_times(board.zobrist_key()),
+                rep_times,
+                "Move {} should be repeated {} times",
+                mv_string,
+                rep_times,
+            );
+
+            table.push_position(board.zobrist_key(), board.half_moves() == 0);
         }
     }
 
