@@ -9,7 +9,8 @@ use std::{cell::SyncUnsafeCell, thread::JoinHandle};
 use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use crate::engine::search::{SearchStrategy, transposition_v2};
+use crate::engine::search::search_params::SearchParams;
+use crate::engine::search::{SearchStrategy, repetition_v2, transposition_v2};
 use crate::scripts::lichess_parser::{self};
 use crate::{
     engine::{
@@ -58,6 +59,14 @@ fn search_thread(
     transposition_table: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) {
     let tt = unsafe { &mut *transposition_table.get() };
+
+    let mut search_engine = search::v12_eval_sp::Search::new(
+        SearchParams::new(),
+        tables,
+        tt,
+        repetition_v2::RepetitionTable::new(),
+    );
+
     loop {
         match rx_search.recv() {
             Ok(go) => {
@@ -66,6 +75,12 @@ fn search_thread(
                 let chess = chess_v2::ChessGame::from(go.chess);
 
                 assert!(chess.zobrist_key() == chess.calc_initial_zobrist_key(tables));
+
+                search_engine.new_game_from_board(&chess);
+                search_engine.new_search();
+                search_engine.set_sig(go.sig);
+                search_engine.set_rt(go.repetition_table);
+                search_engine.set_search_params(go.params);
 
                 // let mut search_engine = search::v13_nnue::Search::new(
                 //     go.params,
@@ -76,14 +91,14 @@ fn search_thread(
                 //     &go.sig,
                 // );
 
-                let mut search_engine = search::v12_eval::Search::new(
-                    go.params,
-                    chess,
-                    tables,
-                    tt,
-                    go.repetition_table,
-                    &go.sig,
-                );
+                // let mut search_engine = search::v12_eval::Search::new(
+                //     go.params,
+                //     chess,
+                //     tables,
+                //     tt,
+                //     go.repetition_table,
+                //     &go.sig,
+                // );
                 // let mut search_engine = search::v10_mvcache::Search::new(
                 //     go.params,
                 //     go.chess,
@@ -164,14 +179,17 @@ fn search_thread(
                     let tt_stats = unsafe { &mut *transposition_table.get() }.calc_stats();
 
                     println!(
-                        "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy)",
+                        "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy, {:.02} probe hit rate)",
                         search_nodes,
                         util::time_format(elapsed.as_millis() as u64),
                         search_depth,
                         util::move_string(best_move),
                         best_move,
                         search_score,
-                        (tt_stats.1 + tt_stats.2 + tt_stats.3) as f64 / (tt_stats.0 as f64) * 100.0
+                        tt_stats.fill_percentage * 100.0,
+                        tt_stats.probe_hit as f64
+                            / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
+                            * 100.0
                     );
 
                     // println!(
@@ -223,7 +241,7 @@ fn chess_uci(
         }
     }
 
-    'next_cmd: loop {
+    loop {
         let mut buffer = String::new();
         std::io::stdin().read_line(&mut buffer)?;
 
@@ -238,7 +256,10 @@ fn chess_uci(
                 Some("off") => debug = false,
                 _ => panic!("Expected 'on' or 'off' after debug command"),
             },
-            Some("ucinewgame") => {}
+            Some("ucinewgame") => {
+                // Safety: Engine should not be calculating when receiving a ucinewgame command
+                unsafe { &mut *tt.get() }.clear();
+            }
             Some("stop") => abort_search_uci(debug, &mut context),
             Some("isready") => println!("readyok"),
             Some("position") => {
@@ -247,7 +268,6 @@ fn chess_uci(
 
                 // Safety: Engine should not be calculating when receiving a position command
                 let tt = unsafe { &mut *tt.get() };
-
                 tt.clear();
 
                 let position_start_index = input
@@ -392,7 +412,7 @@ fn main() {
 
             let binpack_path = binpack_path.expect("Expected path to binpack");
 
-            let mut annotation = nnue::annotation::Annotator::new(binpack_path);
+            let mut annotation = nnue::annotation::Annotator::new(16, binpack_path);
 
             annotation.annotate()
         }
@@ -402,6 +422,7 @@ fn main() {
             let mut count = None;
             let mut threads = None;
             let mut out_path = None;
+            let mut annotated = false;
 
             loop {
                 let arg = match arg_it.next() {
@@ -413,6 +434,7 @@ fn main() {
                     "--from" => from = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--count" => count = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--annotated" => annotated = true,
                     "--out" => out_path = Some(arg_it.next().unwrap()),
                     _ => panic!("Unknown argument: {}", arg),
                 }
@@ -421,12 +443,17 @@ fn main() {
             let mut selfplay = matchmaking::selfplay::SelfplayTrainer::new(
                 &out_path.expect("Expected output path"),
             );
-            selfplay.play(
-                threads.unwrap_or(1),
-                ".\\data\\positions-comp-8to70-2017-1m.txt",
-                from,
-                count,
-            )
+
+            if annotated {
+                selfplay.play_annotated(
+                    threads.unwrap_or(1),
+                    ".\\data\\positions-comp-8to70-2017-1m.txt",
+                    from,
+                    count,
+                )
+            } else {
+                todo!("Unannotated selfplay not implemented");
+            }
         }
         "lext" => {
             let mut params = lichess_parser::ExtractParams {
