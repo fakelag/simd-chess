@@ -1,5 +1,6 @@
 const REPTABLE_SIZE: usize = 1 << 10;
 
+#[derive(Debug, Clone)]
 pub struct RepetitionTable {
     pub cursor: usize,
     pub irreversible: [u64; REPTABLE_SIZE / 64],
@@ -84,6 +85,25 @@ impl RepetitionTable {
         self.cursor = 0;
         self.irreversible = [0; REPTABLE_SIZE / 64];
         self.hashes.fill(0);
+    }
+}
+
+impl PartialEq for RepetitionTable {
+    fn eq(&self, other: &Self) -> bool {
+        if self.cursor != other.cursor {
+            return false;
+        }
+
+        for i in (0..self.cursor).rev() {
+            if self.hashes[i] != other.hashes[i] {
+                return false;
+            }
+            if (self.irreversible[i / 64] & (1 << (i & 63))) != 0 {
+                break;
+            }
+        }
+
+        true
     }
 }
 

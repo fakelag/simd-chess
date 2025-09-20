@@ -48,8 +48,8 @@ mod tests {
 
         // let (tx, rx) = crossbeam::channel::unbounded();
         // let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
-        // let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
-        let test_fen = util::FEN_STARTPOS;
+        let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
+        // let test_fen = util::FEN_STARTPOS;
 
         let bench = || {
             let tt = std::cell::SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(4));
@@ -96,11 +96,18 @@ mod tests {
             println!("α-raise count: {}", search_engine.a_raise_count());
             println!("depth: {}", search_engine.get_depth());
             println!("q-depth: {}", search_engine.get_quiet_depth());
+            println!("TT usage: {:.02}%", tt_stats.fill_percentage * 100.0);
             println!(
-                "TT usage: {:.02}%",
-                ((tt_stats.1 + tt_stats.2 + tt_stats.3) as f64) / (tt_stats.0 as f64) * 100.0
+                "TT probe hit rate: {:.02}%",
+                tt_stats.probe_hit as f64
+                    / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
+                    * 100.0
             );
-            println!("TT entries: {}", tt_stats.0);
+            println!(
+                "TT store hit rate: {:.02}%",
+                tt_stats.store_hit as f64 / (tt_stats.store_hit as f64 + tt_stats.store_hit as f64)
+                    * 100.0
+            );
             println!(
                 "PV: {:?}",
                 search_engine

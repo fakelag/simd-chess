@@ -42,27 +42,19 @@ pub struct Network {
 }
 
 impl Network {
-    /// Calculates the output of the network, starting from the already
-    /// calculated hidden layer (done efficiently during makemoves).
     #[inline(always)]
     pub fn evaluate(&self, us: &Accumulator, them: &Accumulator) -> i32 {
-        // Initialise output with bias.
         let mut output = i32::from(self.output_bias);
 
-        // Side-To-Move Accumulator -> Output.
         for (&input, &weight) in us.vals.iter().zip(&self.output_weights[..HIDDEN_SIZE]) {
             output += crelu(input) * i32::from(weight);
         }
 
-        // Not-Side-To-Move Accumulator -> Output.
         for (&input, &weight) in them.vals.iter().zip(&self.output_weights[HIDDEN_SIZE..]) {
             output += crelu(input) * i32::from(weight);
         }
 
-        // Apply eval scale.
         output *= SCALE;
-
-        // Remove quantisation.
         output /= i32::from(QA) * i32::from(QB);
 
         output
@@ -128,8 +120,6 @@ impl AccumulatorPair {
         self.white = Accumulator::new(net);
         self.black = Accumulator::new(net);
 
-        // let white_offset = (board.b_move() as usize) << 3;
-        // let black_offset = (!board.b_move() as usize) << 3;
         let white_offset = 0;
         let black_offset = 8;
 
@@ -148,33 +138,6 @@ impl AccumulatorPair {
                 self.add_piece(piece_id + black_offset, sq_index, net);
             }
         }
-
-        // let stm_offset = (board.b_move() as usize) << 3;
-        // let ntm_offset = (!board.b_move() as usize) << 3;
-
-        // let ntm_start = PieceIndex::WhiteKing as usize + ntm_offset;
-        // let ntm_end = ntm_start + 6;
-        // for piece_id in ntm_start..ntm_end {
-        //     let mut board = bitboards[piece_id];
-
-        //     loop {
-        //         let sq_index = pop_ls1b!(board) as usize;
-        //         self.add_piece(piece_id, sq_index, net);
-        //     }
-        // }
-
-        // self.flip();
-
-        // let stm_start = PieceIndex::WhiteKing as usize + stm_offset;
-        // let stm_end = stm_start + 6;
-        // for piece_id in stm_start..stm_end {
-        //     let mut board = bitboards[piece_id];
-
-        //     loop {
-        //         let sq_index = pop_ls1b!(board) as usize;
-        //         self.add_piece(piece_id, sq_index, net);
-        //     }
-        // }
     }
 
     #[inline(always)]
@@ -225,11 +188,6 @@ impl AccumulatorPair {
                 && piece_id_or_null != PieceIndex::BlackPad as usize
         );
 
-        // let is_black = (piece_id_or_null & 0b1000) != 0;
-        // let piece_base = 64 * ((piece_id_or_null as usize & 7) - 1);
-
-        // let stm_feature = [0, 0x180][is_black as usize] + piece_base + from_sq;
-        // let ntm_feature = [0x180, 0][is_black as usize] + piece_base + (from_sq ^ 56);
         let (white_feature, black_feature) = Self::calc_feature_indices(piece_id_or_null, from_sq);
 
         self.white.remove_feature(white_feature, net);

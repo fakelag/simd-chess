@@ -2,6 +2,8 @@ use std::io::Read;
 
 use sfbinpack::chess::{coords, r#move, piece};
 
+const DEBUG: bool = false;
+
 use crate::{
     engine::{self, chess_v2, search::SearchStrategy, tables},
     matchmaking::{matchmaking::PositionFeeder, *},
@@ -54,8 +56,8 @@ impl SelfplayTrainer {
         } else {
             feeder.inner.lock().unwrap().positions_total
         };
-        let num_games_per_thread = num_positions_total / threads;
-        let overflow_games = num_positions_total % threads;
+
+        feeder.set_max_positions(num_positions_total);
 
         println!(
             "Starting selfplay with {} threads, {} total positions ({:.02} per matchmaker)",
@@ -69,23 +71,18 @@ impl SelfplayTrainer {
         let (tx_entries, rx_entries) = crossbeam::channel::bounded(256);
 
         std::thread::scope(|s| {
+            let start_at = std::time::Instant::now();
+
             let handles = (0..threads)
                 .filter_map(|i| {
-                    let overflow = if i < overflow_games { 1 } else { 0 };
-                    let games_to_play = num_games_per_thread + overflow;
-
-                    if games_to_play == 0 {
-                        return None;
-                    }
-
                     let tables = &tables;
                     let feeder = feeder.clone();
                     let tx_entries = tx_entries.clone();
 
                     Some(s.spawn(move || {
-                        // let core_id = if i % 2 == 0 { i & 31 } else { (i + 16) & 31 };
-                        // core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-                        Self::play_annotated_thread(i, games_to_play, tx_entries, feeder, tables)
+                        let core_id = if i % 2 == 0 { i & 31 } else { (i + 16) & 31 };
+                        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+                        Self::play_annotated_thread(i, tx_entries, feeder, tables)
                     }))
                 })
                 .collect::<Vec<_>>();
@@ -108,10 +105,7 @@ impl SelfplayTrainer {
                         }
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                        println!("All threads done sending entries");
-                        break;
-                    }
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
                 }
 
                 if self.stats_flushed_at.elapsed().as_secs() >= 60 * 1 {
@@ -140,6 +134,15 @@ impl SelfplayTrainer {
             for handle in handles {
                 let _ = handle.join().unwrap();
             }
+
+            println!(
+                "Selfplay finished with {} games in {}. {} total positions annotated, games per minute ~{}. binpack size: ~{}",
+                self.stats_num_games_total,
+                util::time_format(self.stats_flushed_at.elapsed().as_millis() as u64),
+                self.stats_positions_total,
+                self.stats_num_games_total as f64 / (start_at.elapsed().as_secs_f64() / 60.0),
+                util::byte_size_string(self.binpack_size_bytes()),
+            );
         });
 
         Ok(())
@@ -147,32 +150,33 @@ impl SelfplayTrainer {
 
     fn play_annotated_thread(
         thread_id: usize,
-        num_games: usize,
         tx: crossbeam::channel::Sender<Vec<sfbinpack::TrainingDataEntry>>,
         mut feeder: Box<dyn PositionFeeder + Send>,
         tables: &tables::Tables,
     ) -> anyhow::Result<()> {
         let search_params =
-            engine::search::search_params::SearchParams::from_iter("depth 7".split_whitespace());
+            engine::search::search_params::SearchParams::from_iter("depth 9".split_whitespace());
 
-        let mut tt = engine::search::transposition_v2::TranspositionTable::new(16);
+        // depth 7 -> 2mb, depth 9 -> 4mb
+        let mut tt = engine::search::transposition_v2::TranspositionTable::new(4);
         let rt = engine::search::repetition_v2::RepetitionTable::new();
+
+        // depth 9
+        // 2mb -> Games per minute: ~572.48. ETA: 29:05:47.017
+        // 4mb -> Games per minute: ~600.82. ETA: 27:43:23.336
+        // 8mb -> Games per minute: ~552.95. ETA: 29:25:32.639
 
         let mut search_engine =
             engine::search::v12_eval_sp::Search::new(search_params, tables, &mut tt, rt);
 
         let mut training_entries = Vec::new();
 
-        for _ in 0..num_games {
+        let mut dbg_tt_hitrates = Vec::new();
+
+        loop {
             let position = match feeder.next_position() {
                 Some(p) => p,
-                None => {
-                    eprintln!(
-                        "[Thread {}]: No more positions to play, exiting..",
-                        thread_id
-                    );
-                    break;
-                }
+                None => break,
             };
 
             search_engine
@@ -266,6 +270,22 @@ impl SelfplayTrainer {
                 *search_engine.get_board_mut() = board;
             };
 
+            if DEBUG {
+                let stats = search_engine.get_tt_mut().calc_stats();
+                dbg_tt_hitrates
+                    .push(stats.probe_hit as f64 / (stats.probe_hit + stats.probe_miss) as f64);
+                println!(
+                    "[Thread {}] Game finished with result {} after {} plies. TT usage: {:.02}%, probe hit rate: {:.02}%, store hit rate: {:.02}%. Collisions: {}",
+                    thread_id,
+                    result,
+                    search_engine.get_board_mut().ply(),
+                    stats.fill_percentage * 100.0,
+                    stats.probe_hit as f64 / (stats.probe_hit + stats.probe_miss) as f64 * 100.0,
+                    stats.store_hit as f64 / (stats.store_hit + stats.store_miss) as f64 * 100.0,
+                    stats.collisions,
+                );
+            }
+
             // alternate with initia_b_move
             let mut b_move = initial_b_move;
             for entry in training_entries.iter_mut() {
@@ -275,6 +295,20 @@ impl SelfplayTrainer {
 
             tx.send(training_entries.clone()).unwrap();
             training_entries.clear();
+        }
+
+        if DEBUG {
+            dbg_tt_hitrates.sort_by(|a, b| b.partial_cmp(a).unwrap());
+
+            let avg_tt_hitrate: f64 =
+                dbg_tt_hitrates.iter().sum::<f64>() / dbg_tt_hitrates.len() as f64;
+            let median_tt_hitrate: f64 = dbg_tt_hitrates[dbg_tt_hitrates.len() / 2];
+            println!(
+                "[Thread {}] Finished annotated selfplay. Avg TT probe hit rate: {:.02}%, median: {:.02}%",
+                thread_id,
+                avg_tt_hitrate * 100.0,
+                median_tt_hitrate * 100.0
+            );
         }
 
         Ok(())
@@ -388,6 +422,11 @@ impl SharedFenFeeder {
             inner: std::sync::Arc::new(std::sync::Mutex::new(FenFeeder::new(path))),
         }
     }
+
+    fn set_max_positions(&self, max: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.set_max_positions(max);
+    }
 }
 
 impl matchmaking::PositionFeeder for SharedFenFeeder {
@@ -400,6 +439,7 @@ impl matchmaking::PositionFeeder for SharedFenFeeder {
 struct FenFeeder {
     positions_total: usize,
     cursor: usize,
+    max_positions_to_play: Option<usize>,
     chunk: Vec<String>,
     overflow: String,
     buf: Vec<u8>,
@@ -430,12 +470,17 @@ impl FenFeeder {
 
         Self {
             cursor: 0,
+            max_positions_to_play: None,
             positions_total: num_lines,
             chunk: Vec::new(),
             overflow: String::new(),
             reader: std::io::BufReader::new(file),
             buf,
         }
+    }
+
+    fn set_max_positions(&mut self, max: usize) {
+        self.max_positions_to_play = Some(max);
     }
 
     fn read_chunk(&mut self) {
@@ -480,6 +525,14 @@ impl FenFeeder {
     }
 
     fn next_position(&mut self) -> Option<String> {
+        if let Some(max) = self.max_positions_to_play {
+            if self.cursor >= max {
+                return None;
+            }
+        } else {
+            panic!("max_positions_to_play not set");
+        }
+
         let position = self.chunk.pop();
 
         match position {
