@@ -424,6 +424,8 @@ impl<'a> Search<'a> {
                 self.alpha_moves[i][j] = 0;
             }
         }
+
+        self.tt.new_search();
     }
 
     /// A hard reset. Clears all counters, the transposition and repetition tables.
