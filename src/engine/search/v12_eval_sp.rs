@@ -13,6 +13,8 @@ use crate::{
         },
         tables::{self},
     },
+    nnue::nnue,
+    nnue_load, pop_ls1b,
     util::{self, Align64, table_mirror, table_negate_i8},
 };
 
@@ -64,21 +66,6 @@ const WEIGHT_TABLE_MGEG: [[Eval; PieceIndex::PieceIndexMax as usize]; 2] = [
         -(WEIGHT_PAWN + 20),
         0,
     ],
-];
-
-const WEIGHT_TABLE: [Eval; 12] = [
-    WEIGHT_KING,
-    WEIGHT_QUEEN,
-    WEIGHT_ROOK,
-    WEIGHT_BISHOP,
-    WEIGHT_KNIGHT,
-    WEIGHT_PAWN,
-    -WEIGHT_KING,
-    -WEIGHT_QUEEN,
-    -WEIGHT_ROOK,
-    -WEIGHT_BISHOP,
-    -WEIGHT_KNIGHT,
-    -WEIGHT_PAWN,
 ];
 
 /*
@@ -180,13 +167,13 @@ pub const EVAL_TABLES_INV_MGEG: Align64<[[[i8; 64]; 16]; 2]> = const {
     ];
     let eval_white_pawn_eg = [
         0,  0,  0,  0,  0,  0,  0,  0,
-        100,100,100,100,100,100,100,100,
-        90,  90, 90, 90, 90, 90, 90, 90,
-        80,  80, 80, 80, 80, 80, 80, 80,
-        0,    0, 10, 20, 20, 10,  0,  0,
-        5,   -5,-10,  0,  0,-10, -5,  5,
-        5,   10, 10,-20,-20, 10, 10,  5,
-        0,    0,  0,  0,  0,  0,  0,  0,
+        60,  60, 60, 60, 60, 60, 60, 60,
+        50,  50, 50, 50, 50, 50, 50, 50,
+        5,   5,  10, 25, 25, 10,  5,  5,
+        0,   0,  0, 20, 20,  0,  0,  0,
+        5,  -5,-10,  0,  0,-10, -5,  5,
+        5,  10, 10,-20,-20, 10, 10,  5,
+        0,   0,  0,  0,  0,  0,  0,  0,
     ];
     let tabl_zero = [
         0, 0, 0, 0, 0, 0, 0, 0,
@@ -198,6 +185,10 @@ pub const EVAL_TABLES_INV_MGEG: Align64<[[[i8; 64]; 16]; 2]> = const {
         0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0
     ];
+
+    // Final eval_v2:
+    // Versus match ended: 146 evaltest_v2.exe wins, 95 evaltest_v1.exe wins, 59 draws
+    // Versus match ended: 177 evaltest_v3.exe wins, 144 evaltest_v2.exe wins, 79 draws
 
     Align64([
         [
@@ -237,26 +228,6 @@ pub const EVAL_TABLES_INV_MGEG: Align64<[[[i8; 64]; 16]; 2]> = const {
         tabl_zero,
     ]])
 };
-
-#[cfg_attr(any(), rustfmt::skip)]
-const MVV_LVA_SCORES: [[usize; 16]; 16] = [
-    /* Ep Cap */      [0, 0, 0, 0, 0, 0, 5000, 0, 0, 0, 0, 0, 0, 0, 5000, 0],
-    /* WhiteKing */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* WhiteQueen */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 1500, 1400, 1300, 1200, 1100, 1000, 0],
-    /* WhiteRook */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 2500, 2400, 2300, 2200, 2100, 2000, 0],
-    /* WhiteBishop */ [0, 0, 0, 0, 0, 0, 0, 0, 0, 3500, 3400, 3300, 3200, 3100, 3000, 0],
-    /* WhiteKnight */ [0, 0, 0, 0, 0, 0, 0, 0, 0, 4500, 4400, 4300, 4200, 4100, 4000, 0],
-    /* WhitePawn */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 5500, 5400, 5300, 5200, 5100, 5000, 0],
-    /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* Black Null */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackKing */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackQueen */  [0, 1500, 1400, 1300, 1200, 1100, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackRook */   [0, 2500, 2400, 2300, 2200, 2100, 2000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackBishop */ [0, 3500, 3400, 3300, 3200, 3100, 3000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackKnight */ [0, 4500, 4400, 4300, 4200, 4100, 4000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackPawn */   [0, 5500, 5400, 5300, 5200, 5100, 5000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-];
 
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
@@ -301,7 +272,9 @@ struct Scratch {
 pub struct Search<'a> {
     chess: ChessGame,
     tables: &'a tables::Tables,
-    sig: &'a AbortSignal,
+    sig: Option<AbortSignal>,
+
+    nnue: Box<nnue::Nnue>,
 
     ply: u8,
     is_stopping: bool,
@@ -380,15 +353,14 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
 impl<'a> Search<'a> {
     pub fn new(
         params: SearchParams,
-        chess: ChessGame,
         tables: &'a tables::Tables,
         tt: &'a mut TranspositionTable,
         rt: RepetitionTable,
-        sig: &'a AbortSignal,
     ) -> Search<'a> {
         let mut s = Search {
-            sig,
-            chess: chess,
+            nnue: nnue_load!("../../../nnue/y2.bin"),
+            sig: None,
+            chess: chess_v2::ChessGame::new(),
             move_list: [0; 256],
             params: Box::new(params),
             tables,
@@ -416,32 +388,123 @@ impl<'a> Search<'a> {
             tt,
         };
 
+        s.nnue.load(&s.chess);
+
         s
     }
 
+    /// A soft reset. Clears all counters but does not zero the transposition
+    /// or repetition tables, or change the board position.
+    #[inline(always)]
+    pub fn new_search(&mut self) {
+        self.pv_length = 0;
+        self.pv_trace = false;
+        self.is_stopping = false;
+        self.node_count = 0;
+        self.quiet_nodes = 0;
+        self.quiet_depth = 0;
+        self.score = -Eval::MAX;
+        self.ply = 0;
+        self.b_cut_count = 0;
+        self.b_cut_null_count = 0;
+        self.a_raise_count = 0;
+        self.depth = 0;
+
+        for i in 0..PV_DEPTH {
+            self.pv_table.lengths[i] = 0;
+            for j in 0..PV_DEPTH {
+                self.pv_table.moves[i][j] = 0;
+            }
+            self.beta_moves[i] = [0; 2];
+            self.pv[i] = 0;
+        }
+
+        for i in 0..16 {
+            for j in 0..64 {
+                self.alpha_moves[i][j] = 0;
+            }
+        }
+    }
+
+    /// A hard reset. Clears all counters, the transposition and repetition tables.
+    /// and resets the board position to the starting position.
+    #[inline(always)]
+    pub fn new_game_from_fen(
+        &mut self,
+        fen: &str,
+        tables: &tables::Tables,
+    ) -> Result<usize, String> {
+        self.rt.clear();
+        self.tt.clear();
+        let fen_length = self.chess.load_fen(fen, tables)?;
+        self.nnue.load(&self.chess);
+        Ok(fen_length)
+    }
+
+    /// Resets the board & nnue state without clearing the transposition or repetition tables.
+    #[inline(always)]
+    pub fn new_game_from_board(&mut self, board: &ChessGame) {
+        self.chess = *board;
+        self.nnue.load(&self.chess);
+    }
+
+    #[inline(always)]
+    pub fn get_board_mut(&mut self) -> &mut ChessGame {
+        &mut self.chess
+    }
+    #[inline(always)]
     pub fn get_pv(&self) -> &[u16] {
         &self.pv[0..self.pv_length]
     }
+    #[inline(always)]
     pub fn b_cut_count(&self) -> u64 {
         self.b_cut_count
     }
+    #[inline(always)]
     pub fn b_cut_null_count(&self) -> u64 {
         self.b_cut_null_count
     }
+    #[inline(always)]
     pub fn a_raise_count(&self) -> u64 {
         self.a_raise_count
     }
+    #[inline(always)]
     pub fn get_depth(&self) -> u8 {
         self.depth
     }
+    #[inline(always)]
     pub fn get_quiet_depth(&self) -> u32 {
         self.quiet_depth
     }
+    #[inline(always)]
     pub fn get_quiet_nodes(&self) -> u64 {
         self.quiet_nodes
     }
+    #[inline(always)]
     pub fn get_rt(&self) -> &RepetitionTable {
         &self.rt
+    }
+    #[inline(always)]
+    pub fn get_rt_mut(&mut self) -> &mut RepetitionTable {
+        &mut self.rt
+    }
+    #[inline(always)]
+    pub fn get_tt_mut(&mut self) -> &mut TranspositionTable {
+        &mut self.tt
+    }
+    #[inline(always)]
+    pub fn get_nnue_mut(&mut self) -> &mut nnue::Nnue {
+        self.nnue.as_mut()
+    }
+
+    pub fn set_sig(&mut self, sig: AbortSignal) {
+        self.sig = Some(sig);
+    }
+    pub fn set_rt(&mut self, rt: RepetitionTable) {
+        self.rt = rt;
+    }
+    pub fn set_search_params(&mut self, params: SearchParams) {
+        self.params = Box::new(params);
     }
 
     fn go(&mut self, alpha: Eval, beta: Eval, depth: u8) -> Eval {
@@ -454,6 +517,18 @@ impl<'a> Search<'a> {
             self.is_stopping = true;
             return 0;
         }
+
+        debug_assert_eq!(
+            self.nnue.acc,
+            {
+                let mut expected_pair = nnue::AccumulatorPair::new();
+                expected_pair.load(&self.chess, &self.nnue.net);
+                expected_pair
+            },
+            "NNUE accumulator mismatch at depth {}, ply {}",
+            depth,
+            self.ply
+        );
 
         // Cut 2 plys before max PV depth since the previous call
         // can't copy over PV moves beyond this point
@@ -500,15 +575,27 @@ impl<'a> Search<'a> {
 
         // Null move pruning
         if apply_pruning && depth_pruning && !self.is_endgame() {
-            let ep_square = self.chess.make_null_move(self.tables, None);
+            let ep_square = self.chess.make_null_move(self.tables, Some(&mut self.nnue));
 
             self.ply += 1;
             let score = -self.go(-beta, -beta + 1, depth - 3);
             self.ply -= 1;
 
-            self.chess.rollback_null_move(ep_square, self.tables, None);
+            self.chess
+                .rollback_null_move(ep_square, self.tables, Some(&mut self.nnue));
+
+            debug_assert_eq!(
+                self.nnue.acc,
+                {
+                    let mut expected_pair = nnue::AccumulatorPair::new();
+                    expected_pair.load(&self.chess, &self.nnue.net);
+                    expected_pair
+                },
+                "NNUE accumulator mismatch after null move",
+            );
 
             if self.is_stopping {
+                self.rt.pop_position();
                 return 0;
             }
 
@@ -551,6 +638,7 @@ impl<'a> Search<'a> {
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
+        let acc_copy = self.nnue.acc.clone();
 
         let mut i = 2;
         while i < move_count + 2 {
@@ -575,13 +663,14 @@ impl<'a> Search<'a> {
 
             let move_ok = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be legal
-                self.chess.make_move(mv, self.tables, None)
+                self.chess.make_move(mv, self.tables, Some(&mut self.nnue))
             };
 
             let is_valid_move = move_ok && !self.chess.in_check(self.tables, !self.chess.b_move());
 
             if !is_valid_move {
                 self.chess = board_copy;
+                self.nnue.acc = acc_copy;
                 continue;
             }
 
@@ -623,8 +712,10 @@ impl<'a> Search<'a> {
 
             self.ply -= 1;
             self.chess = board_copy;
+            self.nnue.acc = acc_copy;
 
             if self.is_stopping {
+                self.rt.pop_position();
                 return 0;
             }
 
@@ -743,6 +834,17 @@ impl<'a> Search<'a> {
             return 0;
         }
 
+        debug_assert_eq!(
+            self.nnue.acc,
+            {
+                let mut expected_pair = nnue::AccumulatorPair::new();
+                expected_pair.load(&self.chess, &self.nnue.net);
+                expected_pair
+            },
+            "NNUE accumulator mismatch in q search at ply {}",
+            self.ply
+        );
+
         let static_eval = self.evaluate();
 
         let mut alpha = alpha;
@@ -787,6 +889,7 @@ impl<'a> Search<'a> {
 
         let mut best_score: Eval = static_eval;
         let board_copy = self.chess.clone();
+        let acc_copy = self.nnue.acc.clone();
 
         let mut i = 0;
         while i < move_count {
@@ -804,13 +907,14 @@ impl<'a> Search<'a> {
 
             let move_ok = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be legal
-                self.chess.make_move(mv, self.tables, None)
+                self.chess.make_move(mv, self.tables, Some(&mut self.nnue))
             };
 
             let is_valid_move = move_ok && !self.chess.in_check(self.tables, !self.chess.b_move());
 
             if !is_valid_move {
                 self.chess = board_copy;
+                self.nnue.acc = acc_copy;
                 continue;
             }
 
@@ -821,6 +925,7 @@ impl<'a> Search<'a> {
             self.ply -= 1;
 
             self.chess = board_copy;
+            self.nnue.acc = acc_copy;
 
             if self.is_stopping {
                 return 0;
@@ -873,311 +978,211 @@ impl<'a> Search<'a> {
 
     #[inline(always)]
     pub fn evaluate(&self) -> Eval {
-        use std::arch::x86_64::*;
+        let final_score = self.nnue.evaluate(self.chess.b_move());
+        return final_score as Eval;
 
-        let bitboards = self.chess.bitboards_new();
+        // use std::arch::x86_64::*;
 
-        let mut bonuses_mg: Eval = 0;
-        let mut bonuses_eg: Eval = 0;
+        // let bitboards = self.chess.bitboards_new();
 
-        unsafe {
-            let mut bonuses_mg_x64 = _mm512_setzero_si512();
-            let mut bonuses_eg_x64 = _mm512_setzero_si512();
+        // let mut bonuses_mg: Eval = 0;
+        // let mut bonuses_eg: Eval = 0;
 
-            macro_rules! acc_piece_bonus_avx512 {
-                ($bonus_vec:ident,$is_eg:expr,$piece_id:expr) => {
-                    $bonus_vec = _mm512_mask_blend_epi8(
-                        bitboards[$piece_id as usize],
-                        $bonus_vec,
-                        _mm512_loadu_epi8(
-                            EVAL_TABLES_INV_MGEG.0[$is_eg][$piece_id as usize].as_ptr()
-                                as *const i8,
-                        ),
-                    )
-                };
-            }
+        // unsafe {
+        //     let mut bonuses_mg_x64 = _mm512_setzero_si512();
+        //     let mut bonuses_eg_x64 = _mm512_setzero_si512();
 
-            macro_rules! sum_bonus_avx512 {
-                ($bonus_acc:ident,$bonus_vec:ident) => {
-                    let bonuses_lsb = _mm512_castsi512_si256($bonus_vec);
-                    let bonuses_msb = _mm512_extracti64x4_epi64($bonus_vec, 1);
-                    let bonuses_lsb_i16 = _mm512_cvtepi8_epi16(bonuses_lsb);
-                    let bonuses_msb_i16 = _mm512_cvtepi8_epi16(bonuses_msb);
-                    let summed_bonuses = _mm512_add_epi16(bonuses_lsb_i16, bonuses_msb_i16);
-                    let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
-                    let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
+        //     macro_rules! acc_piece_bonus_avx512 {
+        //         ($bonus_vec:ident,$is_eg:expr,$piece_id:expr) => {
+        //             $bonus_vec = _mm512_mask_blend_epi8(
+        //                 bitboards[$piece_id as usize],
+        //                 $bonus_vec,
+        //                 _mm512_loadu_epi8(
+        //                     EVAL_TABLES_INV_MGEG.0[$is_eg][$piece_id as usize].as_ptr()
+        //                         as *const i8,
+        //                 ),
+        //             )
+        //         };
+        //     }
 
-                    $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_lsb) as Eval;
-                    $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_msb) as Eval;
-                };
-            }
+        //     macro_rules! sum_bonus_avx512 {
+        //         ($bonus_acc:ident,$bonus_vec:ident) => {
+        //             let bonuses_lsb = _mm512_castsi512_si256($bonus_vec);
+        //             let bonuses_msb = _mm512_extracti64x4_epi64($bonus_vec, 1);
+        //             let bonuses_lsb_i16 = _mm512_cvtepi8_epi16(bonuses_lsb);
+        //             let bonuses_msb_i16 = _mm512_cvtepi8_epi16(bonuses_msb);
+        //             let summed_bonuses = _mm512_add_epi16(bonuses_lsb_i16, bonuses_msb_i16);
+        //             let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
+        //             let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
 
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKing);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteQueen);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteRook);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteBishop);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKnight);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhitePawn);
+        //             $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_lsb) as Eval;
+        //             $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_msb) as Eval;
+        //         };
+        //     }
 
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKing);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackQueen);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackRook);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackBishop);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKnight);
-            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackPawn);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKing);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteQueen);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteRook);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteBishop);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKnight);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhitePawn);
 
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKing);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteQueen);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteRook);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteBishop);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKnight);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhitePawn);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKing);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackQueen);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackRook);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackBishop);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKnight);
+        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackPawn);
 
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKing);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackQueen);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackRook);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackBishop);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKnight);
-            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackPawn);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKing);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteQueen);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteRook);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteBishop);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKnight);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhitePawn);
 
-            sum_bonus_avx512!(bonuses_mg, bonuses_mg_x64);
-            sum_bonus_avx512!(bonuses_eg, bonuses_eg_x64);
-        }
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKing);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackQueen);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackRook);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackBishop);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKnight);
+        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackPawn);
 
-        let wb = bitboards[PieceIndex::WhiteBishop as usize].count_ones();
-        let bb = bitboards[PieceIndex::BlackBishop as usize].count_ones();
+        //     sum_bonus_avx512!(bonuses_mg, bonuses_mg_x64);
+        //     sum_bonus_avx512!(bonuses_eg, bonuses_eg_x64);
+        // }
 
-        let wq_bq = bitboards[PieceIndex::WhiteQueen as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackQueen as usize].count_ones() as Eval;
+        // let wb = bitboards[PieceIndex::WhiteBishop as usize].count_ones();
+        // let bb = bitboards[PieceIndex::BlackBishop as usize].count_ones();
 
-        let wr_br = bitboards[PieceIndex::WhiteRook as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackRook as usize].count_ones() as Eval;
+        // let wq_bq = bitboards[PieceIndex::WhiteQueen as usize].count_ones() as Eval
+        //     - bitboards[PieceIndex::BlackQueen as usize].count_ones() as Eval;
 
-        let wb_bb = wb as Eval - bb as Eval;
+        // let wr_br = bitboards[PieceIndex::WhiteRook as usize].count_ones() as Eval
+        //     - bitboards[PieceIndex::BlackRook as usize].count_ones() as Eval;
 
-        let wn_bn = bitboards[PieceIndex::WhiteKnight as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackKnight as usize].count_ones() as Eval;
+        // let wb_bb = wb as Eval - bb as Eval;
 
-        let wp_bp = bitboards[PieceIndex::WhitePawn as usize].count_ones() as Eval
-            - bitboards[PieceIndex::BlackPawn as usize].count_ones() as Eval;
+        // let wn_bn = bitboards[PieceIndex::WhiteKnight as usize].count_ones() as Eval
+        //     - bitboards[PieceIndex::BlackKnight as usize].count_ones() as Eval;
 
-        let mut score_mg = bonuses_mg
-            + wq_bq * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteQueen as usize]
-            + wr_br * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteRook as usize]
-            + wb_bb * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteBishop as usize]
-            + wn_bn * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteKnight as usize]
-            + wp_bp * WEIGHT_TABLE_MGEG[0][PieceIndex::WhitePawn as usize];
+        // let wp_bp = bitboards[PieceIndex::WhitePawn as usize].count_ones() as Eval
+        //     - bitboards[PieceIndex::BlackPawn as usize].count_ones() as Eval;
 
-        let mut score_eg = bonuses_eg
-            + wq_bq * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteQueen as usize]
-            + wr_br * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteRook as usize]
-            + wb_bb * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteBishop as usize]
-            + wn_bn * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteKnight as usize]
-            + wp_bp * WEIGHT_TABLE_MGEG[1][PieceIndex::WhitePawn as usize];
+        // let mut score_mg = bonuses_mg
+        //     + wq_bq * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteQueen as usize]
+        //     + wr_br * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteRook as usize]
+        //     + wb_bb * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteBishop as usize]
+        //     + wn_bn * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteKnight as usize]
+        //     + wp_bp * WEIGHT_TABLE_MGEG[0][PieceIndex::WhitePawn as usize];
 
-        let phase = self.calc_board_phase();
+        // let mut score_eg = bonuses_eg
+        //     + wq_bq * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteQueen as usize]
+        //     + wr_br * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteRook as usize]
+        //     + wb_bb * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteBishop as usize]
+        //     + wn_bn * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteKnight as usize]
+        //     + wp_bp * WEIGHT_TABLE_MGEG[1][PieceIndex::WhitePawn as usize];
 
-        if wb > 1 {
-            score_mg += 24;
-            score_eg += 48;
-        }
-        if bb > 1 {
-            score_mg -= 24;
-            score_eg -= 48;
-        }
+        // let phase = self.calc_board_phase();
 
-        let w_moves = self.chess.estimate_move_count(false, &self.tables);
-        let b_moves = self.chess.estimate_move_count(true, &self.tables);
-        let move_ratio = w_moves as Eval - b_moves as Eval;
+        // if wb > 1 {
+        //     score_mg += 20;
+        //     score_eg += 40;
+        // }
+        // if bb > 1 {
+        //     score_mg -= 20;
+        //     score_eg -= 40;
+        // }
 
-        // let all_pawns =
-        //     bitboards[PieceIndex::WhitePawn as usize] | bitboards[PieceIndex::BlackPawn as usize];
+        // let mut white_pawns = bitboards[PieceIndex::WhitePawn as usize];
+        // loop {
+        //     let pawn_sq = pop_ls1b!(white_pawns);
+        //     let file = (0x101010101010101 << 8) << pawn_sq;
+        //     let file_left = (file >> 1) & tables::EX_H_FILE;
+        //     let file_right = (file << 1) & tables::EX_A_FILE;
+        //     let full_mask = file | file_left | file_right;
 
-        let score =
-            ((score_mg as f32 * phase + score_eg as f32 * (1.0 - phase)) as Eval) + move_ratio * 10;
+        //     let rank_bonus = [10, 10, 20, 50, 90, 100, 0][(pawn_sq / 8) as usize];
 
-        let final_score = score * if self.chess.b_move() { -1 } else { 1 };
+        //     if full_mask & bitboards[PieceIndex::BlackPawn as usize] == 0 {
+        //         score_mg += rank_bonus;
+        //         score_eg += rank_bonus;
+        //     }
+        // }
 
-        // assert!(
-        //     self.evaluate_legacy() == final_score,
-        //     "Legacy and simd evaluation mismatch for {} != {}. b_move= {}",
-        //     self.evaluate_legacy(),
-        //     final_score,
-        //     self.chess.b_move()
-        // );
+        // let mut black_pawns = bitboards[PieceIndex::BlackPawn as usize];
+        // loop {
+        //     let pawn_sq = pop_ls1b!(black_pawns);
+        //     let file = (0x101010101010101u64).wrapping_shr((64 - pawn_sq) as u32);
+        //     let file_left = (file >> 1) & tables::EX_H_FILE;
+        //     let file_right = (file << 1) & tables::EX_A_FILE;
+        //     let full_mask = file | file_left | file_right;
 
-        final_score
-    }
+        //     let rank_bonus = [0, 100, 90, 50, 20, 10, 10][(pawn_sq / 8) as usize];
 
-    fn evaluate_legacy(&mut self) -> Eval {
-        let material = self.chess.material();
-        let is_endgame = (((material[0] & (!1023)) | (material[1] & (!1023))) == 0) as usize;
+        //     if full_mask & bitboards[PieceIndex::WhitePawn as usize] == 0 {
+        //         score_mg -= rank_bonus;
+        //         score_eg -= rank_bonus;
+        //     }
+        // }
 
-        let boards = self.chess.bitboards_new();
+        // // King safety
+        // let attacker_bonuses = [10, 30, 60, 100, 200];
+        // let attacker_bonuses_eg = [5, 10, 20, 40, 100];
+        // let white_king_sq = bitboards[PieceIndex::WhiteKing as usize].trailing_zeros() as u8;
+        // let mut white_king_surround_squares =
+        //     tables::Tables::LT_KING_MOVE_MASKS[white_king_sq as usize];
+        // loop {
+        //     let king_surround_sq = pop_ls1b!(white_king_surround_squares);
 
-        let mut final_score: Eval = 0;
+        //     let num_attackers = self.chess.count_king_square_attackers_slow(
+        //         king_surround_sq as u8,
+        //         false,
+        //         self.tables,
+        //     );
 
-        for piece_id in
-            crate::util::PieceId::WhiteKing as usize..crate::util::PieceId::PieceMax as usize
-        {
-            let mut board_bits = boards[PieceIndex::from(util::PieceId::from(piece_id)) as usize];
-            loop {
-                let piece_square = crate::pop_ls1b!(board_bits);
+        //     score_mg -= attacker_bonuses[num_attackers.min(4)];
+        //     score_eg -= attacker_bonuses_eg[num_attackers.min(4)];
+        // }
+        // let black_king_sq = bitboards[PieceIndex::BlackKing as usize].trailing_zeros() as u8;
+        // let mut black_king_surround_squares =
+        //     tables::Tables::LT_KING_MOVE_MASKS[black_king_sq as usize];
+        // loop {
+        //     let king_surround_sq = pop_ls1b!(black_king_surround_squares);
 
-                let pst_index = match util::PieceId::from(piece_id) {
-                    util::PieceId::WhiteKing => is_endgame as usize,
-                    util::PieceId::WhiteQueen => piece_id + 1,
-                    util::PieceId::WhiteRook => piece_id + 1,
-                    util::PieceId::WhiteBishop => piece_id + 1,
-                    util::PieceId::WhiteKnight => piece_id + 1,
-                    util::PieceId::WhitePawn => piece_id + 1,
-                    util::PieceId::BlackKing => piece_id + is_endgame + 1,
-                    util::PieceId::BlackQueen => piece_id + 2,
-                    util::PieceId::BlackRook => piece_id + 2,
-                    util::PieceId::BlackBishop => piece_id + 2,
-                    util::PieceId::BlackKnight => piece_id + 2,
-                    util::PieceId::BlackPawn => piece_id + 2,
-                    _ => unreachable!(),
-                };
+        //     let num_attackers = self.chess.count_king_square_attackers_slow(
+        //         king_surround_sq as u8,
+        //         true,
+        //         self.tables,
+        //     );
 
-                let square_bonus =
-                    tables::Tables::EVAL_TABLES_INV_I8_OLD[pst_index][piece_square as usize];
-                final_score += WEIGHT_TABLE[piece_id] + square_bonus as Eval;
-            }
-        }
+        //     score_mg += attacker_bonuses[num_attackers.min(4)];
+        //     score_eg += attacker_bonuses_eg[num_attackers.min(4)];
+        // }
 
-        final_score * if self.chess.b_move() { -1 } else { 1 }
-    }
+        // let w_moves = self.chess.estimate_move_count(false, &self.tables);
+        // let b_moves = self.chess.estimate_move_count(true, &self.tables);
+        // let move_ratio = w_moves as Eval - b_moves as Eval;
 
-    #[inline(always)]
-    fn sort_moves_quiet(&self, a: &u16, b: &u16) -> std::cmp::Ordering {
-        unsafe {
-            let beta_mv0 = self.beta_moves.get_unchecked(self.ply as usize)[0];
-            let beta_mv1 = self.beta_moves.get_unchecked(self.ply as usize)[1];
+        // // let all_pawns =
+        // //     bitboards[PieceIndex::WhitePawn as usize] | bitboards[PieceIndex::BlackPawn as usize];
 
-            if *a == beta_mv0 {
-                return std::cmp::Ordering::Less;
-            }
+        // let mut score =
+        //     ((score_mg as f32 * phase + score_eg as f32 * (1.0 - phase)) as Eval) + move_ratio * 5;
 
-            if *b == beta_mv0 {
-                return std::cmp::Ordering::Greater;
-            }
+        // score += if self.chess.b_move() { -5 } else { 5 };
 
-            if *a == beta_mv1 {
-                return std::cmp::Ordering::Less;
-            }
+        // let final_score = score * if self.chess.b_move() { -1 } else { 1 };
 
-            if *b == beta_mv1 {
-                return std::cmp::Ordering::Greater;
-            }
+        // // assert!(
+        // //     self.evaluate_legacy() == final_score,
+        // //     "Legacy and simd evaluation mismatch for {} != {}. b_move= {}",
+        // //     self.evaluate_legacy(),
+        // //     final_score,
+        // //     self.chess.b_move()
+        // // );
 
-            let a_src_sq = a & 0x3F;
-            let b_src_sq = b & 0x3F;
-
-            let a_dst_sq = (a >> 6) & 0x3F;
-            let b_dst_sq = (b >> 6) & 0x3F;
-
-            let spt = self.chess.spt();
-
-            let a_src_piece = *spt.get_unchecked(a_src_sq as usize) as usize;
-            let b_src_piece = *spt.get_unchecked(b_src_sq as usize) as usize;
-
-            let a_score = self
-                .alpha_moves
-                .get_unchecked(a_src_piece)
-                .get_unchecked(a_dst_sq as usize);
-            let b_score = self
-                .alpha_moves
-                .get_unchecked(b_src_piece)
-                .get_unchecked(b_dst_sq as usize);
-
-            return b_score.cmp(&a_score);
-        }
-    }
-
-    #[inline(always)]
-    fn sort_moves_cap(&self, a_capture: &u16, b: &u16) -> std::cmp::Ordering {
-        if (*b & MV_FLAG_CAP) == 0 {
-            // b is a quiet move
-            return std::cmp::Ordering::Less;
-        }
-
-        let a_src_sq = a_capture & 0x3F;
-        let b_src_sq = b & 0x3F;
-
-        let a_dst_sq = (a_capture >> 6) & 0x3F;
-        let b_dst_sq = (b >> 6) & 0x3F;
-
-        // MVV-LVA
-        unsafe {
-            let spt = self.chess.spt();
-            let a_dst_piece = *spt.get_unchecked(a_dst_sq as usize);
-            let b_dst_piece = *spt.get_unchecked(b_dst_sq as usize);
-            let a_src_piece = *spt.get_unchecked(a_src_sq as usize);
-            let b_src_piece = *spt.get_unchecked(b_src_sq as usize);
-
-            let a_score = *MVV_LVA_SCORES
-                .get_unchecked(a_dst_piece as usize)
-                .get_unchecked(a_src_piece as usize);
-
-            let b_score = *MVV_LVA_SCORES
-                .get_unchecked(b_dst_piece as usize)
-                .get_unchecked(b_src_piece as usize);
-
-            return a_score.cmp(&b_score);
-        }
-    }
-
-    #[inline(always)]
-    fn sort_moves(&self, a: &u16, b: &u16, pv_move: u16, tt_move: u16) -> std::cmp::Ordering {
-        debug_assert!(*a != 0, "a should not be a null move");
-        debug_assert!(*b != 0, "b should not be a null move");
-
-        if *a == pv_move {
-            return std::cmp::Ordering::Less;
-        }
-        if *b == pv_move {
-            return std::cmp::Ordering::Greater;
-        }
-        if *a == tt_move {
-            return std::cmp::Ordering::Less;
-        }
-        if *b == tt_move {
-            return std::cmp::Ordering::Greater;
-        }
-
-        if (*a & MV_FLAG_CAP) == 0 {
-            // a is a quiet move
-
-            if (*b & MV_FLAG_CAP) == 0 {
-                // Both moves are quiet
-                return self.sort_moves_quiet(a, b);
-            }
-
-            // b is a capture
-            return std::cmp::Ordering::Greater;
-        }
-
-        self.sort_moves_cap(a, b)
-    }
-
-    #[inline(always)]
-    fn sort_moves_quiescence(&self, a: &u16, b: &u16) -> std::cmp::Ordering {
-        debug_assert!(*a != 0, "a should not be a null move");
-        debug_assert!(*b != 0, "b should not be a null move");
-
-        if (*a & MV_FLAG_CAP) == 0 {
-            // a is a quiet move
-
-            if (*b & MV_FLAG_CAP) == 0 {
-                return std::cmp::Ordering::Equal;
-            }
-
-            // b is a capture
-            return std::cmp::Ordering::Greater;
-        }
-
-        self.sort_moves_cap(a, b)
+        // final_score
     }
 
     #[inline(always)]
@@ -1260,12 +1265,16 @@ impl<'a> Search<'a> {
     }
 
     fn check_sigabort(&self) -> bool {
-        match self.sig.try_recv() {
-            Ok(_) => true,
-            Err(channel::TryRecvError::Empty) => false,
-            Err(channel::TryRecvError::Disconnected) => {
-                panic!("sigabort channel disconnected while searching")
+        if let Some(ref sig) = self.sig {
+            match sig.try_recv() {
+                Ok(_) => true,
+                Err(channel::TryRecvError::Empty) => false,
+                Err(channel::TryRecvError::Disconnected) => {
+                    panic!("sigabort channel disconnected while searching")
+                }
             }
+        } else {
+            false
         }
     }
 }

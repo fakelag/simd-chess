@@ -6,7 +6,7 @@ use crate::{
     util::{self},
 };
 
-pub const NEXT_MATCH_DELAY_SECONDS: u64 = 1;
+pub const NEXT_MATCH_DELAY_SECONDS: u64 = 0;
 
 pub trait PositionFeeder {
     fn next_position(&mut self) -> Option<String>;
@@ -60,6 +60,8 @@ pub struct Matchmaking {
     pub tables: tables::Tables,
     pub legal_moves: Vec<u16>,
 
+    pub go_params: String,
+
     pub moves_u16: Vec<u16>,
     pub moves: Vec<String>,
     engines: [Option<EngineProcess>; 2],
@@ -94,6 +96,8 @@ impl Matchmaking {
             engines: [None, None],
             engine_white: 0,
             engine_command_buf: String::new(),
+
+            go_params: "movetime 100".to_string(),
 
             versus_state: VersusState::Idle,
             versus_matches_left: 0,
@@ -285,10 +289,7 @@ impl Matchmaking {
                         let engine = self.get_engine_for_side_mut(side).unwrap();
                         engine.versus_wins += 1;
                     }
-                    chess_v2::GameState::Stalemate => {
-                        self.versus_draws += 1;
-                    }
-                    chess_v2::GameState::DrawByFiftyMoveRule => {
+                    chess_v2::GameState::Draw => {
                         self.versus_draws += 1;
                     }
                     chess_v2::GameState::Ongoing => {
@@ -367,8 +368,14 @@ impl Matchmaking {
     }
 
     pub fn set_go_params(&mut self, params: &str) {
-        self.engines[0].as_mut().unwrap().go_params = params.to_string();
-        self.engines[1].as_mut().unwrap().go_params = params.to_string();
+        self.go_params = params.to_string();
+
+        for engine in &mut self.engines {
+            if let Some(engine_process) = engine {
+                engine_process.go_params = params.to_string();
+            }
+        }
+        println!("Set go params to '{}'", params);
     }
 
     pub fn next_versus(&mut self) -> anyhow::Result<()> {
@@ -391,7 +398,8 @@ impl Matchmaking {
         self.engines[0] = Some(EngineProcess::new(&next_versus.stats.engine1_name)?);
         self.engines[1] = Some(EngineProcess::new(&next_versus.stats.engine2_name)?);
 
-        self.set_go_params("movetime 100");
+        self.engines[0].as_mut().unwrap().go_params = self.go_params.to_string();
+        self.engines[1].as_mut().unwrap().go_params = self.go_params.to_string();
 
         self.engine_white = 0;
         self.versus_matches_left = next_versus.stats.num_matches;
@@ -579,6 +587,23 @@ impl Matchmaking {
                     e
                 );
                 return false;
+            }
+        }
+
+        for engine in &mut self.engines {
+            let engine_process = engine.as_mut().unwrap();
+            engine_process
+                .send_newgame()
+                .expect("Failed to send ucinewgame command to engine");
+        }
+
+        for engine in &mut self.engines {
+            let engine_process = engine.as_ref().unwrap();
+            match engine_process.get_state() {
+                EngineState::ReadyOk => {}
+                _ => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
         }
 

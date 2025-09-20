@@ -20,6 +20,15 @@ impl Annotator {
                 std::thread::spawn(move || {
                     while let Ok(entries) = rx_recv.recv() {
                         println!("Received game with {} entries", entries.len());
+                        for entry in entries {
+                            println!(
+                                "Fen {} move {} score {} result {}",
+                                entry.pos.fen(),
+                                entry.mv.as_uci(),
+                                entry.score,
+                                entry.result
+                            );
+                        }
                     }
                 })
             })

@@ -3,8 +3,8 @@ use std::io::Read;
 use sfbinpack::chess::{coords, r#move, piece};
 
 use crate::{
-    engine::chess_v2,
-    matchmaking::{matchmaking::GameResult, *},
+    engine::{self, chess_v2, search::SearchStrategy, tables},
+    matchmaking::{matchmaking::PositionFeeder, *},
     util,
 };
 
@@ -32,17 +32,13 @@ impl SelfplayTrainer {
         }
     }
 
-    pub fn play(
+    pub fn play_annotated(
         &mut self,
-        parallel_matches: usize,
+        threads: usize,
         position_file_path: &str,
         from: Option<usize>,
         count: Option<usize>,
     ) -> anyhow::Result<()> {
-        let mut matchmakers = (0..parallel_matches)
-            .map(|_i| matchmaking::Matchmaking::new(util::FEN_STARTPOS).unwrap())
-            .collect::<Vec<_>>();
-
         let feeder = Box::new(SharedFenFeeder::new(position_file_path));
 
         if let Some(from) = from {
@@ -58,225 +54,252 @@ impl SelfplayTrainer {
         } else {
             feeder.inner.lock().unwrap().positions_total
         };
-        let num_games_per_matchmaker = num_positions_total / parallel_matches;
-        let overflow_games = num_positions_total % parallel_matches;
+        let num_games_per_thread = num_positions_total / threads;
+        let overflow_games = num_positions_total % threads;
 
         println!(
-            "Starting selfplay with {} parallel matches, {} total positions ({} per matchmaker)",
-            parallel_matches, num_positions_total, num_games_per_matchmaker
+            "Starting selfplay with {} threads, {} total positions ({:.02} per matchmaker)",
+            threads,
+            num_positions_total,
+            num_positions_total as f64 / threads as f64
         );
 
-        // for (index, mm) in matchmakers.iter_mut().enumerate() {
-        //     let extra = if index < overflow_games { 1 } else { 0 };
-        //     let games_to_play = num_games_per_matchmaker + extra;
+        let tables = tables::Tables::new();
 
-        //     mm.versus_autostart = false;
-        //     mm.versus_logging = false;
-        //     mm.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
-        //     mm.versus_start(
-        //         "v12_eval_fixed.exe",
-        //         "v12_eval_fixed.exe",
-        //         num_games_per_matchmaker + extra,
-        //         false,
-        //         Some(feeder.clone()),
-        //     )?;
-        //     // mm.set_go_params(&format!("movetime {}", thinktime_ms));
-        //     mm.set_go_params(&format!("depth {}", 8));
-        // }
+        let (tx_entries, rx_entries) = crossbeam::channel::bounded(256);
 
-        let mut active_matchmakings = matchmakers
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(i, mm)| {
-                let extra = if i < overflow_games { 1 } else { 0 };
-                let games_to_play = num_games_per_matchmaker + extra;
+        std::thread::scope(|s| {
+            let handles = (0..threads)
+                .filter_map(|i| {
+                    let overflow = if i < overflow_games { 1 } else { 0 };
+                    let games_to_play = num_games_per_thread + overflow;
 
-                if games_to_play == 0 {
-                    return None;
-                }
-
-                mm.versus_autostart = false;
-                mm.versus_logging = false;
-                mm.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
-                mm.versus_start(
-                    "v12_eval_fixed.exe",
-                    "v12_eval_fixed.exe",
-                    games_to_play,
-                    false,
-                    Some(feeder.clone()),
-                )
-                .expect("Failed to start matchmaking");
-                // mm.set_go_params(&format!("movetime {}", thinktime_ms));
-                mm.set_go_params(&format!("depth {}", 8));
-
-                Some(i)
-            })
-            .collect::<Vec<usize>>();
-
-        self.stats_flushed_at = std::time::Instant::now();
-        self.stats_num_games_cp = 0;
-        self.stats_num_games_total = 0;
-
-        loop {
-            active_matchmakings.retain(|&i| {
-                let mm = &mut matchmakers[i];
-
-                mm.poll();
-
-                match mm.versus_state {
-                    matchmaking::VersusState::NextMatch(_, _) => {
-                        self.collect(&mm);
-                        mm.versus_nextgame(false);
+                    if games_to_play == 0 {
+                        return None;
                     }
-                    matchmaking::VersusState::Done => {
-                        self.collect(&mm);
-                        return false;
+
+                    let tables = &tables;
+                    let feeder = feeder.clone();
+                    let tx_entries = tx_entries.clone();
+
+                    Some(s.spawn(move || {
+                        // let core_id = if i % 2 == 0 { i & 31 } else { (i + 16) & 31 };
+                        // core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+                        Self::play_annotated_thread(i, games_to_play, tx_entries, feeder, tables)
+                    }))
+                })
+                .collect::<Vec<_>>();
+
+            drop(tx_entries);
+
+            self.stats_flushed_at = std::time::Instant::now();
+            self.stats_num_games_cp = 0;
+            self.stats_num_games_total = 0;
+
+            loop {
+                match rx_entries.recv_timeout(std::time::Duration::from_secs(1)) {
+                    Ok(entries) => {
+                        self.stats_num_games_cp += 1;
+                        self.stats_num_games_total += 1;
+                        self.stats_positions_total += entries.len();
+
+                        for entry in entries {
+                            self.binpack_writer.write_entry(&entry).unwrap();
+                        }
                     }
-                    matchmaking::VersusState::InProgress => {}
-                    _ => {
-                        println!("Matchmaking {} state {:?}", i, mm.versus_state);
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        println!("All threads done sending entries");
+                        break;
                     }
                 }
 
-                return true;
-            });
-
-            if active_matchmakings.is_empty() {
-                break;
+                if self.stats_flushed_at.elapsed().as_secs() >= 60 * 1 {
+                    let games_per_minute = self.stats_num_games_cp as f64
+                        / (self.stats_flushed_at.elapsed().as_secs_f64() / 60.0);
+                    println!(
+                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02}. {} total positions so far, ~{:.02} per game avg. Binpack size: {}. ETA: {}",
+                        self.stats_num_games_total,
+                        self.stats_flushed_at.elapsed().as_secs_f64() / 60.0,
+                        games_per_minute,
+                        self.stats_positions_total,
+                        self.stats_positions_total as f64 / self.stats_num_games_total as f64,
+                        util::byte_size_string(self.binpack_size_bytes()),
+                        util::time_format(
+                            ((num_positions_total - self.stats_num_games_total) as f64
+                                / games_per_minute
+                                * 60.0
+                                * 1000.0) as u64
+                        )
+                    );
+                    self.stats_flushed_at = std::time::Instant::now();
+                    self.stats_num_games_cp = 0;
+                }
             }
 
-            if self.stats_flushed_at.elapsed().as_secs() >= 60 * 1 {
-                // self.binpack_writer.flush().unwrap();
-
-                let games_per_minute = self.stats_num_games_cp as f64
-                    / (self.stats_flushed_at.elapsed().as_secs_f64() / 60.0);
-                println!(
-                    "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02}. {} total positions so far, ~{:.02} per game avg. Binpack size: {}. ETA: {}",
-                    self.stats_num_games_total,
-                    self.stats_flushed_at.elapsed().as_secs_f64() / 60.0,
-                    games_per_minute,
-                    self.stats_positions_total,
-                    self.stats_positions_total as f64 / self.stats_num_games_total as f64,
-                    util::byte_size_string(self.binpack_size_bytes()),
-                    util::time_format(
-                        ((num_positions_total - self.stats_num_games_total) as f64
-                            / games_per_minute
-                            * 60.0
-                            * 1000.0) as u64
-                    )
-                );
-                self.stats_flushed_at = std::time::Instant::now();
-                self.stats_num_games_cp = 0;
+            for handle in handles {
+                let _ = handle.join().unwrap();
             }
-        }
-
-        // self.binpack_writer.flush().unwrap();
-
-        println!(
-            "Selfplay done:\n{} total games\n{} total positions\nBinpack size: {}\nPosition reached: {}",
-            self.stats_num_games_total,
-            self.stats_positions_total,
-            util::byte_size_string(self.binpack_size_bytes()),
-            feeder.inner.lock().unwrap().cursor
-        );
+        });
 
         Ok(())
     }
 
-    fn collect(&mut self, mm: &matchmaking::Matchmaking) {
-        if mm.moves_u16.len() < 2 {
-            println!(
-                "Game too short during collection: {} - {} moves",
-                mm.fen,
-                mm.moves_u16.len()
-            );
-            return;
-        }
+    fn play_annotated_thread(
+        thread_id: usize,
+        num_games: usize,
+        tx: crossbeam::channel::Sender<Vec<sfbinpack::TrainingDataEntry>>,
+        mut feeder: Box<dyn PositionFeeder + Send>,
+        tables: &tables::Tables,
+    ) -> anyhow::Result<()> {
+        let search_params =
+            engine::search::search_params::SearchParams::from_iter("depth 7".split_whitespace());
 
-        let mut board = chess_v2::ChessGame::new();
+        let mut tt = engine::search::transposition_v2::TranspositionTable::new(16);
+        let rt = engine::search::repetition_v2::RepetitionTable::new();
 
-        match board.load_fen(&mm.fen, &mm.tables) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Failed to load FEN during collection: {} - {:?}", mm.fen, e);
-                return;
-            }
-        }
+        let mut search_engine =
+            engine::search::v12_eval_sp::Search::new(search_params, tables, &mut tt, rt);
 
-        if !unsafe { board.make_move(mm.moves_u16[0], &mm.tables, None) } {
-            eprintln!(
-                "Failed to make first move during collection: {} - {:?}",
-                mm.fen, mm.moves_u16[0]
-            );
-            return;
-        }
+        let mut training_entries = Vec::new();
 
-        if board.in_check(&mm.tables, !board.b_move()) {
-            eprintln!(
-                "First move leaves player in check during collection: {} - {:?}",
-                mm.fen, mm.moves_u16[0]
-            );
-            return;
-        }
+        for _ in 0..num_games {
+            let position = match feeder.next_position() {
+                Some(p) => p,
+                None => {
+                    eprintln!(
+                        "[Thread {}]: No more positions to play, exiting..",
+                        thread_id
+                    );
+                    break;
+                }
+            };
 
-        self.stats_num_games_cp += 1;
-        self.stats_num_games_total += 1;
-        self.stats_positions_total += mm.moves_u16.len();
+            search_engine
+                .new_game_from_fen(&position, tables)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "Failed to load FEN \"{}\" during annotated selfplay - {:?}",
+                        position,
+                        err
+                    )
+                })?;
 
-        // Fen after the first move is played
-        let first_fen = board.gen_fen();
-
-        let stats = mm.versus_stats();
-
-        let mut b_move = board.b_move();
-        let mut ply = (board.full_moves() * 2 + if b_move { 1 } else { 0 }) as u16;
-
-        let result = match stats.last_game_status {
-            Some(GameResult::GameState(chess_v2::GameState::Checkmate(util::Side::White))) => 1,
-            Some(GameResult::GameState(chess_v2::GameState::Checkmate(util::Side::Black))) => -1,
-            Some(GameResult::GameState(
-                chess_v2::GameState::Stalemate | chess_v2::GameState::DrawByFiftyMoveRule,
-            )) => 0,
-            Some(GameResult::OutOfTime(util::Side::White)) => -1,
-            Some(GameResult::OutOfTime(util::Side::Black)) => 1,
-            Some(GameResult::ThreeFoldRepetition) => 0,
-            st => {
-                eprintln!(
-                    "Game not finished / invalid state during collection ({:?}): {} - {} moves",
-                    st,
-                    mm.fen,
-                    mm.moves_u16.len()
-                );
-                return;
-            }
-        };
-
-        let mut last_entry = sfbinpack::TrainingDataEntry {
-            pos: sfbinpack::chess::position::Position::from_fen(&first_fen),
-            mv: SelfplayTrainer::convert_move(b_move, mm.moves_u16[1]),
-            ply,
-            result: if b_move { -result } else { result },
-            score: 0,
-        };
-
-        self.binpack_writer.write_entry(&last_entry).unwrap();
-
-        for mv in mm.moves_u16.iter().skip(2) {
-            b_move = !b_move;
-            ply += 1;
-
-            let mv = Self::convert_move(b_move, *mv);
-
-            last_entry = sfbinpack::TrainingDataEntry {
-                pos: last_entry.pos.after_move(last_entry.mv),
-                mv,
-                ply,
-                result: if b_move { -result } else { result },
+            let mut last_entry = sfbinpack::TrainingDataEntry {
+                pos: sfbinpack::chess::position::Position::from_fen(&position),
+                mv: r#move::Move::null(),
+                ply: search_engine.get_board_mut().ply(),
+                result: 0,
                 score: 0,
             };
 
-            self.binpack_writer.write_entry(&last_entry).unwrap();
+            let mut board_zobrist = search_engine.get_board_mut().zobrist_key();
+            let initial_b_move = search_engine.get_board_mut().b_move();
+
+            search_engine
+                .get_rt_mut()
+                .push_position(board_zobrist, true);
+
+            // Main game loop
+            let result = loop {
+                search_engine.new_search();
+
+                let bestmove = search_engine.search();
+                let score = search_engine.search_score();
+
+                let mut board = search_engine.get_board_mut().clone();
+
+                debug_assert!(
+                    board_zobrist == board.zobrist_key(),
+                    "Board changed during search!"
+                );
+
+                last_entry.mv = Self::convert_move(board.b_move(), bestmove);
+                last_entry.score = (score as i16).clamp(-10000, 10000);
+                training_entries.push(last_entry.clone());
+                last_entry.pos = last_entry.pos.after_move(last_entry.mv);
+                last_entry.ply += 1;
+
+                if !unsafe { board.make_move(bestmove, tables, Some(search_engine.get_nnue_mut())) }
+                {
+                    return Err(anyhow::anyhow!(
+                        "[Thread {}]: Failed to make move during annotated selfplay, fen=\"{}\": {:?}",
+                        thread_id,
+                        position,
+                        bestmove
+                    ));
+                }
+
+                if board.in_check(tables, !board.b_move()) {
+                    return Err(anyhow::anyhow!(
+                        "[Thread {}]: Illegal move (leaves player in check) during annotated selfplay, fen=\"{}\": {:?}",
+                        thread_id,
+                        position,
+                        bestmove
+                    ));
+                }
+
+                let mut game_state = Self::check_game_state(&board, tables);
+
+                board_zobrist = board.zobrist_key();
+                let last_move_irreversible = board.half_moves() == 0;
+
+                let rt = search_engine.get_rt_mut();
+                rt.push_position(board_zobrist, last_move_irreversible);
+
+                if game_state == chess_v2::GameState::Ongoing
+                    && rt.is_repeated_times(board_zobrist) >= 3
+                {
+                    game_state = chess_v2::GameState::Draw;
+                }
+
+                match game_state {
+                    chess_v2::GameState::Ongoing => {}
+                    chess_v2::GameState::Checkmate(side) => {
+                        break if side == util::Side::White { 1 } else { -1 };
+                    }
+                    chess_v2::GameState::Draw => {
+                        break 0;
+                    }
+                }
+
+                *search_engine.get_board_mut() = board;
+            };
+
+            // alternate with initia_b_move
+            let mut b_move = initial_b_move;
+            for entry in training_entries.iter_mut() {
+                entry.result = if b_move { -result } else { result };
+                b_move = !b_move;
+            }
+
+            tx.send(training_entries.clone()).unwrap();
+            training_entries.clear();
         }
+
+        Ok(())
+    }
+
+    fn check_game_state(
+        board: &chess_v2::ChessGame,
+        tables: &tables::Tables,
+    ) -> chess_v2::GameState {
+        let mut has_legal_moves = false;
+        let mut move_list = [0u16; 256];
+
+        for mv_index in 0..board.gen_moves_avx512::<false>(tables, &mut move_list) {
+            let mut board_copy = board.clone();
+
+            let is_legal = unsafe { board_copy.make_move(move_list[mv_index], tables, None) }
+                && !board_copy.in_check(tables, !board_copy.b_move());
+
+            if is_legal {
+                has_legal_moves = true;
+                break;
+            }
+        }
+
+        board.check_game_state(tables, !has_legal_moves, board.b_move())
     }
 
     fn convert_move(b_move: bool, mv: u16) -> r#move::Move {

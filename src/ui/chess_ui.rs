@@ -16,6 +16,7 @@ pub struct ChessUi {
     matchmaking: Matchmaking,
     squares: Vec<SquareUi>,
 
+    input_goparams: ImguiTextInput,
     input_fen: ImguiTextInput,
     input_white_engine: ImguiTextInput,
     input_black_engine: ImguiTextInput,
@@ -198,11 +199,16 @@ impl ChessUi {
 
         matchmaking.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
 
-        Self {
+        let mut s = Self {
             matchmaking,
             squares,
             from_square: None,
             ask_promotion: None,
+            input_goparams: ImguiTextInput::new(
+                imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
+                Some("depth 6 infinite"),
+                Some(256),
+            ),
             input_fen: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
                 Some("startpos moves e2e4"),
@@ -210,12 +216,12 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v13_nnue.exe"),
+                Some("evaltest_v3.exe"),
                 None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v11_opt.exe"),
+                Some("evaltest_v2.exe"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(
@@ -225,7 +231,11 @@ impl ChessUi {
             ),
             input_start_paused: false,
             input_use_opening_book: true,
-        }
+        };
+
+        s.matchmaking.set_go_params(&s.input_goparams.buf);
+
+        s
     }
 
     pub fn draw(&mut self, ctx: window::DrawCtx) {
@@ -364,10 +374,29 @@ impl ChessUi {
                                     }
                                 }
 
+                                let hover_mask = if let Some(hovering_sq_index) = hovering_sq_index
+                                {
+                                    // let file = (0x101010101010101 << 8) << hovering_sq_index;
+                                    // let file_left = (file >> 1) & tables::EX_H_FILE;
+                                    // let file_right = (file << 1) & tables::EX_A_FILE;
+                                    // file | file_left | file_right
+                                    let file = (0x101010101010101u64)
+                                        .wrapping_shr((64 - hovering_sq_index) as u32);
+                                    let file_left = (file >> 1) & tables::EX_H_FILE;
+                                    let file_right = (file << 1) & tables::EX_A_FILE;
+                                    file | file_left | file_right
+                                } else {
+                                    0
+                                };
+
                                 for rank in (0..8).rev() {
                                     for file in 0..8 {
                                         let square = &self.squares[rank * 8 + file];
                                         square.draw_highlights(ui, &ctx.textures);
+
+                                        // if (1 << square.sq_bit_index) & hover_mask != 0 {
+                                        //     square.draw_move_indicator(ui);
+                                        // }
                                     }
                                 }
                             });
@@ -472,6 +501,10 @@ impl ChessUi {
                     //     ui.separator();
                     // }
 
+                    if let Some(goparams_str) = self.input_goparams.draw(None, ui, "goparams_inp") {
+                        self.matchmaking.set_go_params(&goparams_str);
+                    }
+
                     match self.matchmaking.versus_state {
                         VersusState::Idle => {}
                         VersusState::InProgress => {
@@ -559,11 +592,8 @@ impl ChessUi {
                                 engine_name
                             ));
                         }
-                        chess_v2::GameState::Stalemate => {
-                            ui.text_wrapped("Result: Stalemate");
-                        }
-                        chess_v2::GameState::DrawByFiftyMoveRule => {
-                            ui.text_wrapped("Result: Draw by fifty-move rule");
+                        chess_v2::GameState::Draw => {
+                            ui.text_wrapped("Result: Draw");
                         }
                         chess_v2::GameState::Ongoing => {}
                     }

@@ -59,12 +59,11 @@ const CASTLES_SQUARES: [u8; 64] = [
     0b1110, 0b1111, 0b1111, 0b1111, 0b1100, 0b1111, 0b1111, 0b1101, //
 ];
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum GameState {
     Ongoing,
     Checkmate(util::Side),
-    Stalemate,
-    DrawByFiftyMoveRule,
+    Draw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +195,7 @@ pub struct ChessGame {
     castles: u8, // 0b[white kingside, white queenside, black kingside, black queenside]
     en_passant: u8, // ep square (or 0 if none)
     half_moves: u32,
-    full_moves: u32,
+    full_moves: u16,
     zobrist_key: u64,
     material: [u16; 2],
     spt: [u8; 64],
@@ -218,7 +217,7 @@ impl From<chess::ChessGame> for ChessGame {
         v2.castles = value.castles;
         v2.en_passant = value.en_passant.unwrap_or(0);
         v2.half_moves = value.half_moves;
-        v2.full_moves = value.full_moves;
+        v2.full_moves = value.full_moves as u16;
         v2.zobrist_key = value.zobrist_key;
         v2.material[0] = value.material[0];
         v2.material[1] = value.material[1];
@@ -988,6 +987,54 @@ impl ChessGame {
         }
     }
 
+    pub fn count_king_square_attackers_slow(
+        &self,
+        sq_index: u8,
+        b_move: bool,
+        tables: &Tables,
+    ) -> usize {
+        let opponent_bitboards = &self.board.bitboards[((!b_move as usize) << 3)..];
+
+        let mut attackers = 0u64;
+
+        unsafe {
+            let pawn_attack_mask =
+                *Tables::LT_PAWN_CAPTURE_MASKS[b_move as usize].get_unchecked(sq_index as usize);
+
+            attackers |= opponent_bitboards[PieceIndex::WhitePawn as usize] & pawn_attack_mask;
+
+            let knight_attack_mask = *Tables::LT_KNIGHT_MOVE_MASKS.get_unchecked(sq_index as usize);
+            attackers |= opponent_bitboards[PieceIndex::WhiteKnight as usize] & knight_attack_mask;
+
+            // King cant threaten another king directly
+            // let king_attack_mask = *Tables::LT_KING_MOVE_MASKS.get_unchecked(sq_index as usize);
+            // attackers |= opponent_bitboards[PieceIndex::WhiteKing as usize] & king_attack_mask;
+
+            let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+
+            let opponent_rook_board = opponent_bitboards[PieceIndex::WhiteRook as usize];
+            let opponent_bishop_board = opponent_bitboards[PieceIndex::WhiteBishop as usize];
+            let opponent_queen_board = opponent_bitboards[PieceIndex::WhiteQueen as usize];
+
+            let rook_occupancy_mask =
+                *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+            let rook_blockers = full_board & rook_occupancy_mask;
+            let rook_moves =
+                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers);
+
+            let bishop_occupancy_mask =
+                *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+            let bishop_blockers = full_board & bishop_occupancy_mask;
+            let bishop_moves =
+                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers);
+
+            attackers |= (opponent_rook_board | opponent_queen_board) & rook_moves;
+            attackers |= (opponent_bishop_board | opponent_queen_board) & bishop_moves;
+
+            attackers.count_ones() as usize
+        }
+    }
+
     pub fn gen_pawn_moves(
         &self,
         move_list: &mut [u16],
@@ -1456,7 +1503,7 @@ impl ChessGame {
                 .get_unchecked(self.castles as usize);
         }
 
-        self.full_moves += self.b_move as u32;
+        self.full_moves += self.b_move as u16;
         self.en_passant = next_ep_square;
 
         let is_capture = (move_flags & MV_FLAG_CAP) != 0;
@@ -1816,7 +1863,7 @@ impl ChessGame {
                 FenState::MovesFull => match c {
                     ' ' | '\n' | '\r' => break,
                     '0'..='9' => {
-                        self.full_moves = self.full_moves * 10 + (c as u8 - b'0') as u32;
+                        self.full_moves = self.full_moves * 10 + (c as u8 - b'0') as u16;
                     }
                     _ => return Err(format!("Invalid full move character '{}'", c)),
                 },
@@ -1976,10 +2023,10 @@ impl ChessGame {
             if self.in_check(tables, b_move) {
                 GameState::Checkmate(util::Side::from(!b_move))
             } else {
-                GameState::Stalemate
+                GameState::Draw
             }
         } else if self.half_moves >= 100 {
-            GameState::DrawByFiftyMoveRule
+            GameState::Draw
         } else {
             GameState::Ongoing
         }
@@ -2113,7 +2160,12 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn full_moves(&self) -> u32 {
+    pub fn ply(&self) -> u16 {
+        self.full_moves * 2 + self.b_move as u16 - 2
+    }
+
+    #[inline(always)]
+    pub fn full_moves(&self) -> u16 {
         self.full_moves
     }
 
@@ -2311,7 +2363,7 @@ mod tests {
 
             assert!(board.load_fen(fen, &tables).is_ok());
 
-            let mut nnue = nnue_load!("../../nnue/quantised.bin");
+            let mut nnue = nnue_load!("../../nnue/x2.bin");
             nnue.load(&board);
 
             Self {

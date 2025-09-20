@@ -59,7 +59,7 @@ impl EngineInternal {
                 self.bestmove = Some(bestmove.to_string());
             }
             _ => {
-                // eprintln!("[{}] stdout: {}", self.name, line);
+                eprintln!("[{}] stdout: {}", self.name, line);
             }
         }
 
@@ -134,6 +134,14 @@ impl EngineProcess {
     // pub fn get_stdout_buffer(&self) -> Option<Vec<String>> {
     //     self.int.lock().unwrap().stdout_lines.clone().into()
     // }
+
+    pub fn send_newgame(&self) -> anyhow::Result<()> {
+        let mut int = self.int.lock().unwrap();
+        int.state = EngineState::WaitReadyOk;
+        int.bestmove = None;
+        int.write_stdin("ucinewgame\nisready\n")?;
+        Ok(())
+    }
 
     pub fn send_position_and_go(&self, position: &str) -> anyhow::Result<()> {
         let mut int = self.int.lock().unwrap();

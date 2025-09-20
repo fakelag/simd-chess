@@ -18,6 +18,8 @@ pub mod transposition_v2;
 pub mod v10_mvcache;
 pub mod v11_opt;
 pub mod v12_eval;
+pub mod v12_eval_sp;
+pub mod v13_nnue;
 pub mod v1_negamax;
 pub mod v2_alphabeta;
 pub mod v3_itdep;
@@ -32,7 +34,7 @@ pub mod v9_prune;
 mod tests {
     use super::*;
     use crate::{
-        engine::{chess, chess_v2, search::search_params::SearchParams, tables},
+        engine::{chess_v2, search::search_params::SearchParams, tables},
         util,
     };
 
@@ -44,44 +46,37 @@ mod tests {
     fn search_bench() {
         let tables = tables::Tables::new();
 
-        let (tx, rx) = crossbeam::channel::unbounded();
+        // let (tx, rx) = crossbeam::channel::unbounded();
         // let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
-        let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
-        // let test_fen = util::FEN_STARTPOS;
+        // let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
+        let test_fen = util::FEN_STARTPOS;
 
         let bench = || {
             let tt = std::cell::SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(4));
-
-            let mut rt = repetition_v2::RepetitionTable::new();
-
-            let mut chess = chess_v2::ChessGame::new();
-            assert!(
-                chess
-                    .load_fen(std::hint::black_box(test_fen), &tables)
-                    .is_ok()
-            );
+            let rt = repetition_v2::RepetitionTable::new();
+            // let mut chess = chess_v2::ChessGame::new();
+            // assert!(
+            //     chess
+            //         .load_fen(std::hint::black_box(test_fen), &tables)
+            //         .is_ok()
+            // );
 
             let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(10));
+            params.depth = Some(std::hint::black_box(14));
+
+            // let mut search_engine =
+            //     v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
 
             let mut search_engine =
-                v12_eval::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
+                v12_eval_sp::Search::new(params, &tables, unsafe { &mut *tt.get() }, rt);
 
-            // let tx = tx.clone();
-            // std::thread::spawn(move || {
-            //     std::thread::sleep(std::time::Duration::from_millis(100));
-            //     tx.send(SigAbort {}).unwrap();
-            // });
+            search_engine.new_game_from_fen(&test_fen, &tables).unwrap();
+            search_engine.new_search();
 
             let (bestmove, delta) = {
                 let start = rdtsc();
 
                 let mv = std::hint::black_box(search_engine.search());
-                // for i in 0..1_000_000_000 {
-                //     let eval = search_engine.evaluate();
-                //     std::hint::black_box(eval);
-                // }
-                // let mv = 0;
 
                 let end = rdtsc();
                 (mv, end - start)
