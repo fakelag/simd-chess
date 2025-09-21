@@ -87,7 +87,7 @@ pub fn parse_pgn<'a>(
                         if mv & chess_v2::MV_FLAGS == castle_flag {
                             let mut board_copy = board.clone();
 
-                            let is_legal = unsafe { board_copy.make_move(mv, tables, None) }
+                            let is_legal = unsafe { board_copy.make_move(mv, tables) }
                                 && !board_copy.in_check(tables, !board_copy.b_move());
 
                             return is_legal;
@@ -286,7 +286,7 @@ pub fn parse_pgn<'a>(
                                     }
                                 }
 
-                                let is_legal = unsafe { board.make_move(mv, tables, None) }
+                                let is_legal = unsafe { board.make_move(mv, tables) }
                                     && !board.in_check(tables, !board.b_move());
 
                                 *board = board_copy;
@@ -325,7 +325,7 @@ pub fn parse_pgn<'a>(
 
                 moves_out.push(move_to_make);
 
-                if unsafe { !board.make_move(move_to_make, &tables, None) } {
+                if unsafe { !board.make_move(move_to_make, &tables) } {
                     return Err(anyhow::anyhow!(
                         "Invalid move in pgn: {}, move: {}",
                         part,

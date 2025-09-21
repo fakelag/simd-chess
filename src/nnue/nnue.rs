@@ -25,19 +25,12 @@ const NNUE_PIECE_INDICES: [usize; 8] = [
     0, // unused
 ];
 
-/// This is the quantised format that bullet outputs.
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct Network {
-    /// Column-Major `HIDDEN_SIZE x 768` matrix.
     feature_weights: [Accumulator; 768],
-    /// Vector with dimension `HIDDEN_SIZE`.
     feature_bias: Accumulator,
-    /// Column-Major `1 x (2 * HIDDEN_SIZE)`
-    /// matrix, we use it like this to make the
-    /// code nicer in `Network::evaluate`.
     output_weights: [i16; 2 * HIDDEN_SIZE],
-    /// Scalar output bias.
     output_bias: i16,
 }
 
@@ -204,12 +197,102 @@ impl AccumulatorPair {
 
         (white_feature, black_feature)
     }
+}
+
+pub struct NnueQuietMove {
+    from_piece_id: u8,
+    to_piece_id: u8,
+    from_sq: u8,
+    to_sq: u8,
+}
+
+pub struct NnueCaptureMove {
+    from_piece_id: u8,
+    to_piece_id: u8,
+    from_sq: u8,
+    to_sq: u8,
+    captured_piece_id: u8,
+    captured_sq: u8,
+}
+
+pub struct NnueCastleMove {
+    rook_piece_id: u8,
+    rook_from_sq: u8,
+    rook_to_sq: u8,
+    king_piece_id: u8,
+    king_from_sq: u8,
+    king_to_sq: u8,
+}
+
+pub enum NnueUpdate {
+    NnueUpdateQuiet(NnueQuietMove),
+    NnueUpdateCapture(NnueCaptureMove),
+    NnueUpdateCastle(NnueCastleMove),
+}
+
+impl NnueUpdate {
+    #[inline(always)]
+    pub fn quiet(from_piece_id: u8, to_piece_id: u8, from_sq: u8, to_sq: u8) -> Self {
+        NnueUpdate::NnueUpdateQuiet(NnueQuietMove {
+            from_piece_id,
+            to_piece_id,
+            from_sq,
+            to_sq,
+        })
+    }
 
     #[inline(always)]
-    pub fn flip(&mut self) {
-        // @todo perf - swap pointers instead of mem
-        // std::mem::swap(&mut self.stm, &mut self.ntm);
+    pub fn capture(
+        from_piece_id: u8,
+        to_piece_id: u8,
+        from_sq: u8,
+        to_sq: u8,
+        captured_piece_id: u8,
+        captured_sq: u8,
+    ) -> Self {
+        NnueUpdate::NnueUpdateCapture(NnueCaptureMove {
+            from_piece_id,
+            to_piece_id,
+            from_sq,
+            to_sq,
+            captured_piece_id,
+            captured_sq,
+        })
     }
+
+    #[inline(always)]
+    pub fn castle(
+        rook_piece_id: u8,
+        rook_from_sq: u8,
+        rook_to_sq: u8,
+        king_piece_id: u8,
+        king_from_sq: u8,
+        king_to_sq: u8,
+    ) -> Self {
+        NnueUpdate::NnueUpdateCastle(NnueCastleMove {
+            rook_piece_id,
+            rook_from_sq,
+            rook_to_sq,
+            king_piece_id,
+            king_from_sq,
+            king_to_sq,
+        })
+    }
+
+    #[inline(always)]
+    pub fn set_to_piece_id(&mut self, to_piece_id: u8) {
+        match self {
+            NnueUpdate::NnueUpdateQuiet(mv) => mv.to_piece_id = to_piece_id,
+            NnueUpdate::NnueUpdateCapture(mv) => mv.to_piece_id = to_piece_id,
+            NnueUpdate::NnueUpdateCastle(_) => {
+                unreachable!("Cannot set to_piece_id on castle move")
+            }
+        }
+    }
+}
+
+pub trait UpdatableNnue {
+    fn update(&mut self, update: &NnueUpdate);
 }
 
 pub struct Nnue {
@@ -243,15 +326,39 @@ impl Nnue {
     }
 
     #[inline(always)]
-    pub fn flip(&mut self) {
-        self.acc.flip();
-    }
-
-    #[inline(always)]
     pub fn evaluate(&self, b_move: bool) -> i32 {
         let us = [&self.acc.white, &self.acc.black][b_move as usize];
         let them = [&self.acc.black, &self.acc.white][b_move as usize];
         self.net.evaluate(us, them)
+    }
+}
+
+impl UpdatableNnue for Nnue {
+    #[inline(always)]
+    fn update(&mut self, update: &NnueUpdate) {
+        match update {
+            NnueUpdate::NnueUpdateQuiet(mv) => {
+                self.remove_piece(mv.from_piece_id as usize, mv.from_sq as usize);
+                self.add_piece(mv.to_piece_id as usize, mv.to_sq as usize);
+            }
+            NnueUpdate::NnueUpdateCapture(mv) => {
+                self.remove_piece(mv.from_piece_id as usize, mv.from_sq as usize);
+                self.remove_piece(mv.captured_piece_id as usize, mv.captured_sq as usize);
+                self.add_piece(mv.to_piece_id as usize, mv.to_sq as usize);
+            }
+            NnueUpdate::NnueUpdateCastle(mv) => {
+                self.move_piece(
+                    mv.rook_piece_id as usize,
+                    mv.rook_from_sq as usize,
+                    mv.rook_to_sq as usize,
+                );
+                self.move_piece(
+                    mv.king_piece_id as usize,
+                    mv.king_from_sq as usize,
+                    mv.king_to_sq as usize,
+                );
+            }
+        }
     }
 }
 

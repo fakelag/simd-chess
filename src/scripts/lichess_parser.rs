@@ -467,7 +467,7 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
                     let mut game_board = board.clone();
 
                     for mv in moves.iter().take(to_move) {
-                        unsafe { game_board.make_move(*mv, &tables, None) };
+                        unsafe { game_board.make_move(*mv, &tables) };
                     }
 
                     if params.fno_duplicates && !zobrist_set.insert(game_board.zobrist_key()) {

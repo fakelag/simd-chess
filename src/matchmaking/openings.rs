@@ -57,7 +57,7 @@ impl PositionFeeder for OpeningFeeder {
         let mut board = self.startpos.clone();
 
         for mv in opening.moves {
-            if unsafe { !board.make_move(mv, &self.tables, None) } {
+            if unsafe { !board.make_move(mv, &self.tables) } {
                 panic!(
                     "Failed to make opening move {} for opening \"{}\"",
                     mv, opening.name
@@ -235,7 +235,7 @@ fn is_board_checkmated(board: &chess_v2::ChessGame, tables: &tables::Tables) -> 
 
             let mut board_copy = board.clone();
 
-            if unsafe { !board_copy.make_move(mv, tables, None) } {
+            if unsafe { !board_copy.make_move(mv, tables) } {
                 return true;
             }
 

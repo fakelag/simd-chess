@@ -224,8 +224,9 @@ impl SelfplayTrainer {
                 last_entry.pos = last_entry.pos.after_move(last_entry.mv);
                 last_entry.ply += 1;
 
-                if !unsafe { board.make_move(bestmove, tables, Some(search_engine.get_nnue_mut())) }
-                {
+                if !unsafe {
+                    board.make_move_nnue(bestmove, tables, Some(search_engine.get_nnue_mut()))
+                } {
                     return Err(anyhow::anyhow!(
                         "[Thread {}]: Failed to make move during annotated selfplay, fen=\"{}\": {:?}",
                         thread_id,
@@ -324,7 +325,7 @@ impl SelfplayTrainer {
         for mv_index in 0..board.gen_moves_avx512::<false>(tables, &mut move_list) {
             let mut board_copy = board.clone();
 
-            let is_legal = unsafe { board_copy.make_move(move_list[mv_index], tables, None) }
+            let is_legal = unsafe { board_copy.make_move(move_list[mv_index], tables) }
                 && !board_copy.in_check(tables, !board_copy.b_move());
 
             if is_legal {

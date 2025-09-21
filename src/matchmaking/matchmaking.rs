@@ -149,7 +149,7 @@ impl Matchmaking {
 
             let mut board_copy = self.board.clone();
 
-            let move_ok = unsafe { board_copy.make_move(mv, &self.tables, None) };
+            let move_ok = unsafe { board_copy.make_move(mv, &self.tables) };
 
             if move_ok && !board_copy.in_check(&self.tables, !board_copy.b_move()) {
                 self.legal_moves.push(mv);
@@ -183,7 +183,7 @@ impl Matchmaking {
             return Err(anyhow::anyhow!("Move {} is not a legal move", mv_string));
         }
 
-        if unsafe { !self.board.make_move(mv, &self.tables, None) } {
+        if unsafe { !self.board.make_move(mv, &self.tables) } {
             // Should not happen unless legal_moves is out of sync
             panic!("Failed to make move {}: Invalid move", mv_string);
         }

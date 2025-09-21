@@ -288,7 +288,7 @@ mod tests {
 
         for (mv_string, rep_times) in moves {
             let mv = board.fix_move(util::create_move(mv_string));
-            assert!(unsafe { board.make_move(mv, &tables, None) });
+            assert!(unsafe { board.make_move(mv, &tables) });
 
             assert_eq!(
                 table.is_repeated_times(board.zobrist_key()),
