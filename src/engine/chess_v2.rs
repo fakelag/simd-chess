@@ -2150,13 +2150,8 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn bitboards_new(&self) -> &[u64; 16] {
+    pub fn bitboards(&self) -> &[u64; 16] {
         &self.board.bitboards
-    }
-
-    #[inline(always)]
-    pub fn bitboards_new_mut(&mut self) -> &mut [u64; 16] {
-        &mut self.board.bitboards
     }
 
     #[inline(always)]

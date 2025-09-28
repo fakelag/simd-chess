@@ -7,6 +7,7 @@ const DEBUG: bool = false;
 use crate::{
     engine::{self, chess_v2, search::SearchStrategy, tables},
     matchmaking::{matchmaking::PositionFeeder, *},
+    nnue::nnue::UpdatableNnue,
     util,
 };
 
@@ -224,16 +225,19 @@ impl SelfplayTrainer {
                 last_entry.pos = last_entry.pos.after_move(last_entry.mv);
                 last_entry.ply += 1;
 
-                if !unsafe {
-                    board.make_move_nnue(bestmove, tables, Some(search_engine.get_nnue_mut()))
-                } {
-                    return Err(anyhow::anyhow!(
-                        "[Thread {}]: Failed to make move during annotated selfplay, fen=\"{}\": {:?}",
-                        thread_id,
-                        position,
-                        bestmove
-                    ));
-                }
+                let nnue_update = match unsafe { board.make_move_nnue(bestmove, tables) } {
+                    Some(nnue_update) => nnue_update,
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "[Thread {}]: Failed to make move during annotated selfplay, fen=\"{}\": {:?}",
+                            thread_id,
+                            position,
+                            bestmove
+                        ));
+                    }
+                };
+
+                search_engine.get_nnue_mut().make_move(nnue_update);
 
                 if board.in_check(tables, !board.b_move()) {
                     return Err(anyhow::anyhow!(

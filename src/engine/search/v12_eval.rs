@@ -875,7 +875,7 @@ impl<'a> Search<'a> {
     pub fn evaluate(&self) -> Eval {
         use std::arch::x86_64::*;
 
-        let bitboards = self.chess.bitboards_new();
+        let bitboards = self.chess.bitboards();
 
         let mut bonuses_mg: Eval = 0;
         let mut bonuses_eg: Eval = 0;
@@ -1013,7 +1013,7 @@ impl<'a> Search<'a> {
         let material = self.chess.material();
         let is_endgame = (((material[0] & (!1023)) | (material[1] & (!1023))) == 0) as usize;
 
-        let boards = self.chess.bitboards_new();
+        let boards = self.chess.bitboards();
 
         let mut final_score: Eval = 0;
 

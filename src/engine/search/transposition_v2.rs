@@ -91,12 +91,13 @@ impl TranspositionTable {
         let table_size = max_entries.next_power_of_two();
 
         let table_mask = table_size - 1;
+        let index_bits = table_mask.count_ones();
 
         TranspositionTable {
             table_size_mask: table_mask,
             entries: vec![TranspositionEntry::new(); table_size].into_boxed_slice(),
             hash64: vec![0u64; table_size].into_boxed_slice(),
-            index_bits: table_mask.count_ones(),
+            index_bits,
             generation: TT_EVICT_GENERATIONS.wrapping_sub(1),
             min_generation: 0,
             stats: Box::new(TtStats {
@@ -233,6 +234,7 @@ impl TranspositionTable {
         }
     }
 
+    #[inline(always)]
     pub fn get_hash_part(index_bits: u32, hash: u64) -> u32 {
         let hash_bits = hash >> index_bits;
         hash_bits as u32

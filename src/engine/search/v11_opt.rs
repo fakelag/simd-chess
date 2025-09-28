@@ -646,7 +646,7 @@ impl<'a> Search<'a> {
 
         let mut score: Eval = 0;
 
-        let bitboards = self.chess.bitboards_new();
+        let bitboards = self.chess.bitboards();
 
         const PST: &Align64<[[i8; 64]; 16]> = &tables::Tables::EVAL_TABLES_INV_I8;
 
@@ -760,7 +760,7 @@ impl<'a> Search<'a> {
         let material = self.chess.material();
         let is_endgame = (((material[0] & (!1023)) | (material[1] & (!1023))) == 0) as usize;
 
-        let boards = self.chess.bitboards_new();
+        let boards = self.chess.bitboards();
 
         let mut final_score: Eval = 0;
 

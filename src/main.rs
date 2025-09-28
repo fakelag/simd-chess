@@ -515,7 +515,7 @@ fn main() {
             // implement thread safety correctly. This has a few benefits:
             // 1. TranspositionTable can be accessed without runtime costs such as locks or refcounters
             // 2. The table can potentially be shared between threads efficiently, even unsoundly if races are deemed to be acceptable
-            let tt = SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(2));
+            let tt = SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(1));
 
             let result = std::thread::scope(|s| {
                 let st = s.spawn(|| {
