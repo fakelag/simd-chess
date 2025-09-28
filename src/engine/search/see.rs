@@ -8,6 +8,11 @@ fn piece_value(piece: u8) -> Eval {
     WEIGHT_TABLE_ABS[piece as usize]
 }
 
+const PIECE_QUEEN: usize = PieceIndex::WhiteQueen as usize;
+const PIECE_ROOK: usize = PieceIndex::WhiteRook as usize;
+const PIECE_BISHOP: usize = PieceIndex::WhiteBishop as usize;
+const PIECE_PAWN: usize = PieceIndex::WhitePawn as usize;
+
 pub fn static_exchange_eval(
     tables: &tables::Tables,
     board: &ChessGame,
@@ -45,15 +50,6 @@ pub fn static_exchange_eval(
     let mut all_attackers = unsafe { calc_attackers(tables, full_board, piece_board, to_sq as u8) };
     let mut stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
 
-    println!(
-        "SEE: all_attackers = {all_attackers:064b} - {}",
-        all_attackers.trailing_zeros()
-    );
-    println!(
-        "SEE: stm_attackers = {stm_attackers:064b} - {}",
-        stm_attackers.trailing_zeros()
-    );
-
     let lva = |stm_attackers: u64, piece_board: &[u64; 8]| {
         // @todo - check perf with unaligned vs aligned array accesses
         for piece_index in (0..8).rev() {
@@ -67,50 +63,89 @@ pub fn static_exchange_eval(
     };
 
     while stm_attackers != 0 {
-        // 1. Take least valueable attacker
         let (attacker_piece, attacker_sq) = match lva(stm_attackers, &piece_board) {
             Some(v) => v,
             None => unreachable!(),
         };
 
-        println!("SEE: Attacker attacker_piece = {attacker_piece}, attacker_sq = {attacker_sq}");
-
-        // 2. Move it to the square, update bitboards
+        let attacker_sq_mask = 1u64 << attacker_sq;
         piece_board[last_moved_piece as usize] ^= to_sq_mask;
-        piece_board[attacker_piece as usize] ^= to_sq_mask | (1u64 << attacker_sq);
-        all_attackers ^= 1u64 << attacker_sq;
-        full_board ^= 1u64 << attacker_sq;
+        piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
+        all_attackers ^= attacker_sq_mask;
+        full_board ^= attacker_sq_mask;
 
-        // 3. Update scores & last moved piece
         exchanges[exchange_index] = piece_value(last_moved_piece) - exchanges[exchange_index - 1];
         exchange_index += 1;
         last_moved_piece = attacker_piece;
 
-        // 4. Swap side
         b_move = !b_move;
 
-        // 5. Update stm attackers (including x-rays)
-        // all_attackers = unsafe { calc_attackers(tables, full_board, piece_board, to_sq as u8) };
+        match attacker_piece as usize {
+            PIECE_PAWN | PIECE_BISHOP => {
+                let attack_mask =
+                    unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
+
+                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+
+                all_attackers |= (queen_board | bishop_board) & attack_mask;
+            }
+            PIECE_ROOK => {
+                let attack_mask = unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
+
+                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
+
+                all_attackers |= (queen_board | rook_board) & attack_mask;
+            }
+            PIECE_QUEEN => {
+                let rook_attack_mask =
+                    unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
+                let bishop_attack_mask =
+                    unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
+
+                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
+                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+
+                all_attackers |= (queen_board | rook_board) & rook_attack_mask;
+                all_attackers |= (queen_board | bishop_board) & bishop_attack_mask;
+            }
+            _ => {}
+        }
+
         stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
     }
 
-    println!("SEE: exchanges = {:?}", &exchanges[0..exchange_index]);
-
     while exchange_index > 1 {
         exchange_index -= 1;
-        if exchanges[exchange_index - 1] > -exchanges[exchange_index] {
-            exchanges[exchange_index - 1] = -exchanges[exchange_index];
-        } else {
-            println!(
-                "SEE: Early out at index {} [{}, {}]",
-                exchange_index,
-                exchanges[exchange_index - 1],
-                exchanges[exchange_index]
-            );
-        }
+
+        exchanges[exchange_index - 1] =
+            exchanges[exchange_index - 1].min(-exchanges[exchange_index]);
     }
 
     exchanges[0]
+}
+
+/// Safety: sq_index must be < 64
+pub unsafe fn calc_slider_attacks<const IS_ROOK: bool>(
+    tables: &tables::Tables,
+    full_board: u64,
+    sq_index: usize,
+) -> u64 {
+    unsafe {
+        std::hint::assert_unchecked(sq_index < 64);
+    }
+
+    let occupancy_mask = if IS_ROOK {
+        tables::Tables::LT_ROOK_OCCUPANCY_MASKS[sq_index as usize]
+    } else {
+        tables::Tables::LT_BISHOP_OCCUPANCY_MASKS[sq_index as usize]
+    };
+
+    let blockers = full_board & occupancy_mask;
+
+    unsafe { tables.get_slider_move_mask_unchecked::<IS_ROOK>(sq_index as usize, blockers) }
 }
 
 /// Safety: sq_index must be < 64
@@ -141,16 +176,8 @@ pub unsafe fn calc_attackers(
     let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
     let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
 
-    let rook_occupancy_mask = tables::Tables::LT_ROOK_OCCUPANCY_MASKS[sq_index as usize];
-    let rook_blockers = full_board & rook_occupancy_mask;
-    let rook_moves =
-        unsafe { tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers) };
-
-    let bishop_occupancy_mask = tables::Tables::LT_BISHOP_OCCUPANCY_MASKS[sq_index as usize];
-    let bishop_blockers = full_board & bishop_occupancy_mask;
-    let bishop_moves = unsafe {
-        tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers)
-    };
+    let rook_moves = unsafe { calc_slider_attacks::<true>(tables, full_board, sq_index) };
+    let bishop_moves = unsafe { calc_slider_attacks::<false>(tables, full_board, sq_index) };
 
     attackers |= (rook_board | queen_board) & rook_moves;
     attackers |= (bishop_board | queen_board) & bishop_moves;
@@ -162,8 +189,7 @@ pub unsafe fn calc_attackers(
 mod tests {
     use crate::{
         engine::{
-            chess::{self, MV_FLAG_CAP},
-            chess_v2::{self, PieceIndex},
+            chess_v2::{self, MV_FLAG_CAP, PieceIndex},
             tables,
         },
         util,
@@ -213,9 +239,21 @@ mod tests {
     }
 
     #[test]
+    fn test_see_simple_2() {
+        let mv = "e1e5";
+        let see_score = see_test("1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", mv);
+        let expected = piece_value(PieceIndex::BlackPawn as u8);
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
     fn test_see_multi() {
-        let qxp = "b3b6";
-        let see_score = see_test("7k/p7/1p5R/8/8/1Q6/8/7K w - - 0 1", qxp);
+        let mv = "b3b6";
+        let see_score = see_test("7k/p7/1p5R/8/8/1Q6/8/7K w - - 0 1", mv);
         let expected = piece_value(PieceIndex::BlackPawn as u8)
             - piece_value(PieceIndex::WhiteQueen as u8)
             + piece_value(PieceIndex::BlackPawn as u8);
@@ -228,8 +266,8 @@ mod tests {
 
     #[test]
     fn test_see_multi_2() {
-        let qxp = "b1b6";
-        let see_score = see_test("7k/3n4/Rq6/8/8/8/8/1Q4K1 w - - 0 1", qxp);
+        let mv = "b1b6";
+        let see_score = see_test("7k/3n4/Rq6/8/8/8/8/1Q4K1 w - - 0 1", mv);
         let expected = piece_value(PieceIndex::BlackQueen as u8)
             - piece_value(PieceIndex::WhiteQueen as u8)
             + piece_value(PieceIndex::BlackKnight as u8);
@@ -242,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_see_multi_early_stop() {
-        let qxp = "b3b6";
-        let see_score = see_test("7k/p2n4/1p5R/8/8/1Q6/8/7K w - - 0 1", qxp);
+        let mv = "b3b6";
+        let see_score = see_test("7k/p2n4/1p5R/8/8/1Q6/8/7K w - - 0 1", mv);
         // White will stop the exchange after the queen has been recaptured to not blunder the rook
         let expected =
             piece_value(PieceIndex::BlackPawn as u8) - piece_value(PieceIndex::WhiteQueen as u8);
@@ -256,8 +294,8 @@ mod tests {
 
     #[test]
     fn test_see_xray() {
-        let qxp = "b3b7";
-        let see_score = see_test("7k/1q6/3n4/8/8/1Q6/8/1R4K1 w - - 0 1", qxp);
+        let mv = "b3b7";
+        let see_score = see_test("7k/1q6/3n4/8/8/1Q6/8/1R4K1 w - - 0 1", mv);
         // Simple x-ray exposed after the first forced queen move
         // Same as test_see_multi_2 but with rook behind queen
         let expected = piece_value(PieceIndex::BlackQueen as u8)
@@ -272,14 +310,30 @@ mod tests {
 
     #[test]
     fn test_see_xray_2() {
-        let qxp = "b4b6";
-        let see_score = see_test("n6k/3n4/1q6/8/1Q6/1R6/1R6/1R4K1 w - - 0 1", qxp);
+        let mv = "b4b6";
+        let see_score = see_test("n6k/3n4/1q6/8/1Q6/1R6/1R6/1R4K1 w - - 0 1", mv);
         // More complex x-ray where a rook attack is exposed after the first rook capture
         let expected = piece_value(PieceIndex::BlackQueen as u8)
             - piece_value(PieceIndex::WhiteQueen as u8)
             + piece_value(PieceIndex::BlackKnight as u8)
             - piece_value(PieceIndex::WhiteRook as u8)
             + piece_value(PieceIndex::BlackKnight as u8);
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_xray_complex() {
+        let mv = "d3e5";
+        let see_score = see_test(
+            "1k1r3q/1ppn3p/p4b2/4p3/8/P2N2P1/1PP1R1BP/2K1Q3 w - - 0 1",
+            mv,
+        );
+        let expected =
+            piece_value(PieceIndex::BlackPawn as u8) - piece_value(PieceIndex::WhiteKnight as u8);
         assert_eq!(
             see_score, expected,
             "Expected SEE to be {}, got {}",
