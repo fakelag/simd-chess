@@ -189,7 +189,7 @@ pub unsafe fn calc_attackers(
 mod tests {
     use crate::{
         engine::{
-            chess_v2::{self, MV_FLAG_CAP, PieceIndex},
+            chess_v2::{self, PieceIndex},
             tables,
         },
         util,
@@ -206,7 +206,7 @@ mod tests {
         let mv = board.fix_move(util::create_move(mv_string));
 
         assert!(util::is_legal_slow(&tables, &board, mv));
-        assert!(mv & MV_FLAG_CAP != 0);
+        // assert!(mv & MV_FLAG_CAP != 0);
 
         let bitboards = board.bitboards();
 
@@ -222,6 +222,59 @@ mod tests {
             .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
 
         static_exchange_eval(&tables, &board, black_board, white_board, piece_boards, mv)
+    }
+
+    #[test]
+    fn test_see_no_attackers() {
+        let mv = "a4c6";
+        let see_score = see_test("7k/8/2q5/8/Q7/8/8/7K w - - 0 1", mv);
+        let expected = piece_value(PieceIndex::BlackQueen as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_quiet() {
+        let mv = "a4c6";
+        let see_score = see_test("7k/8/8/8/Q7/8/8/7K w - - 0 1", mv);
+        let expected = 0;
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_quiet_blunder() {
+        let mv = "a4c6";
+        let see_score = see_test("7k/3p4/8/8/Q7/8/8/7K w - - 0 1", mv);
+        let expected = -piece_value(PieceIndex::WhiteQueen as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_quiet_recapture() {
+        let mv = "b5c6";
+        let see_score = see_test("7k/3p4/8/1Q6/B7/8/8/7K w - - 0 1", mv);
+        let expected =
+            -piece_value(PieceIndex::WhiteQueen as u8) + piece_value(PieceIndex::BlackPawn as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
     }
 
     #[test]
