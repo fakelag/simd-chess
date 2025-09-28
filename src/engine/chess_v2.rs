@@ -1,6 +1,6 @@
 use crate::{
     engine::{chess, tables::Tables},
-    nnue::nnue,
+    nnue::nnue::{self, UpdatableNnue},
     pop_ls1b,
     util::{self},
 };
@@ -1277,17 +1277,12 @@ impl ChessGame {
     /// the latter case, the function returns false. The former case must be handled by the caller.
     #[inline(always)]
     pub unsafe fn make_move(&mut self, mv: u16, tables: &Tables) -> bool {
-        unsafe { self.make_move_nnue(mv, tables, None::<&mut nnue::Nnue>) }
+        unsafe { self.make_move_nnue(mv, tables).is_some() }
     }
 
     /// Makes a move on the board. Same as make_move but also updates the given NNUE state if provided.
     #[inline(always)]
-    pub unsafe fn make_move_nnue(
-        &mut self,
-        mv: u16,
-        tables: &Tables,
-        mut nnue: Option<&mut impl nnue::UpdatableNnue>,
-    ) -> bool {
+    pub unsafe fn make_move_nnue(&mut self, mv: u16, tables: &Tables) -> Option<nnue::NnueUpdate> {
         let zb_keys = &tables.zobrist_hash_keys;
 
         let from_sq = (mv & 0x3F) as u8;
@@ -1304,8 +1299,9 @@ impl ChessGame {
         let from_piece = self.spt[from_sq as usize] as usize;
         let to_piece = self.spt[to_sq as usize] as usize;
         let is_capture = (move_flags & MV_FLAG_CAP) != 0;
+        let mut to_square_piece = from_piece;
 
-        let mut nnue_update = match move_flags {
+        let nnue_update = match move_flags {
             MV_FLAGS_CASTLE_KING | MV_FLAGS_CASTLE_QUEEN => {
                 const CASTLING_OFFSETS: [[i8; 4]; 4] = [
                     [0, 0, 0, 0],
@@ -1325,18 +1321,18 @@ impl ChessGame {
                 .iter()
                 .any(|&square| self.is_king_square_attacked(square, self.b_move, tables))
                 {
-                    return false;
+                    return None;
                 }
 
                 let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
 
                 if move_flags == MV_FLAGS_CASTLE_KING && (full_board & (0b11 << (from_sq + 1))) != 0
                 {
-                    return false;
+                    return None;
                 } else if move_flags == MV_FLAGS_CASTLE_QUEEN
                     && (full_board & (0b111 << (from_sq - 3))) != 0
                 {
-                    return false;
+                    return None;
                 }
 
                 let rook_from_sq = (to_sq as usize).wrapping_add(square_offsets[2] as usize);
@@ -1426,17 +1422,35 @@ impl ChessGame {
                 nnue::NnueUpdate::quiet(from_piece as u8, from_piece as u8, from_sq, to_sq)
             }
             _ => {
+                if move_flags & MV_FLAG_PROMOTION != 0 {
+                    let promotion_piece = match move_flags & MV_FLAGS_PR_MASK {
+                        MV_FLAGS_PR_QUEEN => PieceIndex::WhiteQueen as usize + friendly_offset,
+                        MV_FLAGS_PR_KNIGHT => PieceIndex::WhiteKnight as usize + friendly_offset,
+                        MV_FLAGS_PR_ROOK => PieceIndex::WhiteRook as usize + friendly_offset,
+                        MV_FLAGS_PR_BISHOP => PieceIndex::WhiteBishop as usize + friendly_offset,
+                        _ => unreachable!(),
+                    };
+
+                    to_square_piece = promotion_piece;
+
+                    unsafe {
+                        self.material[self.b_move as usize] += MATERIAL_TABLE
+                            .get_unchecked(promotion_piece)
+                            - MATERIAL_TABLE.get_unchecked(from_piece);
+                    }
+                }
+
                 if is_capture {
                     nnue::NnueUpdate::capture(
                         from_piece as u8,
-                        from_piece as u8,
+                        to_square_piece as u8,
                         from_sq,
                         to_sq,
                         to_piece as u8,
                         to_sq,
                     )
                 } else {
-                    nnue::NnueUpdate::quiet(from_piece as u8, from_piece as u8, from_sq, to_sq)
+                    nnue::NnueUpdate::quiet(from_piece as u8, to_square_piece as u8, from_sq, to_sq)
                 }
             }
         };
@@ -1444,7 +1458,7 @@ impl ChessGame {
         debug_assert!(to_piece == 0 || is_capture);
 
         self.spt[from_sq as usize] = 0;
-        self.spt[to_sq as usize] = from_piece as u8;
+        self.spt[to_sq as usize] = to_square_piece as u8;
 
         unsafe {
             // Safety:
@@ -1453,15 +1467,17 @@ impl ChessGame {
 
             // to_piece will write to the white null-piece slot, but due to & it will remain zeros
             *self.board.bitboards.get_unchecked_mut(to_piece) &= !to_bit;
-            *self.board.bitboards.get_unchecked_mut(from_piece) ^= to_bit | from_bit;
+            *self.board.bitboards.get_unchecked_mut(from_piece) ^= from_bit;
+            *self.board.bitboards.get_unchecked_mut(to_square_piece) |= to_bit;
 
             self.material[!self.b_move as usize] -= MATERIAL_TABLE.get_unchecked(to_piece);
 
             // Remove moved piece from from_sq and add it to to_sq
             self.zobrist_key ^=
                 zb_keys.hash_piece_squares_new.get_unchecked(from_piece)[from_sq as usize];
-            self.zobrist_key ^=
-                zb_keys.hash_piece_squares_new.get_unchecked(from_piece)[to_sq as usize];
+            self.zobrist_key ^= zb_keys
+                .hash_piece_squares_new
+                .get_unchecked(to_square_piece)[to_sq as usize];
 
             // Remove captured piece from Zobrist key
             self.zobrist_key ^=
@@ -1471,41 +1487,6 @@ impl ChessGame {
             self.zobrist_key ^= zb_keys
                 .hash_en_passant_squares
                 .get_unchecked(self.en_passant as usize);
-        }
-
-        if move_flags & MV_FLAG_PROMOTION != 0 {
-            let promotion_piece = match move_flags & MV_FLAGS_PR_MASK {
-                MV_FLAGS_PR_QUEEN => PieceIndex::WhiteQueen as usize + friendly_offset,
-                MV_FLAGS_PR_KNIGHT => PieceIndex::WhiteKnight as usize + friendly_offset,
-                MV_FLAGS_PR_ROOK => PieceIndex::WhiteRook as usize + friendly_offset,
-                MV_FLAGS_PR_BISHOP => PieceIndex::WhiteBishop as usize + friendly_offset,
-                _ => unreachable!(),
-            };
-
-            nnue_update.set_to_piece_id(promotion_piece as u8);
-
-            unsafe {
-                // Safety: from_piece and promotion_piece are guaranteed to be valid piece ids
-                *self.board.bitboards.get_unchecked_mut(from_piece) &= !to_bit;
-                *self.board.bitboards.get_unchecked_mut(promotion_piece) |= to_bit;
-
-                // Safety: to_sq is guaranteed to be in board range [0, =63]
-                *self.spt.get_unchecked_mut(to_sq as usize) = promotion_piece as u8;
-
-                // Remove Zobrist key for promoted pawn and add it for promoted-to piece
-                self.zobrist_key ^= zb_keys
-                    .hash_piece_squares_new
-                    .get_unchecked(from_piece)
-                    .get_unchecked(to_sq as usize);
-                self.zobrist_key ^= zb_keys
-                    .hash_piece_squares_new
-                    .get_unchecked(promotion_piece)
-                    .get_unchecked(to_sq as usize);
-
-                self.material[self.b_move as usize] += MATERIAL_TABLE
-                    .get_unchecked(promotion_piece)
-                    - MATERIAL_TABLE.get_unchecked(from_piece);
-            }
         }
 
         // Remove Zobrist key for castling rights
@@ -1541,9 +1522,9 @@ impl ChessGame {
         self.b_move = !self.b_move;
         self.zobrist_key ^= zb_keys.hash_side_to_move;
 
-        if let Some(nnue) = nnue.as_mut() {
-            nnue.update(&nnue_update);
-        }
+        // if let Some(nnue) = nnue.as_mut() {
+        //     nnue.make_move(nnue_update);
+        // }
 
         // println!(
         //     "played move {} ({}), b_move: {}, zobrist_key: {:x}",
@@ -1564,7 +1545,7 @@ impl ChessGame {
             util::move_string(mv)
         );
 
-        true
+        Some(nnue_update)
     }
 
     #[inline(always)]
@@ -1683,9 +1664,9 @@ impl ChessGame {
                 move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
-            if unsafe { self.make_move_nnue(mv, tables, nnue.as_mut().map(|n| &mut **n)) }
-                && !self.in_check(tables, !self.b_move)
-            {
+            let nnue_update = unsafe { self.make_move_nnue(mv, tables) };
+
+            if nnue_update.is_some() && !self.in_check(tables, !self.b_move) {
                 assert!(
                     self.zobrist_key == self.calc_initial_zobrist_key(tables),
                     "Zobrist key mismatch after move {}",
@@ -1704,6 +1685,7 @@ impl ChessGame {
                     self.calc_material(),
                 );
                 if let Some(nnue) = nnue.as_mut() {
+                    nnue.make_move(nnue_update.unwrap());
                     let mut expected_pair = nnue::AccumulatorPair::new();
                     expected_pair.load(self, &nnue.net);
                     assert_eq!(
@@ -2464,10 +2446,9 @@ mod tests {
                     let board_copy = self.board.clone();
 
                     let mv = self.board.fix_move(util::create_move(&move_str));
-                    assert!(unsafe {
-                        self.board
-                            .make_move_nnue(mv, &self.tables, Some(self.nnue.as_mut()))
-                    });
+                    let nnue_update = unsafe { self.board.make_move_nnue(mv, &self.tables) };
+                    assert!(nnue_update.is_some());
+                    self.nnue.make_move(nnue_update.unwrap());
 
                     self.moves.push(move_str.clone());
 

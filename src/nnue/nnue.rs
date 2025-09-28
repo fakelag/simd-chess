@@ -8,6 +8,8 @@ const SCALE: i32 = 400;
 const QA: i16 = 255;
 const QB: i16 = 64;
 
+type PairFeature = u32;
+
 #[inline]
 fn crelu(x: i16) -> i32 {
     i32::from(x).clamp(0, i32::from(QA))
@@ -36,7 +38,7 @@ pub struct Network {
 
 impl Network {
     #[inline(always)]
-    pub fn evaluate(&self, us: &Accumulator, them: &Accumulator) -> i32 {
+    pub fn evaluate(&mut self, us: &Accumulator, them: &Accumulator) -> i16 {
         let mut output = i32::from(self.output_bias);
 
         for (&input, &weight) in us.vals.iter().zip(&self.output_weights[..HIDDEN_SIZE]) {
@@ -50,7 +52,7 @@ impl Network {
         output *= SCALE;
         output /= i32::from(QA) * i32::from(QB);
 
-        output
+        output as i16
     }
 }
 
@@ -108,7 +110,7 @@ impl AccumulatorPair {
     }
 
     pub fn load(&mut self, board: &chess_v2::ChessGame, net: &Network) {
-        let bitboards = board.bitboards_new();
+        let bitboards = board.bitboards();
 
         self.white = Accumulator::new(net);
         self.black = Accumulator::new(net);
@@ -134,24 +136,92 @@ impl AccumulatorPair {
     }
 
     #[inline(always)]
-    pub fn move_piece(&mut self, piece_id: usize, from_sq: usize, to_sq: usize, net: &Network) {
-        debug_assert!(
-            piece_id != PieceIndex::WhiteNullPiece as usize
-                && piece_id != PieceIndex::WhitePad as usize
-                && piece_id != PieceIndex::BlackNullPiece as usize
-                && piece_id != PieceIndex::BlackPad as usize
-        );
+    pub fn acc_add1_sub1_src(
+        &mut self,
+        src: &AccumulatorPair,
+        add: PairFeature,
+        sub: PairFeature,
+        net: &Network,
+    ) {
+        let white_add = &net.feature_weights[(add >> 16) as usize].vals;
+        let black_add = &net.feature_weights[(add & 0xFFFF) as usize].vals;
+        let white_sub = &net.feature_weights[(sub >> 16) as usize].vals;
+        let black_sub = &net.feature_weights[(sub & 0xFFFF) as usize].vals;
 
-        let (white_feature_from, black_feature_from) =
-            Self::calc_feature_indices(piece_id, from_sq);
-        let (white_feature_to, black_feature_to) = Self::calc_feature_indices(piece_id, to_sq);
-
-        self.white.remove_feature(white_feature_from, net);
-        self.white.add_feature(white_feature_to, net);
-
-        self.black.remove_feature(black_feature_from, net);
-        self.black.add_feature(black_feature_to, net);
+        for i in 0..HIDDEN_SIZE {
+            self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub[i];
+            self.black.vals[i] = src.black.vals[i] + black_add[i] - black_sub[i];
+        }
     }
+
+    #[inline(always)]
+    pub fn acc_add1_sub2_src(
+        &mut self,
+        src: &AccumulatorPair,
+        add: PairFeature,
+        sub1: PairFeature,
+        sub2: PairFeature,
+        net: &Network,
+    ) {
+        let white_add = &net.feature_weights[(add >> 16) as usize].vals;
+        let black_add = &net.feature_weights[(add & 0xFFFF) as usize].vals;
+        let white_sub1 = &net.feature_weights[(sub1 >> 16) as usize].vals;
+        let black_sub1 = &net.feature_weights[(sub1 & 0xFFFF) as usize].vals;
+        let white_sub2 = &net.feature_weights[(sub2 >> 16) as usize].vals;
+        let black_sub2 = &net.feature_weights[(sub2 & 0xFFFF) as usize].vals;
+
+        for i in 0..HIDDEN_SIZE {
+            self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub1[i] - white_sub2[i];
+            self.black.vals[i] = src.black.vals[i] + black_add[i] - black_sub1[i] - black_sub2[i];
+        }
+    }
+
+    #[inline(always)]
+    pub fn acc_add2_sub2_src(
+        &mut self,
+        src: &AccumulatorPair,
+        add1: PairFeature,
+        add2: PairFeature,
+        sub1: PairFeature,
+        sub2: PairFeature,
+        net: &Network,
+    ) {
+        let white_add1 = &net.feature_weights[(add1 >> 16) as usize].vals;
+        let black_add1 = &net.feature_weights[(add1 & 0xFFFF) as usize].vals;
+        let white_add2 = &net.feature_weights[(add2 >> 16) as usize].vals;
+        let black_add2 = &net.feature_weights[(add2 & 0xFFFF) as usize].vals;
+        let white_sub1 = &net.feature_weights[(sub1 >> 16) as usize].vals;
+        let black_sub1 = &net.feature_weights[(sub1 & 0xFFFF) as usize].vals;
+        let white_sub2 = &net.feature_weights[(sub2 >> 16) as usize].vals;
+        let black_sub2 = &net.feature_weights[(sub2 & 0xFFFF) as usize].vals;
+
+        for i in 0..HIDDEN_SIZE {
+            self.white.vals[i] =
+                src.white.vals[i] + white_add1[i] + white_add2[i] - white_sub1[i] - white_sub2[i];
+            self.black.vals[i] =
+                src.black.vals[i] + black_add1[i] + black_add2[i] - black_sub1[i] - black_sub2[i];
+        }
+    }
+
+    // #[inline(always)]
+    // pub fn move_piece(&mut self, piece_id: usize, from_sq: usize, to_sq: usize, net: &Network) {
+    //     debug_assert!(
+    //         piece_id != PieceIndex::WhiteNullPiece as usize
+    //             && piece_id != PieceIndex::WhitePad as usize
+    //             && piece_id != PieceIndex::BlackNullPiece as usize
+    //             && piece_id != PieceIndex::BlackPad as usize
+    //     );
+
+    //     let (white_feature_from, black_feature_from) =
+    //         Self::calc_feature_indices(piece_id, from_sq);
+    //     let (white_feature_to, black_feature_to) = Self::calc_feature_indices(piece_id, to_sq);
+
+    //     self.white.remove_feature(white_feature_from, net);
+    //     self.white.add_feature(white_feature_to, net);
+
+    //     self.black.remove_feature(black_feature_from, net);
+    //     self.black.add_feature(black_feature_to, net);
+    // }
 
     #[inline(always)]
     pub fn add_piece(&mut self, piece_id: usize, to_sq: usize, net: &Network) {
@@ -168,24 +238,24 @@ impl AccumulatorPair {
         self.black.add_feature(black_feature, net);
     }
 
-    #[inline(always)]
-    pub fn remove_piece(&mut self, piece_id_or_null: usize, from_sq: usize, net: &Network) {
-        if piece_id_or_null == PieceIndex::WhiteNullPiece as usize {
-            return;
-        }
+    // #[inline(always)]
+    // pub fn remove_piece(&mut self, piece_id_or_null: usize, from_sq: usize, net: &Network) {
+    //     if piece_id_or_null == PieceIndex::WhiteNullPiece as usize {
+    //         return;
+    //     }
 
-        debug_assert!(
-            piece_id_or_null != PieceIndex::WhiteNullPiece as usize
-                && piece_id_or_null != PieceIndex::WhitePad as usize
-                && piece_id_or_null != PieceIndex::BlackNullPiece as usize
-                && piece_id_or_null != PieceIndex::BlackPad as usize
-        );
+    //     debug_assert!(
+    //         piece_id_or_null != PieceIndex::WhiteNullPiece as usize
+    //             && piece_id_or_null != PieceIndex::WhitePad as usize
+    //             && piece_id_or_null != PieceIndex::BlackNullPiece as usize
+    //             && piece_id_or_null != PieceIndex::BlackPad as usize
+    //     );
 
-        let (white_feature, black_feature) = Self::calc_feature_indices(piece_id_or_null, from_sq);
+    //     let (white_feature, black_feature) = Self::calc_feature_indices(piece_id_or_null, from_sq);
 
-        self.white.remove_feature(white_feature, net);
-        self.black.remove_feature(black_feature, net);
-    }
+    //     self.white.remove_feature(white_feature, net);
+    //     self.black.remove_feature(black_feature, net);
+    // }
 
     #[inline(always)]
     fn calc_feature_indices(piece_index: usize, square: usize) -> (usize, usize) {
@@ -197,48 +267,34 @@ impl AccumulatorPair {
 
         (white_feature, black_feature)
     }
+
+    #[inline(always)]
+    fn calc_feature_indices_pair(piece_index: u8, square: u8) -> PairFeature {
+        let is_black = (piece_index & 0b1000) != 0;
+        let piece_base = (64 * (NNUE_PIECE_INDICES[(piece_index & 7) as usize])) as u16;
+
+        let square = square as u16;
+        let white_feature = [0, 0x180][is_black as usize] + piece_base + square;
+        let black_feature = [0x180, 0][is_black as usize] + piece_base + (square ^ 56);
+
+        ((white_feature as u32) << 16) | (black_feature as u32)
+    }
 }
 
-pub struct NnueQuietMove {
-    from_piece_id: u8,
-    to_piece_id: u8,
-    from_sq: u8,
-    to_sq: u8,
-}
-
-pub struct NnueCaptureMove {
-    from_piece_id: u8,
-    to_piece_id: u8,
-    from_sq: u8,
-    to_sq: u8,
-    captured_piece_id: u8,
-    captured_sq: u8,
-}
-
-pub struct NnueCastleMove {
-    rook_piece_id: u8,
-    rook_from_sq: u8,
-    rook_to_sq: u8,
-    king_piece_id: u8,
-    king_from_sq: u8,
-    king_to_sq: u8,
-}
-
+#[derive(Debug)]
 pub enum NnueUpdate {
-    NnueUpdateQuiet(NnueQuietMove),
-    NnueUpdateCapture(NnueCaptureMove),
-    NnueUpdateCastle(NnueCastleMove),
+    NnueUpdateAddSub((u32, u32)),
+    NnueUpdateAddSubSub((u32, u32, u32)),
+    NnueUpdateAddAddSubSub((u32, u32, u32, u32)),
 }
 
 impl NnueUpdate {
     #[inline(always)]
     pub fn quiet(from_piece_id: u8, to_piece_id: u8, from_sq: u8, to_sq: u8) -> Self {
-        NnueUpdate::NnueUpdateQuiet(NnueQuietMove {
-            from_piece_id,
-            to_piece_id,
-            from_sq,
-            to_sq,
-        })
+        let sub = AccumulatorPair::calc_feature_indices_pair(from_piece_id, from_sq);
+        let add = AccumulatorPair::calc_feature_indices_pair(to_piece_id, to_sq);
+
+        NnueUpdate::NnueUpdateAddSub((add, sub))
     }
 
     #[inline(always)]
@@ -250,14 +306,10 @@ impl NnueUpdate {
         captured_piece_id: u8,
         captured_sq: u8,
     ) -> Self {
-        NnueUpdate::NnueUpdateCapture(NnueCaptureMove {
-            from_piece_id,
-            to_piece_id,
-            from_sq,
-            to_sq,
-            captured_piece_id,
-            captured_sq,
-        })
+        let add = AccumulatorPair::calc_feature_indices_pair(to_piece_id, to_sq);
+        let sub1 = AccumulatorPair::calc_feature_indices_pair(from_piece_id, from_sq);
+        let sub2 = AccumulatorPair::calc_feature_indices_pair(captured_piece_id, captured_sq);
+        NnueUpdate::NnueUpdateAddSubSub((add, sub1, sub2))
     }
 
     #[inline(always)]
@@ -269,32 +321,117 @@ impl NnueUpdate {
         king_from_sq: u8,
         king_to_sq: u8,
     ) -> Self {
-        NnueUpdate::NnueUpdateCastle(NnueCastleMove {
-            rook_piece_id,
-            rook_from_sq,
-            rook_to_sq,
-            king_piece_id,
-            king_from_sq,
-            king_to_sq,
-        })
-    }
-
-    #[inline(always)]
-    pub fn set_to_piece_id(&mut self, to_piece_id: u8) {
-        match self {
-            NnueUpdate::NnueUpdateQuiet(mv) => mv.to_piece_id = to_piece_id,
-            NnueUpdate::NnueUpdateCapture(mv) => mv.to_piece_id = to_piece_id,
-            NnueUpdate::NnueUpdateCastle(_) => {
-                unreachable!("Cannot set to_piece_id on castle move")
-            }
-        }
+        let add1 = AccumulatorPair::calc_feature_indices_pair(rook_piece_id, rook_to_sq);
+        let add2 = AccumulatorPair::calc_feature_indices_pair(king_piece_id, king_to_sq);
+        let sub1 = AccumulatorPair::calc_feature_indices_pair(rook_piece_id, rook_from_sq);
+        let sub2 = AccumulatorPair::calc_feature_indices_pair(king_piece_id, king_from_sq);
+        NnueUpdate::NnueUpdateAddAddSubSub((add1, add2, sub1, sub2))
     }
 }
 
 pub trait UpdatableNnue {
-    fn update(&mut self, update: &NnueUpdate);
+    fn make_move(&mut self, mv: NnueUpdate);
 }
 
+pub struct LazyNnue {
+    net: Network,
+    accumulators: Vec<AccumulatorPair>,
+    updates: Vec<NnueUpdate>,
+    applied_accumulators: Vec<usize>,
+}
+
+impl LazyNnue {
+    pub fn init(&mut self, net: Network) {
+        let mut nnue = LazyNnue {
+            net,
+            accumulators: Vec::with_capacity(1024),
+            updates: Vec::with_capacity(1024),
+            applied_accumulators: Vec::new(),
+        };
+
+        for _ in 0..1024 {
+            nnue.accumulators.push(AccumulatorPair::new());
+        }
+
+        *self = nnue;
+    }
+
+    pub fn load(&mut self, board: &chess_v2::ChessGame) {
+        debug_assert!(self.updates.is_empty());
+
+        self.applied_accumulators.clear();
+        self.applied_accumulators.push(0);
+
+        self.accumulators[0].load(board, &self.net);
+        self.updates.clear();
+    }
+
+    #[inline(always)]
+    pub fn rollback_move(&mut self) {
+        let ply = self.updates.len();
+
+        debug_assert!(ply > 0, "Cannot rollback move, no moves to rollback");
+
+        self.updates.pop().unwrap();
+
+        self.applied_accumulators.pop_if(|x| *x == ply);
+    }
+
+    #[inline(always)]
+    pub fn evaluate(&mut self, b_move: bool) -> i16 {
+        let start = self.applied_accumulators.last().copied().unwrap();
+
+        debug_assert!(start <= self.updates.len());
+        debug_assert!(start < self.accumulators.len());
+        debug_assert!(self.updates.len() < self.accumulators.len());
+
+        let ply = self.updates.len().min(self.accumulators.len() - 1);
+        for i in start + 1..=ply {
+            let update = &self.updates[i - 1];
+
+            let (prev, acc) = self.accumulators.split_at_mut(i);
+
+            let prev = prev.last().unwrap();
+
+            // assert!(
+            //     acc.first_mut().is_some(),
+            //     "Accumulator not allocated for ply {}",
+            //     i
+            // );
+
+            let acc = acc.first_mut().unwrap();
+
+            match update {
+                NnueUpdate::NnueUpdateAddSub((add, sub)) => {
+                    acc.acc_add1_sub1_src(prev, *add, *sub, &self.net);
+                }
+                NnueUpdate::NnueUpdateAddSubSub((add, sub1, sub2)) => {
+                    acc.acc_add1_sub2_src(prev, *add, *sub1, *sub2, &self.net);
+                }
+                NnueUpdate::NnueUpdateAddAddSubSub((add1, add2, sub1, sub2)) => {
+                    acc.acc_add2_sub2_src(prev, *add1, *add2, *sub1, *sub2, &self.net);
+                }
+            }
+
+            self.applied_accumulators.push(i);
+        }
+
+        let acc = &self.accumulators[ply];
+
+        let us = [&acc.white, &acc.black][b_move as usize];
+        let them = [&acc.black, &acc.white][b_move as usize];
+        self.net.evaluate(us, them)
+    }
+}
+
+impl UpdatableNnue for LazyNnue {
+    #[inline(always)]
+    fn make_move(&mut self, mv: NnueUpdate) {
+        self.updates.push(mv);
+    }
+}
+
+/// Deprecated, @todo - use LazyNnue instead
 pub struct Nnue {
     pub net: Network,
     pub acc: AccumulatorPair,
@@ -310,23 +447,23 @@ impl Nnue {
         self.acc.load(board, &self.net);
     }
 
-    #[inline(always)]
-    pub fn move_piece(&mut self, piece_id: usize, from_sq: usize, to_sq: usize) {
-        self.acc.move_piece(piece_id, from_sq, to_sq, &self.net);
-    }
+    // #[inline(always)]
+    // pub fn move_piece(&mut self, piece_id: usize, from_sq: usize, to_sq: usize) {
+    //     self.acc.move_piece(piece_id, from_sq, to_sq, &self.net);
+    // }
+
+    // #[inline(always)]
+    // pub fn add_piece(&mut self, piece_id: usize, to_sq: usize) {
+    //     self.acc.add_piece(piece_id, to_sq, &self.net);
+    // }
+
+    // #[inline(always)]
+    // pub fn remove_piece(&mut self, piece_id_or_null: usize, from_sq: usize) {
+    //     self.acc.remove_piece(piece_id_or_null, from_sq, &self.net);
+    // }
 
     #[inline(always)]
-    pub fn add_piece(&mut self, piece_id: usize, to_sq: usize) {
-        self.acc.add_piece(piece_id, to_sq, &self.net);
-    }
-
-    #[inline(always)]
-    pub fn remove_piece(&mut self, piece_id_or_null: usize, from_sq: usize) {
-        self.acc.remove_piece(piece_id_or_null, from_sq, &self.net);
-    }
-
-    #[inline(always)]
-    pub fn evaluate(&self, b_move: bool) -> i32 {
+    pub fn evaluate(&mut self, b_move: bool) -> i16 {
         let us = [&self.acc.white, &self.acc.black][b_move as usize];
         let them = [&self.acc.black, &self.acc.white][b_move as usize];
         self.net.evaluate(us, them)
@@ -335,28 +472,19 @@ impl Nnue {
 
 impl UpdatableNnue for Nnue {
     #[inline(always)]
-    fn update(&mut self, update: &NnueUpdate) {
-        match update {
-            NnueUpdate::NnueUpdateQuiet(mv) => {
-                self.remove_piece(mv.from_piece_id as usize, mv.from_sq as usize);
-                self.add_piece(mv.to_piece_id as usize, mv.to_sq as usize);
+    fn make_move(&mut self, mv: NnueUpdate) {
+        match mv {
+            NnueUpdate::NnueUpdateAddSub((add, sub)) => {
+                self.acc
+                    .acc_add1_sub1_src(&self.acc.clone(), add, sub, &self.net);
             }
-            NnueUpdate::NnueUpdateCapture(mv) => {
-                self.remove_piece(mv.from_piece_id as usize, mv.from_sq as usize);
-                self.remove_piece(mv.captured_piece_id as usize, mv.captured_sq as usize);
-                self.add_piece(mv.to_piece_id as usize, mv.to_sq as usize);
+            NnueUpdate::NnueUpdateAddSubSub((add, sub1, sub2)) => {
+                self.acc
+                    .acc_add1_sub2_src(&self.acc.clone(), add, sub1, sub2, &self.net);
             }
-            NnueUpdate::NnueUpdateCastle(mv) => {
-                self.move_piece(
-                    mv.rook_piece_id as usize,
-                    mv.rook_from_sq as usize,
-                    mv.rook_to_sq as usize,
-                );
-                self.move_piece(
-                    mv.king_piece_id as usize,
-                    mv.king_from_sq as usize,
-                    mv.king_to_sq as usize,
-                );
+            NnueUpdate::NnueUpdateAddAddSubSub((add1, add2, sub1, sub2)) => {
+                self.acc
+                    .acc_add2_sub2_src(&self.acc.clone(), add1, add2, sub1, sub2, &self.net);
             }
         }
     }
@@ -373,6 +501,21 @@ macro_rules! nnue_load {
         unsafe {
             (*ptr).acc = nnue::AccumulatorPair::new();
             (*ptr).net = *net;
+            nnue.assume_init()
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! nnue_lazy_load {
+    ($path:expr) => {{
+        let net: &nnue::Network = &unsafe { std::mem::transmute(*include_bytes!($path)) };
+
+        let mut nnue = Box::<nnue::LazyNnue>::new_uninit();
+        let ptr = nnue.as_mut_ptr();
+
+        unsafe {
+            (*ptr).init(*net);
             nnue.assume_init()
         }
     }};
