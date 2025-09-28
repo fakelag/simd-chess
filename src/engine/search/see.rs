@@ -1,26 +1,25 @@
 use crate::engine::{
     chess_v2::{ChessGame, PieceIndex},
-    search::eval::{Eval, WEIGHT_TABLE_ABS},
     tables,
 };
-
-fn piece_value(piece: u8) -> Eval {
-    WEIGHT_TABLE_ABS[piece as usize]
-}
 
 const PIECE_QUEEN: usize = PieceIndex::WhiteQueen as usize;
 const PIECE_ROOK: usize = PieceIndex::WhiteRook as usize;
 const PIECE_BISHOP: usize = PieceIndex::WhiteBishop as usize;
 const PIECE_PAWN: usize = PieceIndex::WhitePawn as usize;
 
-pub fn static_exchange_eval(
+pub fn static_exchange_eval<T>(
+    score_table: &[T; 16],
     tables: &tables::Tables,
     board: &ChessGame,
     mut black_board: u64,
     mut white_board: u64,
     mut piece_board: [u64; 8],
     mv: u16,
-) -> Eval {
+) -> T
+where
+    T: std::ops::Sub<Output = T> + std::ops::Neg<Output = T> + Ord + Copy + From<i8>,
+{
     let from_sq = (mv & 0x3F) as usize;
     let to_sq = ((mv >> 6) & 0x3F) as usize;
     let to_sq_mask = 1u64 << to_sq;
@@ -36,12 +35,12 @@ pub fn static_exchange_eval(
     piece_board[to_piece as usize & 7] ^= to_sq_mask;
 
     let mut full_board = black_board | white_board;
-    let mut exchanges = [0 as Eval; 32];
+    let mut exchanges = [T::from(0); 32];
     let mut exchange_index = 1;
 
     let mut last_moved_piece = from_piece;
 
-    exchanges[0] = piece_value(to_piece);
+    exchanges[0] = score_table[to_piece as usize];
 
     // Swap side
     b_move = !b_move;
@@ -74,7 +73,8 @@ pub fn static_exchange_eval(
         all_attackers ^= attacker_sq_mask;
         full_board ^= attacker_sq_mask;
 
-        exchanges[exchange_index] = piece_value(last_moved_piece) - exchanges[exchange_index - 1];
+        exchanges[exchange_index] =
+            score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
         exchange_index += 1;
         last_moved_piece = attacker_piece;
 
@@ -190,12 +190,21 @@ mod tests {
     use crate::{
         engine::{
             chess_v2::{self, PieceIndex},
+            search::eval::{Eval, WEIGHT_TABLE_ABS, WEIGHT_TABLE_ABS_I8},
             tables,
         },
         util,
     };
 
     use super::*;
+
+    fn piece_value(piece: u8) -> Eval {
+        WEIGHT_TABLE_ABS[piece as usize]
+    }
+
+    fn piece_value_i8(piece: u8) -> i8 {
+        WEIGHT_TABLE_ABS_I8[piece as usize]
+    }
 
     fn see_test(fen: &'static str, mv_string: &'static str) -> Eval {
         let tables = tables::Tables::new();
@@ -221,7 +230,15 @@ mod tests {
             .enumerate()
             .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
 
-        static_exchange_eval(&tables, &board, black_board, white_board, piece_boards, mv)
+        static_exchange_eval(
+            &WEIGHT_TABLE_ABS,
+            &tables,
+            &board,
+            black_board,
+            white_board,
+            piece_boards,
+            mv,
+        )
     }
 
     #[test]
@@ -324,6 +341,57 @@ mod tests {
         let expected = piece_value(PieceIndex::BlackQueen as u8)
             - piece_value(PieceIndex::WhiteQueen as u8)
             + piece_value(PieceIndex::BlackKnight as u8);
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_i8() {
+        let mv_string = "b1b6";
+
+        let tables = tables::Tables::new();
+        let mut board = chess_v2::ChessGame::new();
+
+        assert!(
+            board
+                .load_fen("7k/3n4/Rq6/8/8/8/8/1Q4K1 w - - 0 1", &tables)
+                .is_ok()
+        );
+
+        let mv = board.fix_move(util::create_move(mv_string));
+
+        assert!(util::is_legal_slow(&tables, &board, mv));
+        // assert!(mv & MV_FLAG_CAP != 0);
+
+        let bitboards = board.bitboards();
+
+        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
+        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
+
+        let mut piece_boards: [u64; 8] = [0u64; 8];
+        bitboards
+            .iter()
+            .take(8)
+            .zip(bitboards.iter().skip(8))
+            .enumerate()
+            .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
+
+        let see_score = static_exchange_eval(
+            &WEIGHT_TABLE_ABS_I8,
+            &tables,
+            &board,
+            black_board,
+            white_board,
+            piece_boards,
+            mv,
+        );
+
+        let expected = piece_value_i8(PieceIndex::BlackQueen as u8)
+            - piece_value_i8(PieceIndex::WhiteQueen as u8)
+            + piece_value_i8(PieceIndex::BlackKnight as u8);
         assert_eq!(
             see_score, expected,
             "Expected SEE to be {}, got {}",

@@ -401,3 +401,21 @@ pub fn parse_position<'a>(
 
     Ok(())
 }
+
+pub fn is_legal_slow(tables: &tables::Tables, board: &chess_v2::ChessGame, mv: u16) -> bool {
+    let mut board_copy = board.clone();
+
+    let mut move_list = [0u16; 256];
+    for i in 0..board_copy.gen_moves_avx512::<false>(tables, &mut move_list) {
+        if move_list[i] == mv {
+            if !unsafe { board_copy.make_move(mv, tables) }
+                || board_copy.in_check(tables, !board_copy.b_move())
+            {
+                return false;
+            }
+
+            return true;
+        }
+    }
+    return false;
+}
