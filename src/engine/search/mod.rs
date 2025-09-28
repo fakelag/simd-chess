@@ -8,9 +8,11 @@ pub trait SearchStrategy<'a> {
     fn search_score(&self) -> i32;
 }
 
+pub mod eval;
 pub mod repetition;
 pub mod repetition_v2;
 pub mod search_params;
+pub mod see;
 pub mod sorting;
 pub mod transposition;
 pub mod transposition_v2;
@@ -19,7 +21,7 @@ pub mod v10_mvcache;
 pub mod v11_opt;
 pub mod v12_eval;
 pub mod v12_eval_sp;
-pub mod v13_nnue;
+// pub mod v13_nnue;
 pub mod v1_negamax;
 pub mod v2_alphabeta;
 pub mod v3_itdep;
@@ -105,9 +107,23 @@ mod tests {
             );
             println!(
                 "TT store hit rate: {:.02}%",
-                tt_stats.store_hit as f64 / (tt_stats.store_hit as f64 + tt_stats.store_hit as f64)
+                tt_stats.store_hit as f64
+                    / (tt_stats.store_hit as f64 + tt_stats.store_miss as f64)
                     * 100.0
             );
+
+            // let et_stats = search_engine.get_et().calc_stats();
+            // println!(
+            //     "ET usage: {:.02}% ({} collisions)",
+            //     et_stats.fill_percentage * 100.0,
+            //     et_stats.collisions
+            // );
+            // println!(
+            //     "Eval probe hit rate: {:.02}%",
+            //     et_stats.probe_hit as f64
+            //         / (et_stats.probe_hit as f64 + et_stats.probe_miss as f64)
+            //         * 100.0
+            // );
             println!(
                 "PV: {:?}",
                 search_engine
@@ -125,7 +141,7 @@ mod tests {
             delta
         };
 
-        const ITERATIONS: usize = 10;
+        const ITERATIONS: usize = 5;
         let mut total_cycles = 0;
         for _ in 0..ITERATIONS {
             total_cycles += bench();
