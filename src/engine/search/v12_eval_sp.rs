@@ -6,228 +6,19 @@ use crate::{
         chess_v2,
         search::{
             AbortSignal, SearchStrategy,
+            eval::*,
             repetition_v2::RepetitionTable,
             search_params::SearchParams,
-            sorting,
+            see, sorting,
             transposition_v2::{BoundType, TranspositionTable},
         },
         tables::{self},
     },
-    nnue::nnue,
-    nnue_load, pop_ls1b,
-    util::{self, Align64, table_mirror, table_negate_i8},
+    nnue::nnue::{self, UpdatableNnue},
+    nnue_lazy_load,
 };
 
-type Eval = i16;
-
-const SCORE_INF: Eval = i16::MAX - 1;
-const WEIGHT_KING: Eval = 0;
-const WEIGHT_QUEEN: Eval = 1000;
-const WEIGHT_ROOK: Eval = 525;
-const WEIGHT_BISHOP: Eval = 350;
-const WEIGHT_KNIGHT: Eval = 350;
-const WEIGHT_PAWN: Eval = 100;
 const PV_DEPTH: usize = 64;
-
-const WEIGHT_TABLE_MGEG: [[Eval; PieceIndex::PieceIndexMax as usize]; 2] = [
-    [
-        0,
-        WEIGHT_KING,
-        WEIGHT_QUEEN,
-        WEIGHT_ROOK,
-        WEIGHT_BISHOP,
-        WEIGHT_KNIGHT,
-        WEIGHT_PAWN,
-        0,
-        0,
-        -WEIGHT_KING,
-        -WEIGHT_QUEEN,
-        -WEIGHT_ROOK,
-        -WEIGHT_BISHOP,
-        -WEIGHT_KNIGHT,
-        -WEIGHT_PAWN,
-        0,
-    ],
-    [
-        0,
-        WEIGHT_KING,
-        WEIGHT_QUEEN + 50,
-        WEIGHT_ROOK + 30,
-        WEIGHT_BISHOP - 30,
-        WEIGHT_KNIGHT - 30,
-        WEIGHT_PAWN + 20,
-        0,
-        0,
-        -WEIGHT_KING,
-        -(WEIGHT_QUEEN + 50),
-        -(WEIGHT_ROOK + 30),
-        -(WEIGHT_BISHOP - 30),
-        -(WEIGHT_KNIGHT - 30),
-        -(WEIGHT_PAWN + 20),
-        0,
-    ],
-];
-
-/*
-    Evals for white pieces in square format. Black pieces are mirrored
-    and inverted for quick negative scoring. MG = midgame, EG = endgame.
-    [a8, b8, c8, d8, e8, f8, g8, h8,
-    a7, b7, c7, d7, e7, f7, g7, h7,
-    a6, b6, c6, d6, e6, f6, g6, h6,
-    a5, b5, c5, d5, e5, f5, g5, h5,
-    a4, b4, c4, d4, e4, f4, g4, h4,
-    a3, b3, c3, d3, e3, f3, g3, h3,
-    a2, b2, c2, d2, e2, f2, g2, h2,
-    a1, b1, c1, d1, e1, f1, g1, h1]
-*/
-#[cfg_attr(any(), rustfmt::skip)]
-pub const EVAL_TABLES_INV_MGEG: Align64<[[[i8; 64]; 16]; 2]> = const {
-    let eval_white_king_mg = [
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -20,-30,-30,-40,-40,-30,-30,-20,
-        -10,-20,-20,-20,-20,-20,-20,-10,
-        20, 20,  0,  0,  0,  0, 20, 20,
-        20, 30, 10,  0,  0, 10, 30, 20
-    ];
-    let eval_white_king_eg = [
-        -50,-40,-30,-20,-20,-30,-40,-50,
-        -30,-20,-10,  0,  0,-10,-20,-30,
-        -30,-10, 20, 30, 30, 20,-10,-30,
-        -30,-10, 30, 40, 40, 30,-10,-30,
-        -30,-10, 30, 40, 40, 30,-10,-30,
-        -30,-10, 20, 30, 30, 20,-10,-30,
-        -30,-30,  0,  0,  0,  0,-30,-30,
-        -50,-30,-30,-30,-30,-30,-30,-50
-    ];
-
-    let eval_white_queen_mg = [
-        -20,-10,-10, -5, -5,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  5,  5,  5,  5,  0,-10,
-        -5,   0,  5,  5,  5,  5,  0, -5,
-         0,   0,  5,  5,  5,  5,  0, -5,
-        -10,  5,  5,  5,  5,  5,  0,-10,
-        -10,  0,  5,  0,  0,  0,  0,-10,
-        -20,-10,-10, 0, 0,-10,-10,-20
-    ];
-    let eval_white_queen_eg = [
-        -20,-10,-10, -5, -5,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  5,  5,  5,  5,  0,-10,
-        -5,   0,  5,  5,  5,  5,  0, -5,
-         0,   0,  5,  5,  5,  5,  0, -5,
-        -10,  5,  5,  5,  5,  5,  0,-10,
-        -10,  0,  5,  0,  0,  0,  0,-10,
-        -20,-10,-10, -10, -10,-10,-10,-20
-    ];
-
-    let eval_white_rook = [
-        0,  0,  0,  0,  0,  0,  0,  0,
-        5, 10, 10, 10, 10, 10, 10,  5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        0,  0,  0,  5,  5,  0,  0,  0
-    ];
-    let eval_white_bishop = [
-        -20,-10,-10,-10,-10,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  5, 10, 10,  5,  0,-10,
-        -10,  5,  5, 10, 10,  5,  5,-10,
-        -10,  0, 10, 10, 10, 10,  0,-10,
-        -10, 10, 10, 10, 10, 10, 10,-10,
-        -10,  5,  0,  0,  0,  0,  5,-10,
-        -20,-10,-10,-10,-10,-10,-10,-20,
-    ];
-    let eval_white_knight = [
-        -50,-40,-30,-30,-30,-30,-40,-50,
-        -40,-20,  0,  0,  0,  0,-20,-40,
-        -30,  0, 10, 15, 15, 10,  0,-30,
-        -30,  5, 15, 20, 20, 15,  5,-30,
-        -30,  0, 15, 20, 20, 15,  0,-30,
-        -30,  5, 10, 15, 15, 10,  5,-30,
-        -40,-20,  0,  5,  5,  0,-20,-40,
-        -50,-40,-30,-30,-30,-30,-40,-50,
-    ];
-
-    let eval_white_pawn_mg = [
-        0,   0,  0,  0,  0,  0,  0,  0,
-        30, 30, 30, 30, 30, 30, 30, 30,
-        10, 10, 20, 30, 30, 20, 10, 10,
-        5,   5, 10, 25, 25, 10,  5,  5,
-        0,   0,  0, 20, 20,  0,  0,  0,
-        5,  -5,-10,  0,  0,-10, -5,  5,
-        5,  10, 10,-20,-20, 10, 10,  5,
-        0,   0,  0,  0,  0,  0,  0,  0,
-    ];
-    let eval_white_pawn_eg = [
-        0,  0,  0,  0,  0,  0,  0,  0,
-        60,  60, 60, 60, 60, 60, 60, 60,
-        50,  50, 50, 50, 50, 50, 50, 50,
-        5,   5,  10, 25, 25, 10,  5,  5,
-        0,   0,  0, 20, 20,  0,  0,  0,
-        5,  -5,-10,  0,  0,-10, -5,  5,
-        5,  10, 10,-20,-20, 10, 10,  5,
-        0,   0,  0,  0,  0,  0,  0,  0,
-    ];
-    let tabl_zero = [
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0
-    ];
-
-    // Final eval_v2:
-    // Versus match ended: 146 evaltest_v2.exe wins, 95 evaltest_v1.exe wins, 59 draws
-    // Versus match ended: 177 evaltest_v3.exe wins, 144 evaltest_v2.exe wins, 79 draws
-
-    Align64([
-        [
-        tabl_zero,
-        // Mirror white pieces to LERF endianness
-        table_mirror(eval_white_king_mg, 8),
-        table_mirror(eval_white_queen_mg, 8),
-        table_mirror(eval_white_rook, 8),
-        table_mirror(eval_white_bishop, 8),
-        table_mirror(eval_white_knight, 8),
-        table_mirror(eval_white_pawn_mg, 8),
-        tabl_zero,
-        tabl_zero,
-        table_negate_i8(eval_white_king_mg),
-        table_negate_i8(eval_white_queen_mg),
-        table_negate_i8(eval_white_rook),
-        table_negate_i8(eval_white_bishop),
-        table_negate_i8(eval_white_knight),
-        table_negate_i8(eval_white_pawn_mg),
-        tabl_zero,
-    ], [
-        tabl_zero,
-        table_mirror(eval_white_king_eg, 8),
-        table_mirror(eval_white_queen_eg, 8),
-        table_mirror(eval_white_rook, 8),
-        table_mirror(eval_white_bishop, 8),
-        table_mirror(eval_white_knight, 8),
-        table_mirror(eval_white_pawn_eg, 8),
-        tabl_zero,
-        tabl_zero,
-        table_negate_i8(eval_white_king_eg),
-        table_negate_i8(eval_white_queen_eg),
-        table_negate_i8(eval_white_rook),
-        table_negate_i8(eval_white_bishop),
-        table_negate_i8(eval_white_knight),
-        table_negate_i8(eval_white_pawn_eg),
-        tabl_zero,
-    ]])
-};
 
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
@@ -274,7 +65,7 @@ pub struct Search<'a> {
     tables: &'a tables::Tables,
     sig: Option<AbortSignal>,
 
-    nnue: Box<nnue::Nnue>,
+    nnue: Box<nnue::LazyNnue>,
 
     ply: u8,
     is_stopping: bool,
@@ -288,7 +79,7 @@ pub struct Search<'a> {
 
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
-
+    // et: EvalTable,
     /// Quiet moves that caused a β-cutoff, indexed by ply
     beta_moves: Box<[[u16; 2]; PV_DEPTH]>,
 
@@ -358,7 +149,7 @@ impl<'a> Search<'a> {
         rt: RepetitionTable,
     ) -> Search<'a> {
         let mut s = Search {
-            nnue: nnue_load!("../../../nnue/y2.bin"),
+            nnue: nnue_lazy_load!("../../../nnue/y2.bin"), // nnue_load!("../../../nnue/y2.bin"),
             sig: None,
             chess: chess_v2::ChessGame::new(),
             move_list: [0; 256],
@@ -384,6 +175,7 @@ impl<'a> Search<'a> {
             pv_trace: false,
             beta_moves: Box::new([[0; 2]; PV_DEPTH]),
             alpha_moves: Box::new([[0; 64]; 16]),
+            // et: EvalTable::new(512),
             rt,
             tt,
         };
@@ -450,6 +242,10 @@ impl<'a> Search<'a> {
         self.nnue.load(&self.chess);
     }
 
+    // pub fn resize_eval_table(&mut self, new_size_mb: usize) {
+    //     self.et = EvalTable::new(new_size_mb);
+    // }
+
     #[inline(always)]
     pub fn get_board_mut(&mut self) -> &mut ChessGame {
         &mut self.chess
@@ -494,8 +290,12 @@ impl<'a> Search<'a> {
     pub fn get_tt_mut(&mut self) -> &mut TranspositionTable {
         &mut self.tt
     }
+    // #[inline(always)]
+    // pub fn get_et(&self) -> &EvalTable {
+    //     &self.et
+    // }
     #[inline(always)]
-    pub fn get_nnue_mut(&mut self) -> &mut nnue::Nnue {
+    pub fn get_nnue_mut(&mut self) -> &mut impl nnue::UpdatableNnue {
         self.nnue.as_mut()
     }
 
@@ -520,17 +320,17 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        debug_assert_eq!(
-            self.nnue.acc,
-            {
-                let mut expected_pair = nnue::AccumulatorPair::new();
-                expected_pair.load(&self.chess, &self.nnue.net);
-                expected_pair
-            },
-            "NNUE accumulator mismatch at depth {}, ply {}",
-            depth,
-            self.ply
-        );
+        // debug_assert_eq!(
+        //     self.nnue.acc,
+        //     {
+        //         let mut expected_pair = nnue::AccumulatorPair::new();
+        //         expected_pair.load(&self.chess, &self.nnue.net);
+        //         expected_pair
+        //     },
+        //     "NNUE accumulator mismatch at depth {}, ply {}",
+        //     depth,
+        //     self.ply
+        // );
 
         // Cut 2 plys before max PV depth since the previous call
         // can't copy over PV moves beyond this point
@@ -575,6 +375,21 @@ impl<'a> Search<'a> {
             pv_move = self.pv[ply];
         }
 
+        let mut static_eval = None;
+
+        // Reverse futility pruning
+        if apply_pruning && depth < 3 && !in_check {
+            let eval_margin = 150 * depth as Eval;
+            let eval = self.evaluate();
+
+            if eval - eval_margin >= beta {
+                self.rt.pop_position();
+                return eval - eval_margin;
+            }
+
+            static_eval = Some(eval);
+        }
+
         // Null move pruning
         if apply_pruning && depth_pruning && !self.is_endgame() {
             let ep_square = self.chess.make_null_move(self.tables);
@@ -585,15 +400,15 @@ impl<'a> Search<'a> {
 
             self.chess.rollback_null_move(ep_square, self.tables);
 
-            debug_assert_eq!(
-                self.nnue.acc,
-                {
-                    let mut expected_pair = nnue::AccumulatorPair::new();
-                    expected_pair.load(&self.chess, &self.nnue.net);
-                    expected_pair
-                },
-                "NNUE accumulator mismatch after null move",
-            );
+            // debug_assert_eq!(
+            //     self.nnue.acc,
+            //     {
+            //         let mut expected_pair = nnue::AccumulatorPair::new();
+            //         expected_pair.load(&self.chess, &self.nnue.net);
+            //         expected_pair
+            //     },
+            //     "NNUE accumulator mismatch after null move",
+            // );
 
             if self.is_stopping {
                 self.rt.pop_position();
@@ -624,7 +439,7 @@ impl<'a> Search<'a> {
         let mut move_scores = [0xFFFFu16; 256];
         for i in 0..move_count {
             let mv = self.move_list[i];
-            move_scores[i] = self.score_move_asc(i as u8, mv, pv_move, tt_move);
+            move_scores[i] = self.score_move_mvvlva_asc(i as u8, mv, pv_move, tt_move);
         }
 
         sorting::sort_256x16_avx512(&mut move_scores, move_count);
@@ -639,7 +454,6 @@ impl<'a> Search<'a> {
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
-        let acc_copy = self.nnue.acc.clone();
 
         let mut i = 2;
         while i < move_count + 2 {
@@ -662,59 +476,67 @@ impl<'a> Search<'a> {
                 move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
             }
 
-            let move_ok = unsafe {
+            let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be legal
-                self.chess
-                    .make_move_nnue(mv, self.tables, Some(self.nnue.as_mut()))
+                self.chess.make_move_nnue(mv, self.tables)
             };
 
-            let is_valid_move = move_ok && !self.chess.in_check(self.tables, !self.chess.b_move());
+            let nnue_update = match nnue_update {
+                Some(nnue_update) => {
+                    if self.chess.in_check(self.tables, !self.chess.b_move()) {
+                        self.chess = board_copy;
+                        continue;
+                    }
+                    nnue_update
+                }
+                None => continue,
+            };
 
-            if !is_valid_move {
-                self.chess = board_copy;
-                self.nnue.acc = acc_copy;
-                continue;
-            }
+            self.nnue.make_move(nnue_update);
 
             let is_non_capture_or_promotion = mv & (MV_FLAG_CAP | MV_FLAG_PROMOTION) == 0;
 
             let late_move_reduction =
                 num_legal_moves > 3 && depth_pruning && is_non_capture_or_promotion;
 
-            num_legal_moves += 1;
-
             self.ply += 1;
 
-            let score = if late_move_reduction {
+            let score = if num_legal_moves == 0 {
+                -self.go(-beta, -alpha, depth - 1)
+            } else if late_move_reduction {
                 // Late move, apply a small reduction of 1 ply and
                 // search with window [-alpha - 1, -alpha] with the goal of
                 // proving that the move is not good enough to be played
-                let reduced_score = -self.go(-alpha - 1, -alpha, depth - 2);
-                if reduced_score > alpha {
+                let proof_score = -self.go(-alpha - 1, -alpha, depth - 2);
+                if proof_score > alpha {
                     // The move might be good, search it again with full depth
-                    -self.go(-beta, -alpha, depth - 1)
+                    // Null search with fallback to full search
+                    let proof_score = -self.go(-alpha - 1, -alpha, depth - 1);
+
+                    if proof_score > alpha && proof_score < beta {
+                        -self.go(-beta, -alpha, depth - 1)
+                    } else {
+                        proof_score
+                    }
                 } else {
-                    reduced_score
+                    proof_score
                 }
             } else {
-                -self.go(-beta, -alpha, depth - 1)
-            };
-            // let score = -self.go(-beta, -alpha, depth - 1);
+                // Null search with fallback to full search
+                let proof_score = -self.go(-alpha - 1, -alpha, depth - 1);
 
-            // if ply == 0 && self.params.debug {
-            //     println!(
-            //         "move {}: score {} lmr {} raise alpha {} raise beta {}",
-            //         util::move_string_dbg(mv),
-            //         score,
-            //         late_move_reduction,
-            //         score > alpha,
-            //         score >= beta
-            //     );
-            // }
+                if proof_score > alpha && proof_score < beta {
+                    -self.go(-beta, -alpha, depth - 1)
+                } else {
+                    proof_score
+                }
+            };
+
+            num_legal_moves += 1;
 
             self.ply -= 1;
             self.chess = board_copy;
-            self.nnue.acc = acc_copy;
+            self.nnue.rollback_move();
 
             if self.is_stopping {
                 self.rt.pop_position();
@@ -836,16 +658,16 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        debug_assert_eq!(
-            self.nnue.acc,
-            {
-                let mut expected_pair = nnue::AccumulatorPair::new();
-                expected_pair.load(&self.chess, &self.nnue.net);
-                expected_pair
-            },
-            "NNUE accumulator mismatch in q search at ply {}",
-            self.ply
-        );
+        // debug_assert_eq!(
+        //     self.nnue.acc,
+        //     {
+        //         let mut expected_pair = nnue::AccumulatorPair::new();
+        //         expected_pair.load(&self.chess, &self.nnue.net);
+        //         expected_pair
+        //     },
+        //     "NNUE accumulator mismatch in q search at ply {}",
+        //     self.ply
+        // );
 
         let static_eval = self.evaluate();
 
@@ -879,7 +701,7 @@ impl<'a> Search<'a> {
         let mut move_scores = [0xFFFFu16; 256];
         for i in 0..move_count {
             let mv = self.move_list[i];
-            move_scores[i] = self.score_move_asc_quiescence(i as u8, mv);
+            move_scores[i] = self.score_move_mvvlva_asc_quiescence(i as u8, mv);
         }
 
         sorting::sort_256x16_avx512(&mut move_scores, move_count);
@@ -891,7 +713,6 @@ impl<'a> Search<'a> {
 
         let mut best_score: Eval = static_eval;
         let board_copy = self.chess.clone();
-        let acc_copy = self.nnue.acc.clone();
 
         let mut i = 0;
         while i < move_count {
@@ -907,19 +728,23 @@ impl<'a> Search<'a> {
                 move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
             }
 
-            let move_ok = unsafe {
+            let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be legal
-                self.chess
-                    .make_move_nnue(mv, self.tables, Some(self.nnue.as_mut()))
+                self.chess.make_move_nnue(mv, self.tables)
             };
 
-            let is_valid_move = move_ok && !self.chess.in_check(self.tables, !self.chess.b_move());
+            let nnue_update = match nnue_update {
+                Some(nnue_update) => {
+                    if self.chess.in_check(self.tables, !self.chess.b_move()) {
+                        self.chess = board_copy;
+                        continue;
+                    }
+                    nnue_update
+                }
+                None => continue,
+            };
 
-            if !is_valid_move {
-                self.chess = board_copy;
-                self.nnue.acc = acc_copy;
-                continue;
-            }
+            self.nnue.make_move(nnue_update);
 
             self.ply += 1;
 
@@ -928,7 +753,7 @@ impl<'a> Search<'a> {
             self.ply -= 1;
 
             self.chess = board_copy;
-            self.nnue.acc = acc_copy;
+            self.nnue.rollback_move();
 
             if self.is_stopping {
                 return 0;
@@ -980,9 +805,16 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    pub fn evaluate(&self) -> Eval {
-        let final_score = self.nnue.evaluate(self.chess.b_move());
-        return final_score as Eval;
+    pub fn evaluate(&mut self) -> Eval {
+        // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
+        //     return eval;
+        // }
+
+        let final_score = self.nnue.evaluate(self.chess.b_move()) as Eval;
+
+        // self.et.store(self.chess.zobrist_key(), final_score);
+
+        return final_score;
 
         // use std::arch::x86_64::*;
 
@@ -1189,7 +1021,7 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn score_move_asc(&self, index: u8, mv: u16, pv_move: u16, tt_move: u16) -> u16 {
+    fn score_move_mvvlva_asc(&self, index: u8, mv: u16, pv_move: u16, tt_move: u16) -> u16 {
         let index = index as u16;
 
         if mv == pv_move {
@@ -1248,10 +1080,89 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn score_move_asc_quiescence(&self, index: u8, mv: u16) -> u16 {
+    fn score_move_mvvlva_asc_quiescence(&self, index: u8, mv: u16) -> u16 {
         let index = index as u16;
         let src_sq = mv & 0x3F;
         let dst_sq = (mv >> 6) & 0x3F;
+
+        // MVV-LVA
+        unsafe {
+            let spt = self.chess.spt();
+            let dst_piece = *spt.get_unchecked(dst_sq as usize);
+            let src_piece = *spt.get_unchecked(src_sq as usize);
+
+            let mvvlva_score = *MVV_LVA_SCORES_U8
+                .get_unchecked(dst_piece as usize)
+                .get_unchecked(src_piece as usize) as u16;
+
+            return index | (mvvlva_score << 8);
+        }
+    }
+
+    // SEE based move ordering
+    #[inline(always)]
+    fn score_move_see_asc(
+        &self,
+        index: u8,
+        mv: u16,
+        pv_move: u16,
+        tt_move: u16,
+        black_board: u64,
+        white_board: u64,
+        piece_board: [u64; 8],
+    ) -> u16 {
+        let index = index as u16;
+
+        if mv == pv_move {
+            return index + (0 << 8);
+        }
+
+        if mv == tt_move {
+            return index + (1 << 8);
+        }
+
+        let see_score = see::static_exchange_eval(
+            &WEIGHT_TABLE_ABS_I8,
+            self.tables,
+            &self.chess,
+            black_board,
+            white_board,
+            piece_board,
+            mv,
+        );
+
+        let spt = self.chess.spt();
+
+        let src_sq = mv & 0x3F;
+        let dst_sq = (mv >> 6) & 0x3F;
+
+        if (mv & MV_FLAG_CAP) == 0 {
+            unsafe {
+                // Safety: self.ply is always < PV_DEPTH during main (non-q) search
+                let beta_mv0 = self.beta_moves.get_unchecked(self.ply as usize)[0];
+                let beta_mv1 = self.beta_moves.get_unchecked(self.ply as usize)[1];
+
+                if mv == beta_mv0 {
+                    return index | (35 << 8);
+                }
+
+                if mv == beta_mv1 {
+                    return index | (36 << 8);
+                }
+
+                // Safety:
+                // - src_sq and dst_sq are always < 64
+                // - src_piece is a PieceIndex < 16
+                let src_piece = *spt.get_unchecked(src_sq as usize) as usize;
+
+                let alpha_score = *self
+                    .alpha_moves
+                    .get_unchecked(src_piece)
+                    .get_unchecked(dst_sq as usize);
+
+                return index | ((37 + 218u16.saturating_sub(alpha_score as u16)) << 8);
+            }
+        }
 
         // MVV-LVA
         unsafe {
