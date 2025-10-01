@@ -459,20 +459,10 @@ impl<'a> Search<'a> {
             .enumerate()
             .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
 
-        //let mut move_scores_dbg = [0xFFFFu16; 256];
         let mut move_scores = [0xFFFFu16; 256];
         for i in 0..move_count {
             let mv = self.move_list[i];
             move_scores[i] = self.score_move_mvvlva_asc(i as u8, mv, pv_move, tt_move);
-            // move_scores[i] = self.score_move_see_asc(
-            //     i as u8,
-            //     mv,
-            //     pv_move,
-            //     tt_move,
-            //     black_board,
-            //     white_board,
-            //     &piece_boards,
-            // );
         }
 
         sorting::u16::sort_256x16_asc_avx512(&mut move_scores, move_count);
@@ -765,35 +755,34 @@ impl<'a> Search<'a> {
             .enumerate()
             .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
 
-        let mut move_scores = [0xFFFFu16; 256];
+        let mut move_list = [0u32; 256];
         for i in 0..move_count {
-            let mv = self.move_list[i];
-            // move_scores[i] = self.score_move_mvvlva_asc_quiescence(i as u8, mv);
-            move_scores[i] = self.score_move_see_asc_quiescence(
-                i as u8,
-                mv,
+            move_list[i] = self.score_move_see_desc_quiescence(
+                self.move_list[i],
                 black_board,
                 white_board,
                 &piece_boards,
             );
-
-            // move_scores[i] = 0xFFu16 << 8 | (i as u16);
         }
+        sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
 
-        sorting::u16::sort_256x16_asc_avx512(&mut move_scores, move_count);
+        // let mut move_scores = [0xFFFFu16; 256];
+        // for i in 0..move_count {
+        //     let mv = self.move_list[i];
+        //     move_scores[i] = self.score_move_mvvlva_asc_quiescence(i as u8, mv);
+        // }
+        // sorting::u16::sort_256x16_asc_avx512(&mut move_scores, move_count);
+        // let mut move_list = [0u16; 256];
+        // for i in 0..move_count {
+        //     move_list[i] = self.move_list[(move_scores[i] & 0xFF) as usize];
+        // }
 
-        let mut move_list = [0u16; 256];
-        for i in 0..move_count {
-            move_list[i] = self.move_list[(move_scores[i] & 0xFF) as usize];
-        }
-
-        let mut best_move = 0;
         let mut best_score: Eval = static_eval;
         let board_copy = self.chess.clone();
 
         let mut i = 0;
         while i < move_count {
-            let mv = move_list[i];
+            let mv = (move_list[i] & 0xFFFF) as u16;
             i += 1;
 
             // Quiescence search can't encounter new captures after queen or knight promotions, so
@@ -802,7 +791,7 @@ impl<'a> Search<'a> {
                 i -= 1;
 
                 let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
+                move_list[i] = (mv_unpromoted | MV_FLAGS_PR_KNIGHT) as u32; // Second promotion to check
             }
 
             let nnue_update = unsafe {
@@ -1177,14 +1166,13 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn score_move_see_asc_quiescence(
+    fn score_move_see_desc_quiescence(
         &self,
-        index: u8,
         mv: u16,
         black_board: u64,
         white_board: u64,
         piece_board: &[u64; 8],
-    ) -> u16 {
+    ) -> u32 {
         let see_score = see::static_exchange_eval(
             &WEIGHT_TABLE_ABS_I8,
             self.tables,
@@ -1193,10 +1181,12 @@ impl<'a> Search<'a> {
             white_board,
             *piece_board,
             mv,
-        );
+        ) as i16;
 
-        return (index as u16)
-            | ((255u8.wrapping_sub((see_score as u8).wrapping_add(128)) as u16) << 8);
+        // Normalise to 0..255 range;
+        let see_score = (see_score + 128) as u32;
+
+        return (mv as u32) | (see_score << 16);
     }
 
     // SEE based move ordering

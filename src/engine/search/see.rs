@@ -1,3 +1,5 @@
+use std::arch::x86_64::*;
+
 use crate::{
     engine::{
         chess_v2::{ChessGame, PieceIndex},
@@ -32,6 +34,10 @@ where
     let from_piece = board.spt()[from_sq];
     let to_piece = board.spt()[to_sq];
 
+    unsafe {
+        std::hint::assert_unchecked(to_piece < 16);
+    }
+
     let mut b_move = board.b_move();
     *[&mut white_board, &mut black_board][b_move as usize] ^= (1u64 << from_sq) | to_sq_mask;
 
@@ -54,25 +60,34 @@ where
     let mut all_attackers = unsafe { calc_attackers(tables, full_board, piece_board, to_sq as u8) };
     let mut stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
 
-    let lva = |stm_attackers: u64, piece_board: &[u64; 8]| {
-        // @todo - check perf with unaligned vs aligned array accesses
-        for piece_index in (0..8).rev() {
-            let attackers = stm_attackers & piece_board[piece_index];
+    let lva = |stm_attackers: u64, piece_board: &[u64; 8]| unsafe {
+        let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
+        let stm_attackers_x8 = _mm512_set1_epi64(stm_attackers as i64);
+        let and_result = _mm512_and_epi64(piece_board_x8, stm_attackers_x8);
+        let lane_mask = _mm512_test_epi64_mask(and_result, and_result);
 
-            if attackers != 0 {
-                return Some((piece_index as u8, attackers.trailing_zeros() as u8));
-            }
-        }
-        return None;
+        debug_assert!(lane_mask != 0, "LVA called with no attackers");
+        let piece_index = 7 - lane_mask.leading_zeros();
+
+        let attacker_ls_lane = _mm512_permutexvar_epi64(
+            _mm512_castsi128_si512(_mm_cvtsi32_si128(piece_index as i32)),
+            and_result,
+        );
+        let attacker_sq_mask = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
+
+        (
+            piece_index as u8,
+            attacker_sq_mask.isolate_least_significant_one(),
+        )
     };
 
     while stm_attackers != 0 {
-        let (attacker_piece, attacker_sq) = match lva(stm_attackers, &piece_board) {
-            Some(v) => v,
-            None => unreachable!(),
-        };
+        let (attacker_piece, attacker_sq_mask) = lva(stm_attackers, &piece_board);
 
-        let attacker_sq_mask = 1u64 << attacker_sq;
+        unsafe {
+            std::hint::assert_unchecked(attacker_piece < 8);
+        }
+
         piece_board[last_moved_piece as usize] ^= to_sq_mask;
         piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
         all_attackers ^= attacker_sq_mask;
@@ -353,6 +368,21 @@ mod tests {
         let mv = "b1b6";
         let see_score = see_test("7k/3n4/Rq6/8/8/8/8/1Q4K1 w - - 0 1", mv);
         let expected = piece_value(PieceIndex::BlackQueen as u8)
+            - piece_value(PieceIndex::WhiteQueen as u8)
+            + piece_value(PieceIndex::BlackKnight as u8);
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_lva() {
+        let mv = "b1b6";
+        let see_score = see_test("n1n4k/8/1p2R3/P7/8/8/8/1Q4K1 w - - 0 1", mv);
+        // White pawn should recapture first instead of the rook
+        let expected = piece_value(PieceIndex::BlackPawn as u8)
             - piece_value(PieceIndex::WhiteQueen as u8)
             + piece_value(PieceIndex::BlackKnight as u8);
         assert_eq!(
