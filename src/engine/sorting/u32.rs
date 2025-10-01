@@ -14,8 +14,8 @@ macro_rules! cmp_swap_arr {
         let swap_mask = (diff >> 63) as u64;
         let min_val = ((b as u64) & swap_mask) | ((a as u64) & !swap_mask);
         let max_val = ((a as u64) & swap_mask) | ((b as u64) & !swap_mask);
-        $arr[$i] = min_val as u32;
-        $arr[$j] = max_val as u32;
+        $arr[$i] = max_val as u32;
+        $arr[$j] = min_val as u32;
     }};
 }
 
@@ -25,7 +25,7 @@ macro_rules! cmp_swap_x16_epu32 {
         let permuted_x16 = _mm512_permutexvar_epi32($perm, input);
         let min_x16 = _mm512_min_epu32(input, permuted_x16);
         let max_x16 = _mm512_max_epu32(input, permuted_x16);
-        _mm512_mask_blend_epi32($mask, max_x16, min_x16)
+        _mm512_mask_blend_epi32($mask, min_x16, max_x16)
     }};
 }
 
@@ -67,7 +67,7 @@ fn sort8(arr: &mut [u32]) {
 }
 
 #[inline(always)]
-pub fn sort16(inout_x16: &mut __m512i) {
+fn sort16(inout_x16: &mut __m512i) {
     unsafe {
         const PERM_SELECT_B: i32 = 0x10;
 
@@ -128,7 +128,7 @@ pub fn sort16(inout_x16: &mut __m512i) {
                 1,
                 0,
             );
-            *inout_x16 = _mm512_permutex2var_epi32(min_x16, combine_perm_x16, max_x16);
+            *inout_x16 = _mm512_permutex2var_epi32(max_x16, combine_perm_x16, min_x16);
         };
 
         sort4_m512(inout_x16);
@@ -153,8 +153,8 @@ fn sort32(inout_x16_0: &mut __m512i, inout_x16_1: &mut __m512i) {
         let min_x16 = _mm512_min_epu32(*inout_x16_0, reversed_x16_1);
         let max_x16 = _mm512_max_epu32(*inout_x16_0, reversed_x16_1);
 
-        *inout_x16_0 = min_x16;
-        *inout_x16_1 = max_x16;
+        *inout_x16_0 = max_x16;
+        *inout_x16_1 = min_x16;
 
         sort16(inout_x16_0);
         sort16(inout_x16_1);
@@ -179,10 +179,10 @@ fn sort64(
         let min_x16_12 = _mm512_min_epu32(*inout_x16_1, reversed_x16_2);
         let max_x16_12 = _mm512_max_epu32(*inout_x16_1, reversed_x16_2);
 
-        *inout_x16_0 = min_x16_03;
-        *inout_x16_1 = min_x16_12;
-        *inout_x16_2 = max_x16_03;
-        *inout_x16_3 = max_x16_12;
+        *inout_x16_0 = max_x16_03;
+        *inout_x16_1 = max_x16_12;
+        *inout_x16_2 = min_x16_03;
+        *inout_x16_3 = min_x16_12;
 
         sort32(inout_x16_0, inout_x16_1);
         sort32(inout_x16_2, inout_x16_3);
@@ -217,14 +217,14 @@ fn sort128(
         let min_x16_34 = _mm512_min_epu32(*inout_x16_3, reversed_x16_4);
         let max_x16_34 = _mm512_max_epu32(*inout_x16_3, reversed_x16_4);
 
-        *inout_x16_0 = min_x16_07;
-        *inout_x16_1 = min_x16_16;
-        *inout_x16_2 = min_x16_25;
-        *inout_x16_3 = min_x16_34;
-        *inout_x16_4 = max_x16_07;
-        *inout_x16_5 = max_x16_16;
-        *inout_x16_6 = max_x16_25;
-        *inout_x16_7 = max_x16_34;
+        *inout_x16_0 = max_x16_07;
+        *inout_x16_1 = max_x16_16;
+        *inout_x16_2 = max_x16_25;
+        *inout_x16_3 = max_x16_34;
+        *inout_x16_4 = min_x16_07;
+        *inout_x16_5 = min_x16_16;
+        *inout_x16_6 = min_x16_25;
+        *inout_x16_7 = min_x16_34;
 
         sort64(inout_x16_0, inout_x16_1, inout_x16_2, inout_x16_3);
         sort64(inout_x16_4, inout_x16_5, inout_x16_6, inout_x16_7);
@@ -297,23 +297,22 @@ fn sort256(
         let min_x16_78 = _mm512_min_epu32(*inout_x16_7, reversed_x16_8);
         let max_x16_78 = _mm512_max_epu32(*inout_x16_7, reversed_x16_8);
 
-        *inout_x16_0 = min_x16_015;
-        *inout_x16_1 = min_x16_114;
-        *inout_x16_2 = min_x16_213;
-        *inout_x16_3 = min_x16_312;
-        *inout_x16_4 = min_x16_411;
-        *inout_x16_5 = min_x16_510;
-        *inout_x16_6 = min_x16_69;
-        *inout_x16_7 = min_x16_78;
-
-        *inout_x16_8 = max_x16_015;
-        *inout_x16_9 = max_x16_114;
-        *inout_x16_10 = max_x16_213;
-        *inout_x16_11 = max_x16_312;
-        *inout_x16_12 = max_x16_411;
-        *inout_x16_13 = max_x16_510;
-        *inout_x16_14 = max_x16_69;
-        *inout_x16_15 = max_x16_78;
+        *inout_x16_0 = max_x16_015;
+        *inout_x16_1 = max_x16_114;
+        *inout_x16_2 = max_x16_213;
+        *inout_x16_3 = max_x16_312;
+        *inout_x16_4 = max_x16_411;
+        *inout_x16_5 = max_x16_510;
+        *inout_x16_6 = max_x16_69;
+        *inout_x16_7 = max_x16_78;
+        *inout_x16_8 = min_x16_015;
+        *inout_x16_9 = min_x16_114;
+        *inout_x16_10 = min_x16_213;
+        *inout_x16_11 = min_x16_312;
+        *inout_x16_12 = min_x16_411;
+        *inout_x16_13 = min_x16_510;
+        *inout_x16_14 = min_x16_69;
+        *inout_x16_15 = min_x16_78;
 
         sort128(
             inout_x16_0,
@@ -340,10 +339,10 @@ fn sort256(
 
 /// Sorts a fixed-allocation array of n elements (up to 256) in const time
 /// using avx512 accelerated bitonic sorting networks. Sorting is applied
-/// in ascending order. The array is sorted in-place, padding the array with 0xFFFF
+/// in descending order. The array is sorted in-place, padding the array with 0xFFFF
 /// or another sentinel value should be done by the caller.
 #[inline(always)]
-pub fn sort_256x32_asc_avx512(buf: &mut [u32; 256], n: usize) {
+pub fn sort_256u32_desc_avx512(buf: &mut [u32; 256], n: usize) {
     if n <= 4 {
         sort4(&mut buf[0..4]);
         return;
@@ -524,7 +523,7 @@ mod tests {
                     arr[i] = rng.random_range(0..u32::MAX);
                 }
 
-                sort_256x32_asc_avx512(&mut arr, len);
+                sort_256u32_desc_avx512(&mut arr, len);
 
                 black_box(&arr);
                 arr[0] = arr[1];
@@ -550,14 +549,16 @@ mod tests {
 
         for _ in 0..128 {
             for arr_size in 0..=ARR_SIZE {
-                let mut random_arr = [0xFFFFFFFFu32; 256];
+                let mut random_arr = [0u32; 256];
 
                 for i in 0..arr_size {
                     random_arr[i] = rng.random_range(0..u32::MAX);
                 }
 
                 let mut arr_copy = random_arr;
-                sort_256x32_asc_avx512(&mut arr_copy, arr_size);
+                sort_256u32_desc_avx512(&mut arr_copy, arr_size);
+
+                arr_copy[0..arr_size].reverse();
 
                 assert!(
                     arr_copy[0..arr_size].is_sorted(),
