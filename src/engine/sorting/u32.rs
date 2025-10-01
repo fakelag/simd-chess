@@ -73,9 +73,9 @@ pub fn sort16(inout_x16: &mut __m512i) {
 
         let identity_x16 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 
-        let const_1_x16 = _mm512_set1_epi16(1);
-        let const_2_x16 = _mm512_set1_epi16(2);
-        let const_7_x16 = _mm512_set1_epi16(7);
+        let const_1_x16 = _mm512_set1_epi32(1);
+        let const_2_x16 = _mm512_set1_epi32(2);
+        let const_7_x16 = _mm512_set1_epi32(7);
 
         let const_perm_rev1_x16 = _mm512_set_epi32(
             0, 0, 0, 0, 0, 0, 0, 0, // unused
@@ -87,11 +87,11 @@ pub fn sort16(inout_x16: &mut __m512i) {
             let low_gap2_mask = 0x3333u16;
             let low_mid12_mask = 0x2222u16;
 
-            let perm_x32 = _mm512_xor_si512(identity_x16, const_1_x16);
-            *inout_x16 = cmp_swap_x16_epu32!(*inout_x16, perm_x32, low_adj_mask);
+            let perm_x16 = _mm512_xor_si512(identity_x16, const_1_x16);
+            *inout_x16 = cmp_swap_x16_epu32!(*inout_x16, perm_x16, low_adj_mask);
 
-            let perm_x32 = _mm512_xor_si512(identity_x16, const_2_x16);
-            *inout_x16 = cmp_swap_x16_epu32!(*inout_x16, perm_x32, low_gap2_mask);
+            let perm_x16 = _mm512_xor_si512(identity_x16, const_2_x16);
+            *inout_x16 = cmp_swap_x16_epu32!(*inout_x16, perm_x16, low_gap2_mask);
 
             let perm_x16 = _mm512_set_epi32(15, 13, 14, 12, 11, 9, 10, 8, 7, 5, 6, 4, 3, 1, 2, 0);
             *inout_x16 = cmp_swap_x16_epu32!(*inout_x16, perm_x16, low_mid12_mask);
@@ -107,8 +107,8 @@ pub fn sort16(inout_x16: &mut __m512i) {
         let combine8_m512 = |inout_x16: &mut __m512i| {
             let permuted_x16 = _mm512_permutexvar_epi32(const_perm_rev1_x16, *inout_x16);
 
-            let min_x32 = _mm512_min_epu32(*inout_x16, permuted_x16);
-            let max_x32 = _mm512_max_epu32(*inout_x16, permuted_x16);
+            let min_x16 = _mm512_min_epu32(*inout_x16, permuted_x16);
+            let max_x16 = _mm512_max_epu32(*inout_x16, permuted_x16);
 
             let combine_perm_x16 = _mm512_set_epi32(
                 7 | PERM_SELECT_B,
@@ -128,7 +128,7 @@ pub fn sort16(inout_x16: &mut __m512i) {
                 1,
                 0,
             );
-            *inout_x16 = _mm512_permutex2var_epi32(min_x32, combine_perm_x16, max_x32);
+            *inout_x16 = _mm512_permutex2var_epi32(min_x16, combine_perm_x16, max_x16);
         };
 
         sort4_m512(inout_x16);
@@ -208,23 +208,23 @@ fn sort128(
         let reversed_x16_6 = m512_reverse_epi32!(*inout_x16_6);
         let reversed_x16_7 = m512_reverse_epi32!(*inout_x16_7);
 
-        let min_x32_07 = _mm512_min_epu32(*inout_x16_0, reversed_x16_7);
-        let max_x32_07 = _mm512_max_epu32(*inout_x16_0, reversed_x16_7);
-        let min_x32_16 = _mm512_min_epu32(*inout_x16_1, reversed_x16_6);
-        let max_x32_16 = _mm512_max_epu32(*inout_x16_1, reversed_x16_6);
-        let min_x32_25 = _mm512_min_epu32(*inout_x16_2, reversed_x16_5);
-        let max_x32_25 = _mm512_max_epu32(*inout_x16_2, reversed_x16_5);
-        let min_x32_34 = _mm512_min_epu32(*inout_x16_3, reversed_x16_4);
-        let max_x32_34 = _mm512_max_epu32(*inout_x16_3, reversed_x16_4);
+        let min_x16_07 = _mm512_min_epu32(*inout_x16_0, reversed_x16_7);
+        let max_x16_07 = _mm512_max_epu32(*inout_x16_0, reversed_x16_7);
+        let min_x16_16 = _mm512_min_epu32(*inout_x16_1, reversed_x16_6);
+        let max_x16_16 = _mm512_max_epu32(*inout_x16_1, reversed_x16_6);
+        let min_x16_25 = _mm512_min_epu32(*inout_x16_2, reversed_x16_5);
+        let max_x16_25 = _mm512_max_epu32(*inout_x16_2, reversed_x16_5);
+        let min_x16_34 = _mm512_min_epu32(*inout_x16_3, reversed_x16_4);
+        let max_x16_34 = _mm512_max_epu32(*inout_x16_3, reversed_x16_4);
 
-        *inout_x16_0 = min_x32_07;
-        *inout_x16_1 = min_x32_16;
-        *inout_x16_2 = min_x32_25;
-        *inout_x16_3 = min_x32_34;
-        *inout_x16_4 = max_x32_07;
-        *inout_x16_5 = max_x32_16;
-        *inout_x16_6 = max_x32_25;
-        *inout_x16_7 = max_x32_34;
+        *inout_x16_0 = min_x16_07;
+        *inout_x16_1 = min_x16_16;
+        *inout_x16_2 = min_x16_25;
+        *inout_x16_3 = min_x16_34;
+        *inout_x16_4 = max_x16_07;
+        *inout_x16_5 = max_x16_16;
+        *inout_x16_6 = max_x16_25;
+        *inout_x16_7 = max_x16_34;
 
         sort64(inout_x16_0, inout_x16_1, inout_x16_2, inout_x16_3);
         sort64(inout_x16_4, inout_x16_5, inout_x16_6, inout_x16_7);
@@ -344,6 +344,11 @@ fn sort256(
 /// or another sentinel value should be done by the caller.
 #[inline(always)]
 pub fn sort_256x32_asc_avx512(buf: &mut [u32; 256], n: usize) {
+    if n <= 4 {
+        sort4(&mut buf[0..4]);
+        return;
+    }
+
     if n <= 8 {
         sort8(&mut buf[0..8]);
         return;
@@ -506,15 +511,16 @@ mod tests {
         core_affinity::set_for_current(core_affinity::CoreId { id: 15 });
 
         for _ in 0..5 {
-            const ARR_SIZE: usize = 8;
-            const ITERATIONS: usize = 100_000_000;
+            const ARR_SIZE_MAX: usize = 70;
+            const ARR_SIZE_MIN: usize = 3;
+            const ITERATIONS: usize = 10_000_000;
 
             let start = rdtscp();
 
             for _ in 0..ITERATIONS {
                 let mut arr = [0xFFFFFFFFu32; 256];
-                let len = rng.random_range(1..=ARR_SIZE);
-                for i in 1..len {
+                let len = rng.random_range(ARR_SIZE_MIN..=ARR_SIZE_MAX);
+                for i in ARR_SIZE_MIN..len {
                     arr[i] = rng.random_range(0..u32::MAX);
                 }
 
@@ -529,8 +535,8 @@ mod tests {
             let cycles_per_iter = (end - start) as f64 / ITERATIONS as f64;
 
             println!(
-                "Sorting 1-{} u32 elements took {:.2} cycles per iteration",
-                ARR_SIZE, cycles_per_iter
+                "Sorting {}-{} u32 elements took {:.2} cycles per iteration",
+                ARR_SIZE_MIN, ARR_SIZE_MAX, cycles_per_iter
             );
         }
     }

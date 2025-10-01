@@ -546,6 +546,50 @@ pub fn sort_256x16_asc_avx512(buf: &mut [u16; 256], n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hint::black_box;
+
+    pub fn rdtscp() -> u64 {
+        let mut aux: u32 = 0;
+        unsafe { std::arch::x86_64::__rdtscp(&mut aux as *mut u32) as u64 }
+    }
+
+    #[test]
+    fn sorting_bench() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(black_box(42));
+
+        core_affinity::set_for_current(core_affinity::CoreId { id: 15 });
+
+        for _ in 0..5 {
+            const ARR_SIZE_MAX: usize = 70;
+            const ARR_SIZE_MIN: usize = 3;
+            const ITERATIONS: usize = 10_000_000;
+
+            let start = rdtscp();
+
+            for _ in 0..ITERATIONS {
+                let mut arr = [0xFFFFu16; 256];
+                let len = rng.random_range(ARR_SIZE_MIN..=ARR_SIZE_MAX);
+                for i in ARR_SIZE_MIN..len {
+                    arr[i] = rng.random_range(0..u16::MAX);
+                }
+
+                sort_256x16_asc_avx512(&mut arr, len);
+
+                black_box(&arr);
+                arr[0] = arr[1];
+            }
+
+            let end = rdtscp();
+
+            let cycles_per_iter = (end - start) as f64 / ITERATIONS as f64;
+
+            println!(
+                "Sorting {}-{} u16 elements took {:.2} cycles per iteration",
+                ARR_SIZE_MIN, ARR_SIZE_MAX, cycles_per_iter
+            );
+        }
+    }
 
     #[test]
     fn sorting_fuzz() {
