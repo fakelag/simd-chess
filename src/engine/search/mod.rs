@@ -13,7 +13,6 @@ pub mod repetition;
 pub mod repetition_v2;
 pub mod search_params;
 pub mod see;
-pub mod sorting;
 pub mod transposition;
 pub mod transposition_v2;
 

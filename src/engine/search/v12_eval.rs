@@ -8,9 +8,9 @@ use crate::{
             AbortSignal, SearchStrategy,
             repetition_v2::RepetitionTable,
             search_params::SearchParams,
-            sorting,
             transposition_v2::{BoundType, TranspositionTable},
         },
+        sorting,
         tables::{self},
     },
     util::{self, Align64, table_mirror, table_negate_i8},
@@ -539,7 +539,7 @@ impl<'a> Search<'a> {
             move_scores[i] = self.score_move_asc(i as u8, mv, pv_move, tt_move);
         }
 
-        sorting::sort_256x16_avx512(&mut move_scores, move_count);
+        sorting::u16::sort_256x16_asc_avx512(&mut move_scores, move_count);
 
         let mut move_list = [0u16; 256];
         for i in 0..move_count {
@@ -778,7 +778,7 @@ impl<'a> Search<'a> {
             move_scores[i] = self.score_move_asc_quiescence(i as u8, mv);
         }
 
-        sorting::sort_256x16_avx512(&mut move_scores, move_count);
+        sorting::u16::sort_256x16_asc_avx512(&mut move_scores, move_count);
 
         let mut move_list = [0u16; 256];
         for i in 0..move_count {

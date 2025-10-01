@@ -103,41 +103,6 @@ fn sort8(arr: &mut [u16]) {
     sort4(&mut arr[4..8]);
 }
 
-pub fn sort16_linear(inout_x16: &mut __m256i) {
-    unsafe {
-        let mut lo_arr: [u16; 8] = [0u16; 8];
-        let mut hi_arr: [u16; 8] = [0u16; 8];
-
-        let lo_x8: __m128i = _mm256_castsi256_si128(*inout_x16);
-        let hi_x8: __m128i = _mm256_extracti128_si256(*inout_x16, 1);
-
-        _mm_storeu_si128(lo_arr.as_mut_ptr() as *mut __m128i, lo_x8);
-        _mm_storeu_si128(hi_arr.as_mut_ptr() as *mut __m128i, hi_x8);
-
-        sort8(&mut lo_arr);
-        sort8(&mut hi_arr);
-
-        let lo_sorted_x8 = _mm_loadu_si128(lo_arr.as_ptr() as *const __m128i);
-        let hi_sorted_x8 = _mm_loadu_si128(hi_arr.as_ptr() as *const __m128i);
-        let hi_reversed_x8 = m128_reverse_epi16!(hi_sorted_x8);
-
-        let min_x8 = _mm_min_epu16(lo_sorted_x8, hi_reversed_x8);
-        let max_x8 = _mm_max_epu16(lo_sorted_x8, hi_reversed_x8);
-
-        _mm_storeu_si128(lo_arr.as_mut_ptr() as *mut __m128i, min_x8);
-        _mm_storeu_si128(hi_arr.as_mut_ptr() as *mut __m128i, max_x8);
-
-        sort8(&mut lo_arr);
-        sort8(&mut hi_arr);
-
-        let lo_x8 = _mm_loadu_si128(lo_arr.as_ptr() as *const __m128i);
-        let hi_x8 = _mm_loadu_si128(hi_arr.as_ptr() as *const __m128i);
-
-        *inout_x16 = _mm256_castsi128_si256(lo_x8);
-        *inout_x16 = _mm256_inserti128_si256(*inout_x16, hi_x8, 1);
-    }
-}
-
 #[inline(always)]
 pub fn sort16(inout_x16: &mut __m256i) {
     unsafe {
@@ -184,29 +149,6 @@ pub fn sort16(inout_x16: &mut __m256i) {
 
             let perm_x16 = _mm256_set_epi16(15, 13, 14, 12, 11, 9, 10, 8, 7, 5, 6, 4, 3, 1, 2, 0);
             *inout_x16 = cmp_swap_x16_epu16!(*inout_x16, perm_x16, low_mid12_mask);
-
-            // let low_adj_mask = 0x55u8;
-            // let low_gap2_mask = 0x33u8;
-
-            // let input_x8_0 = _mm256_castsi256_si128(*inout_x16);
-            // let input_x8_1 = _mm256_extracti128_si256(*inout_x16, 1);
-
-            // let perm_x8 = _mm_xor_si128(identity_x8, _mm_set1_epi16(1));
-
-            // let mut sorted_x8_0 = cmp_swap_x8_epu16!(input_x8_0, perm_x8, low_adj_mask);
-            // let mut sorted_x8_1 = cmp_swap_x8_epu16!(input_x8_1, perm_x8, low_adj_mask);
-
-            // let perm_x8 = _mm_xor_si128(identity_x8, _mm_set1_epi16(2));
-
-            // sorted_x8_0 = cmp_swap_x8_epu16!(sorted_x8_0, perm_x8, low_gap2_mask);
-            // sorted_x8_1 = cmp_swap_x8_epu16!(sorted_x8_1, perm_x8, low_gap2_mask);
-
-            // let perm_x8 = _mm_set_epi16(7, 5, 6, 4, 3, 1, 2, 0);
-            // sorted_x8_0 = cmp_swap_x8_epu16!(sorted_x8_0, perm_x8, low_gap2_mask);
-            // sorted_x8_1 = cmp_swap_x8_epu16!(sorted_x8_1, perm_x8, low_gap2_mask);
-
-            // *inout_x16 = _mm256_castsi128_si256(sorted_x8_0);
-            // *inout_x16 = _mm256_inserti128_si256(*inout_x16, sorted_x8_1, 1);
         };
 
         let crosscompare_m256 = |inout_x16: &mut __m256i| {
@@ -417,27 +359,6 @@ pub fn sort32(inout_x32: &mut __m512i) {
     }
 }
 
-pub fn sort32_linear(inout_x32: &mut __m512i) {
-    unsafe {
-        let mut lo_x16 = _mm512_castsi512_si256(*inout_x32);
-        let mut hi_x16 = _mm512_extracti32x8_epi32(*inout_x32, 1);
-
-        sort16(&mut lo_x16);
-        sort16(&mut hi_x16);
-
-        let hi_reversed_x16 = m256_reverse_epi16!(hi_x16);
-
-        let mut min_x16 = _mm256_min_epu16(lo_x16, hi_reversed_x16);
-        let mut max_x16 = _mm256_max_epu16(lo_x16, hi_reversed_x16);
-
-        sort16(&mut min_x16);
-        sort16(&mut max_x16);
-
-        *inout_x32 = _mm512_castsi256_si512(min_x16);
-        *inout_x32 = _mm512_inserti32x8(*inout_x32, max_x16, 1);
-    }
-}
-
 fn sort64(inout_x32_0: &mut __m512i, inout_x32_1: &mut __m512i) {
     unsafe {
         sort32(inout_x32_0);
@@ -531,7 +452,7 @@ fn sort256(
 /// in ascending order. The array is sorted in-place, padding the array with 0xFFFF
 /// or another sentinel value should be done by the caller.
 #[inline(always)]
-pub fn sort_256x16_avx512(buf: &mut [u16; 256], n: usize) {
+pub fn sort_256x16_asc_avx512(buf: &mut [u16; 256], n: usize) {
     if n <= 8 {
         sort8(&mut buf[0..8]);
         return;
@@ -640,7 +561,7 @@ mod tests {
                 }
 
                 let mut arr_copy = random_arr;
-                sort_256x16_avx512(&mut arr_copy, arr_size);
+                sort_256x16_asc_avx512(&mut arr_copy, arr_size);
 
                 assert!(
                     arr_copy[0..arr_size].is_sorted(),
