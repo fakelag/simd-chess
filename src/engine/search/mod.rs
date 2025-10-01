@@ -72,7 +72,7 @@ mod tests {
             let mut search_engine =
                 v12_eval_sp::Search::new(params, &tables, unsafe { &mut *tt.get() }, rt);
 
-            search_engine.new_game_from_fen(&test_fen, &tables).unwrap();
+            search_engine.new_game_from_fen(test_fen, &tables).unwrap();
             search_engine.new_search();
 
             let (bestmove, delta) = {

@@ -15,11 +15,11 @@ pub const WEIGHT_PAWN: Eval = 100;
 
 // Diet versions
 pub const WEIGHT_KING_I8: i8 = 0;
-pub const WEIGHT_QUEEN_I8: i8 = 30;
-pub const WEIGHT_ROOK_I8: i8 = 15;
-pub const WEIGHT_BISHOP_I8: i8 = 10;
-pub const WEIGHT_KNIGHT_I8: i8 = 10;
-pub const WEIGHT_PAWN_I8: i8 = 3;
+pub const WEIGHT_QUEEN_I8: i8 = 10;
+pub const WEIGHT_ROOK_I8: i8 = 5;
+pub const WEIGHT_BISHOP_I8: i8 = 3;
+pub const WEIGHT_KNIGHT_I8: i8 = 3;
+pub const WEIGHT_PAWN_I8: i8 = 1;
 
 const COLLECT_STATS: bool = true;
 

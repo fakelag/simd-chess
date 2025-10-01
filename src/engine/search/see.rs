@@ -1,13 +1,18 @@
-use crate::engine::{
-    chess_v2::{ChessGame, PieceIndex},
-    tables,
+use crate::{
+    engine::{
+        chess_v2::{ChessGame, PieceIndex},
+        tables,
+    },
+    util,
 };
 
 const PIECE_QUEEN: usize = PieceIndex::WhiteQueen as usize;
 const PIECE_ROOK: usize = PieceIndex::WhiteRook as usize;
 const PIECE_BISHOP: usize = PieceIndex::WhiteBishop as usize;
 const PIECE_PAWN: usize = PieceIndex::WhitePawn as usize;
+const PIECE_KING: usize = PieceIndex::WhiteKing as usize;
 
+#[inline(never)]
 pub fn static_exchange_eval<T>(
     score_table: &[T; 16],
     tables: &tables::Tables,
@@ -38,7 +43,7 @@ where
     let mut exchanges = [T::from(0); 32];
     let mut exchange_index = 1;
 
-    let mut last_moved_piece = from_piece;
+    let mut last_moved_piece = from_piece & 7;
 
     exchanges[0] = score_table[to_piece as usize];
 
@@ -81,6 +86,12 @@ where
         b_move = !b_move;
 
         match attacker_piece as usize {
+            PIECE_KING => {
+                if all_attackers & [white_board, black_board][b_move as usize] != 0 {
+                    // Revert king capture if there are still attackers left
+                    exchange_index -= 1;
+                }
+            }
             PIECE_PAWN | PIECE_BISHOP => {
                 let attack_mask =
                     unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
@@ -89,6 +100,7 @@ where
                 let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
 
                 all_attackers |= (queen_board | bishop_board) & attack_mask;
+                all_attackers &= !to_sq_mask;
             }
             PIECE_ROOK => {
                 let attack_mask = unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
@@ -97,6 +109,7 @@ where
                 let rook_board = piece_board[PieceIndex::WhiteRook as usize];
 
                 all_attackers |= (queen_board | rook_board) & attack_mask;
+                all_attackers &= !to_sq_mask;
             }
             PIECE_QUEEN => {
                 let rook_attack_mask =
@@ -110,6 +123,7 @@ where
 
                 all_attackers |= (queen_board | rook_board) & rook_attack_mask;
                 all_attackers |= (queen_board | bishop_board) & bishop_attack_mask;
+                all_attackers &= !to_sq_mask;
             }
             _ => {}
         }
@@ -455,6 +469,61 @@ mod tests {
         );
         let expected =
             piece_value(PieceIndex::BlackPawn as u8) - piece_value(PieceIndex::WhiteKnight as u8);
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_tricky() {
+        let mv = "b4a3";
+        let see_score = see_test(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/P1N2Q1p/1PPBBPPP/R3K2R b KQkq - 0 1",
+            mv,
+        );
+        let expected = 0; // +- pawn
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_tricky_2() {
+        let mv = "e5e3";
+        let see_score = see_test(
+            "r3k2r/p1pp1pb1/B4np1/3Pq3/1p6/4Q2p/PPPB1PPP/R3K2R b KQkq - 1 4",
+            mv,
+        );
+        let expected = 0; // +- queen
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_tricky_king() {
+        let mv = "f8f4";
+        let see_score = see_test("k4r2/8/8/8/5PK1/8/8/8 b - - 0 1", mv);
+        let expected =
+            piece_value(PieceIndex::WhitePawn as u8) - piece_value(PieceIndex::BlackRook as u8);
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_tricky_king_threatened() {
+        let mv = "f8f4";
+        let see_score = see_test("k4r2/8/8/4p3/5PK1/8/8/8 b - - 0 1", mv);
+        let expected = piece_value(PieceIndex::WhitePawn as u8);
         assert_eq!(
             see_score, expected,
             "Expected SEE to be {}, got {}",
