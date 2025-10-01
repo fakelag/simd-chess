@@ -38,7 +38,7 @@ pub struct Network {
 
 impl Network {
     #[inline(always)]
-    pub fn evaluate(&mut self, us: &Accumulator, them: &Accumulator) -> i16 {
+    pub fn evaluate(&self, us: &Accumulator, them: &Accumulator) -> i16 {
         let mut output = i32::from(self.output_bias);
 
         for (&input, &weight) in us.vals.iter().zip(&self.output_weights[..HIDDEN_SIZE]) {
@@ -341,19 +341,24 @@ pub struct LazyNnue {
 }
 
 impl LazyNnue {
-    pub fn init(&mut self, net: Network) {
-        let mut nnue = LazyNnue {
-            net,
-            accumulators: Vec::with_capacity(1024),
-            updates: Vec::with_capacity(1024),
-            applied_accumulators: Vec::new(),
-        };
+    pub fn heap_alloc(net: Network) -> Box<Self> {
+        unsafe {
+            let layout = std::alloc::Layout::new::<Self>();
+            let ptr = std::alloc::alloc(layout) as *mut Self;
 
-        for _ in 0..1024 {
-            nnue.accumulators.push(AccumulatorPair::new());
+            let mut accumulators = Vec::with_capacity(1024);
+
+            for _ in 0..1024 {
+                accumulators.push(AccumulatorPair::new());
+            }
+
+            (&raw mut (*ptr).net).write(net);
+            (&raw mut (*ptr).accumulators).write(accumulators);
+            (&raw mut (*ptr).updates).write(Vec::with_capacity(1024));
+            (&raw mut (*ptr).applied_accumulators).write(Vec::new());
+
+            Box::from_raw(ptr)
         }
-
-        *self = nnue;
     }
 
     pub fn load(&mut self, board: &chess_v2::ChessGame) {
@@ -511,12 +516,6 @@ macro_rules! nnue_lazy_load {
     ($path:expr) => {{
         let net: &nnue::Network = &unsafe { std::mem::transmute(*include_bytes!($path)) };
 
-        let mut nnue = Box::<nnue::LazyNnue>::new_uninit();
-        let ptr = nnue.as_mut_ptr();
-
-        unsafe {
-            (*ptr).init(*net);
-            nnue.assume_init()
-        }
+        nnue::LazyNnue::heap_alloc(*net)
     }};
 }
