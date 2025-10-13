@@ -21,6 +21,20 @@ use crate::{
 
 const PV_DEPTH: usize = 64;
 
+const SORT_CAPTURE_RANGE: u16 = 32;
+const SORT_QUIET_RANGE: u16 = 65502;
+
+const SORT_QUIET_BASE: u16 = 0;
+const SORT_CAPTURE_BASE: u16 = SORT_QUIET_BASE + SORT_QUIET_RANGE;
+const SORT_PVTT_BASE: u16 = SORT_CAPTURE_BASE + SORT_CAPTURE_RANGE;
+
+const HISTORY_MAX: i16 = i16::MAX - 0_017;
+const HISTORY_MIN: i16 = i16::MIN + 0_017;
+
+const ASSERT_SORT_RANGE: [bool; u16::MAX as usize - 1] = [false; SORT_PVTT_BASE as usize];
+const ASSERT_SORT_HISTORY_MINMAX_RANGE: [bool; SORT_QUIET_RANGE as usize - 1] =
+    [false; (HISTORY_MAX as usize + HISTORY_MIN.abs() as usize)];
+
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
     /* Ep Cap */      [0, 0, 0, 0, 0, 0, 26, 0, 0, 0, 0, 0, 0, 0, 26, 0],
@@ -56,11 +70,6 @@ impl PvTable {
     }
 }
 
-struct Scratch {
-    captures: [[u16; 32]; 32],
-    cursors: [*mut i16; 32],
-}
-
 pub struct Search<'a> {
     chess: ChessGame,
     tables: &'a tables::Tables,
@@ -81,13 +90,7 @@ pub struct Search<'a> {
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
     // et: EvalTable,
-    /// Quiet moves that caused a β-cutoff, indexed by ply
-    beta_moves: Box<[[u16; 2]; PV_DEPTH]>,
-
-    /// Depth-based scores of quiet moves that raised the α bound, indexed by `[piece_id][dst_square]`.
-    /// When a quiet move raises alpha, a bonus is added to the score, higher score prioritises the move
-    /// against other quiet moves.
-    alpha_moves: Box<[[u8; 64]; 16]>,
+    history_moves: Box<[[i16; 64]; 16]>,
 
     params: Box<SearchParams>,
 
@@ -174,8 +177,7 @@ impl<'a> Search<'a> {
             pv: [0; PV_DEPTH],
             pv_length: 0,
             pv_trace: false,
-            beta_moves: Box::new([[0; 2]; PV_DEPTH]),
-            alpha_moves: Box::new([[0; 64]; 16]),
+            history_moves: Box::new([[0; 64]; 16]),
             // et: EvalTable::new(512),
             rt,
             tt,
@@ -208,13 +210,12 @@ impl<'a> Search<'a> {
             for j in 0..PV_DEPTH {
                 self.pv_table.moves[i][j] = 0;
             }
-            self.beta_moves[i] = [0; 2];
             self.pv[i] = 0;
         }
 
-        for i in 0..16 {
-            for j in 0..64 {
-                self.alpha_moves[i][j] = 0;
+        for piece in 0..16 {
+            for square in 0..64 {
+                self.history_moves[piece][square] = 0;
             }
         }
 
@@ -344,6 +345,8 @@ impl<'a> Search<'a> {
         let mut alpha = alpha;
         let mut depth = depth;
 
+        // assert!(!(self.pv_trace && tt_move != 0));
+
         if apply_pruning {
             if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
                 return 0;
@@ -423,7 +426,7 @@ impl<'a> Search<'a> {
             }
         }
 
-        let move_count = self
+        let mut move_count = self
             .chess
             .gen_moves_avx512::<false>(self.tables, &mut self.move_list);
 
@@ -431,79 +434,82 @@ impl<'a> Search<'a> {
 
         unsafe {
             // Safety: maximum number of legal moves in any position is 218.
-            // Generated move count is guaranteed to be within bounds of 254 assuming
+            // Generated move count is guaranteed to be within bounds of 248 assuming
             // few possible pseudolegal moves like castling or moving into a check
-            debug_assert!(move_count < 254);
-            std::hint::assert_unchecked(move_count < 254);
+            debug_assert!(move_count < 248);
+            std::hint::assert_unchecked(move_count < 248);
         }
 
-        let black_board = self
-            .chess
-            .bitboards()
-            .iter()
-            .skip(8)
-            .fold(0, |acc, &bb| acc | bb);
-        let white_board = self
-            .chess
-            .bitboards()
-            .iter()
-            .take(8)
-            .fold(0, |acc, &bb| acc | bb);
-
-        let mut piece_boards: [u64; 8] = [0u64; 8];
-        self.chess
-            .bitboards()
-            .iter()
-            .take(8)
-            .zip(self.chess.bitboards().iter().skip(8))
-            .enumerate()
-            .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
-
-        let mut move_scores = [0xFFFFu16; 256];
+        // let black_board = self
+        //     .chess
+        //     .bitboards()
+        //     .iter()
+        //     .skip(8)
+        //     .fold(0, |acc, &bb| acc | bb);
+        // let white_board = self
+        //     .chess
+        //     .bitboards()
+        //     .iter()
+        //     .take(8)
+        //     .fold(0, |acc, &bb| acc | bb);
+        // let mut piece_board: [u64; 8] = [0u64; 8];
+        // self.chess
+        //     .bitboards()
+        //     .iter()
+        //     .take(8)
+        //     .zip(self.chess.bitboards().iter().skip(8))
+        //     .enumerate()
+        //     .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+        let mut move_list = [0u32; 256];
         for i in 0..move_count {
-            let mv = self.move_list[i];
-            move_scores[i] = self.score_move_mvvlva_asc(i as u8, mv, pv_move, tt_move);
+            move_list[i] = self.score_move_desc32(self.move_list[i], pv_move, tt_move);
         }
-
-        sorting::u16::sort_256x16_asc_avx512(&mut move_scores, move_count);
-
-        let mut move_list = [0u16; 256];
-        for i in 0..move_count {
-            let mv_index = i + 2;
-            move_list[mv_index] = self.move_list[(move_scores[i] & 0xFF) as usize];
-        }
-
+        sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
         debug_assert!(
             tt_move == 0
-                || !move_list[2..move_count + 2].contains(&tt_move)
-                || move_list[2] == tt_move
+                || !move_list[0..move_count]
+                    .iter()
+                    .any(|mv| *mv as u16 == tt_move)
+                || (move_list[0] as u16) == tt_move
         );
-        debug_assert!(pv_move == 0 || move_list[2] == pv_move);
+        debug_assert!(pv_move == 0 || move_list[0] as u16 == pv_move);
 
         let mut best_move = 0;
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
 
-        let mut i = 2;
-        while i < move_count + 2 {
-            let mv = move_list[i];
+        let mut i = 0;
+        while i < move_count {
+            let mv_index = i;
+            let mv = move_list[mv_index] as u16;
             i += 1;
 
+            unsafe {
+                // Safety: i is guaranteed to be less than 256 from the loop condition,
+                // i -= 1 guarantees i < 256
+                debug_assert!(i < 256);
+                std::hint::assert_unchecked(i < 256);
+            }
+
             if (mv & MV_FLAGS_PR_MASK) == MV_FLAGS_PR_QUEEN {
-                i -= 3;
+                i -= 1;
 
+                let mv_unpromoted = (mv & !MV_FLAGS_PR_MASK) as u32;
                 unsafe {
-                    // Safety: i is guaranteed to be less than 256 from the loop condition,
-                    // i -= 3 guarantees i < 254
-                    debug_assert!(i < 254);
-                    std::hint::assert_unchecked(i < 254);
-                }
+                    // Second promotion to check, override current slot
+                    *move_list.get_unchecked_mut(i) = mv_unpromoted | MV_FLAGS_PR_KNIGHT as u32;
 
-                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
-                move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
+                    // Third promotion to check, append to the end of the list
+                    *move_list.get_unchecked_mut(move_count) =
+                        mv_unpromoted | MV_FLAGS_PR_BISHOP as u32;
+                    move_count += 1;
+
+                    // Fourth promotion to check, append to the end of the list
+                    *move_list.get_unchecked_mut(move_count) =
+                        mv_unpromoted | MV_FLAGS_PR_ROOK as u32;
+                    move_count += 1;
+                }
             }
 
             let nnue_update = unsafe {
@@ -577,27 +583,6 @@ impl<'a> Search<'a> {
                 continue;
             }
 
-            let is_non_capture = (mv & MV_FLAG_CAP) == 0;
-
-            if is_non_capture {
-                let src_piece = self.chess.spt()[(mv & 0x3F) as usize] as usize;
-                let dst_square = ((mv >> 6) & 0x3F) as usize;
-
-                unsafe {
-                    // Safety:
-                    // - src_piece is guaranteed to be a valid piece index from the board state
-                    // - dst_square is guaranteed to be within 0..64 from move generation
-                    debug_assert!(src_piece < 16 && dst_square < 64);
-                    std::hint::assert_unchecked(src_piece < 16);
-                    std::hint::assert_unchecked(dst_square < 64);
-                }
-                debug_assert!(PieceIndex::from(src_piece) != PieceIndex::WhiteNullPiece);
-                debug_assert!(PieceIndex::from(src_piece) != PieceIndex::BlackNullPiece);
-
-                self.alpha_moves[src_piece][dst_square] =
-                    self.alpha_moves[src_piece][dst_square].saturating_add(depth as u8);
-            }
-
             self.a_raise_count += 1;
             bound_type = BoundType::Exact;
             alpha = score;
@@ -631,10 +616,62 @@ impl<'a> Search<'a> {
             }
 
             if score >= beta {
+                let is_non_capture = (mv & MV_FLAG_CAP) == 0;
+
                 if is_non_capture {
-                    let beta_moves = &mut self.beta_moves[ply];
-                    beta_moves[1] = beta_moves[0];
-                    beta_moves[0] = mv;
+                    let src_piece = self.chess.spt()[(mv & 0x3F) as usize] as usize;
+                    let dst_square = ((mv >> 6) & 0x3F) as usize;
+
+                    unsafe {
+                        // Safety:
+                        // - src_piece is guaranteed to be a valid piece index from the board state
+                        // - dst_square is guaranteed to be within 0..64 from move generation
+                        debug_assert!(src_piece < 16 && dst_square < 64);
+                        std::hint::assert_unchecked(src_piece < 16);
+                        std::hint::assert_unchecked(dst_square < 64);
+                    }
+                    debug_assert!(PieceIndex::from(src_piece) != PieceIndex::WhiteNullPiece);
+                    debug_assert!(PieceIndex::from(src_piece) != PieceIndex::BlackNullPiece);
+
+                    self.update_history_heuristic(
+                        src_piece,
+                        dst_square,
+                        depth as i16 * depth as i16,
+                    );
+
+                    for j in 0..mv_index {
+                        let prev_mv = move_list[j] as u16;
+
+                        debug_assert!(prev_mv != 0);
+                        debug_assert!(prev_mv != mv);
+
+                        let is_capture = prev_mv & MV_FLAG_CAP != 0;
+
+                        if is_capture {
+                            continue;
+                        }
+
+                        let src_piece = self.chess.spt()[(prev_mv & 0x3F) as usize] as usize;
+                        let dst_square = ((prev_mv >> 6) & 0x3F) as usize;
+
+                        unsafe {
+                            // Safety:
+                            // - src_piece is guaranteed to be a valid piece index from the board state
+                            // - dst_square is guaranteed to be within 0..64 from move generation
+                            debug_assert!(src_piece < 16 && dst_square < 64);
+                            std::hint::assert_unchecked(src_piece < 16);
+                            std::hint::assert_unchecked(dst_square < 64);
+                        }
+
+                        debug_assert!(PieceIndex::from(src_piece) != PieceIndex::WhiteNullPiece);
+                        debug_assert!(PieceIndex::from(src_piece) != PieceIndex::BlackNullPiece);
+
+                        self.update_history_heuristic(
+                            src_piece,
+                            dst_square,
+                            -(depth as i16 * depth as i16),
+                        );
+                    }
                 }
 
                 // @todo - test fail-hard vs fail-soft
@@ -721,7 +758,7 @@ impl<'a> Search<'a> {
             alpha = static_eval;
         }
 
-        let move_count = self
+        let mut move_count = self
             .chess
             .gen_moves_avx512::<true>(self.tables, &mut self.move_list);
 
@@ -733,36 +770,9 @@ impl<'a> Search<'a> {
             std::hint::assert_unchecked(move_count < 256);
         }
 
-        let black_board = self
-            .chess
-            .bitboards()
-            .iter()
-            .skip(8)
-            .fold(0, |acc, &bb| acc | bb);
-        let white_board = self
-            .chess
-            .bitboards()
-            .iter()
-            .take(8)
-            .fold(0, |acc, &bb| acc | bb);
-
-        let mut piece_boards: [u64; 8] = [0u64; 8];
-        self.chess
-            .bitboards()
-            .iter()
-            .take(8)
-            .zip(self.chess.bitboards().iter().skip(8))
-            .enumerate()
-            .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
-
         let mut move_list = [0u32; 256];
         for i in 0..move_count {
-            move_list[i] = self.score_move_see_desc_quiescence(
-                self.move_list[i],
-                black_board,
-                white_board,
-                &piece_boards,
-            );
+            move_list[i] = self.score_move_desc32_quiescence(self.move_list[i]);
         }
         sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
 
@@ -782,7 +792,7 @@ impl<'a> Search<'a> {
 
         let mut i = 0;
         while i < move_count {
-            let mv = (move_list[i] & 0xFFFF) as u16;
+            let mv = move_list[i] as u16;
             i += 1;
 
             // Quiescence search can't encounter new captures after queen or knight promotions, so
@@ -1087,145 +1097,46 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn score_move_mvvlva_asc(&self, index: u8, mv: u16, pv_move: u16, tt_move: u16) -> u16 {
-        let index = index as u16;
-
-        if mv == pv_move {
-            return index + (0 << 8);
-        }
-
-        if mv == tt_move {
-            return index + (1 << 8);
-        }
-
-        let spt = self.chess.spt();
-
-        let src_sq = mv & 0x3F;
-        let dst_sq = (mv >> 6) & 0x3F;
-
-        if (mv & MV_FLAG_CAP) == 0 {
-            unsafe {
-                // Safety: self.ply is always < PV_DEPTH during main (non-q) search
-                let beta_mv0 = self.beta_moves.get_unchecked(self.ply as usize)[0];
-                let beta_mv1 = self.beta_moves.get_unchecked(self.ply as usize)[1];
-
-                if mv == beta_mv0 {
-                    return index | (35 << 8);
-                }
-
-                if mv == beta_mv1 {
-                    return index | (36 << 8);
-                }
-
-                // Safety:
-                // - src_sq and dst_sq are always < 64
-                // - src_piece is a PieceIndex < 16
-                let src_piece = *spt.get_unchecked(src_sq as usize) as usize;
-
-                let alpha_score = *self
-                    .alpha_moves
-                    .get_unchecked(src_piece)
-                    .get_unchecked(dst_sq as usize);
-
-                return index | ((37 + 218u16.saturating_sub(alpha_score as u16)) << 8);
-            }
-        }
-
-        // MVV-LVA
-        unsafe {
-            let spt = self.chess.spt();
-            let dst_piece = *spt.get_unchecked(dst_sq as usize);
-            let src_piece = *spt.get_unchecked(src_sq as usize);
-
-            let mvvlva_score = *MVV_LVA_SCORES_U8
-                .get_unchecked(dst_piece as usize)
-                .get_unchecked(src_piece as usize) as u16;
-
-            return index | (mvvlva_score << 8);
-        }
-    }
-
-    #[inline(always)]
-    fn score_move_mvvlva_asc_quiescence(&self, index: u8, mv: u16) -> u16 {
-        let index = index as u16;
-        let src_sq = mv & 0x3F;
-        let dst_sq = (mv >> 6) & 0x3F;
-
-        // MVV-LVA
-        unsafe {
-            let spt = self.chess.spt();
-            let dst_piece = *spt.get_unchecked(dst_sq as usize);
-            let src_piece = *spt.get_unchecked(src_sq as usize);
-
-            let mvvlva_score = *MVV_LVA_SCORES_U8
-                .get_unchecked(dst_piece as usize)
-                .get_unchecked(src_piece as usize) as u16;
-
-            return index | (mvvlva_score << 8);
-        }
-    }
-
-    #[inline(always)]
-    fn score_move_see_desc_quiescence(
-        &self,
-        mv: u16,
-        black_board: u64,
-        white_board: u64,
-        piece_board: &[u64; 8],
-    ) -> u32 {
-        let see_score = see::static_exchange_eval(
-            &WEIGHT_TABLE_ABS_I8,
-            self.tables,
-            &self.chess,
-            black_board,
-            white_board,
-            *piece_board,
-            mv,
-        ) as i16;
-
-        // Normalise to 0..255 range;
-        let see_score = (see_score + 128) as u32;
-
-        return (mv as u32) | (see_score << 16);
-    }
-
-    // SEE based move ordering
-    #[inline(always)]
-    fn score_move_see_asc(
-        &self,
-        index: u8,
-        mv: u16,
-        pv_move: u16,
-        tt_move: u16,
-        black_board: u64,
-        white_board: u64,
-        piece_board: &[u64; 8],
-    ) -> u16 {
-        /*
-            Sorts moves in the order of:
-            1. [00] PV Move
-            2. [01] TT Move
-            3. [02-32] Good captures
-            4. [33] Beta1
-            5. [34] Beta2
-            6. [35-224] Quiet moves sorted by history heuristic
-            7. [225-255] Bad captures
-        */
-
-        let index = index as u16;
-
+    fn score_move_desc32_quiescence(&self, mv: u16) -> u32 {
         macro_rules! score {
             ($score:expr) => {
-                index | (($score as u16) << 8)
+                (mv as u32) | (($score as u32) << 16)
+            };
+        }
+
+        let src_sq = mv & 0x3F;
+        let dst_sq = (mv >> 6) & 0x3F;
+
+        // MVV-LVA
+        let mvvlva_score = unsafe {
+            let spt = self.chess.spt();
+            let dst_piece = *spt.get_unchecked(dst_sq as usize);
+            let src_piece = *spt.get_unchecked(src_sq as usize);
+
+            let mvvlva_score = *MVV_LVA_SCORES_U8
+                .get_unchecked(dst_piece as usize)
+                .get_unchecked(src_piece as usize) as u16;
+
+            31 - mvvlva_score
+        };
+
+        score!(mvvlva_score)
+    }
+
+    #[inline(always)]
+    fn score_move_desc32(&self, mv: u16, pv_move: u16, tt_move: u16) -> u32 {
+        macro_rules! score {
+            ($score:expr) => {
+                (mv as u32) | (($score as u32) << 16)
             };
         }
 
         if mv == pv_move {
-            return score!(0);
+            return score!(SORT_PVTT_BASE + 1);
         }
 
         if mv == tt_move {
-            return score!(1);
+            return score!(SORT_PVTT_BASE);
         }
 
         let spt = self.chess.spt();
@@ -1235,84 +1146,73 @@ impl<'a> Search<'a> {
 
         if (mv & MV_FLAG_CAP) == 0 {
             unsafe {
-                // Safety: self.ply is always < PV_DEPTH during main (non-q) search
-                let beta_mv0 = self.beta_moves.get_unchecked(self.ply as usize)[0];
-                let beta_mv1 = self.beta_moves.get_unchecked(self.ply as usize)[1];
-
-                if mv == beta_mv0 {
-                    return score!(33); // index | (35 << 8);
-                }
-
-                if mv == beta_mv1 {
-                    return score!(34); // index | (36 << 8);
-                }
+                const MAX_HISTORY_SCORE: u16 = SORT_CAPTURE_BASE - 1;
 
                 // Safety:
                 // - src_sq and dst_sq are always < 64
                 // - src_piece is a PieceIndex < 16
                 let src_piece = *spt.get_unchecked(src_sq as usize) as usize;
 
-                let alpha_score = *self
-                    .alpha_moves
+                let history_score = *self
+                    .history_moves
                     .get_unchecked(src_piece)
                     .get_unchecked(dst_sq as usize);
 
-                // let range_min = 35u8;
-                // let range_max = 224u8;
+                let history_score =
+                    (history_score as i32 + HISTORY_MIN.abs() as i32) as u16 + SORT_QUIET_BASE;
 
-                // let m = alpha_score as f32 / 255f32 * (range_max - range_min) as f32;
-                // let alpha_score = range_max.saturating_sub(m as u8);
-                // debug_assert!(alpha_score >= range_min && alpha_score <= range_max);
-                // return score!(alpha_score);
+                debug_assert!(
+                    history_score >= SORT_QUIET_BASE,
+                    "history score = {}, clamped score = {}",
+                    *self
+                        .history_moves
+                        .get_unchecked(src_piece)
+                        .get_unchecked(dst_sq as usize),
+                    history_score
+                );
+                debug_assert!(
+                    history_score <= MAX_HISTORY_SCORE,
+                    "history score = {}, clamped score = {}",
+                    *self
+                        .history_moves
+                        .get_unchecked(src_piece)
+                        .get_unchecked(dst_sq as usize),
+                    history_score
+                );
 
-                return score!(35 + 220u16.saturating_sub(alpha_score as u16));
+                return score!(history_score);
             }
         }
 
-        let see_score = see::static_exchange_eval(
-            &WEIGHT_TABLE_ABS_I8,
-            self.tables,
-            &self.chess,
-            black_board,
-            white_board,
-            *piece_board,
-            mv,
+        // MVV-LVA
+        let mvvlva_score = unsafe {
+            let spt = self.chess.spt();
+            let dst_piece = *spt.get_unchecked(dst_sq as usize);
+            let src_piece = *spt.get_unchecked(src_sq as usize);
+
+            let mvvlva_score = *MVV_LVA_SCORES_U8
+                .get_unchecked(dst_piece as usize)
+                .get_unchecked(src_piece as usize) as u16;
+
+            31 - mvvlva_score
+        };
+
+        debug_assert!(
+            SORT_CAPTURE_BASE + mvvlva_score < SORT_PVTT_BASE,
+            "mvv-lva score = {}, clamped score = {}",
+            mvvlva_score,
+            SORT_CAPTURE_BASE + mvvlva_score
         );
 
-        let see_score = see_score.max(-15).min(15);
+        score!(SORT_CAPTURE_BASE + mvvlva_score)
+    }
 
-        if see_score >= 0 {
-            // Good capture
-            score!(17u8 - (see_score as u8))
-        } else {
-            // Bad capture
-            score!(17u8 + see_score.abs() as u8)
-        }
-
-        // Cap score at gaining/losing ~3 queens
-        // let see_score = see_score.max(-30).min(30);
-
-        // if see_score >= 0 {
-        //     // Good capture
-        //     score!(32u8 - (see_score as u8))
-        // } else {
-        //     // Bad capture
-        //     // score!(225u8 + ((-see_score) as u8))
-        //     score!(u8::MAX)
-        // }
-
-        // MVV-LVA
-        // unsafe {
-        //     let spt = self.chess.spt();
-        //     let dst_piece = *spt.get_unchecked(dst_sq as usize);
-        //     let src_piece = *spt.get_unchecked(src_sq as usize);
-
-        //     let mvvlva_score = *MVV_LVA_SCORES_U8
-        //         .get_unchecked(dst_piece as usize)
-        //         .get_unchecked(src_piece as usize) as u16;
-
-        //     return index | (mvvlva_score << 8);
-        // }
+    #[inline(always)]
+    fn update_history_heuristic(&mut self, piece_index: usize, dst_sq: usize, bonus: i16) {
+        let entry = &mut self.history_moves[piece_index][dst_sq];
+        let ratio = ((*entry as i64) * bonus.abs() as i64 / HISTORY_MAX as i64) as i16;
+        let value = (*entry + (bonus - ratio)).clamp(-HISTORY_MAX, HISTORY_MAX);
+        *entry = value;
     }
 
     fn check_sigabort(&self) -> bool {
