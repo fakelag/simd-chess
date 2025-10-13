@@ -3,6 +3,7 @@ use std::io::Read;
 use sfbinpack::chess::{coords, r#move, piece};
 
 const DEBUG: bool = false;
+const ANNOTATION_DEPTH: u8 = 9;
 
 use crate::{
     engine::{self, chess_v2, search::SearchStrategy, tables},
@@ -61,8 +62,9 @@ impl SelfplayTrainer {
         feeder.set_max_positions(num_positions_total);
 
         println!(
-            "Starting selfplay with {} threads, {} total positions ({:.02} per matchmaker)",
+            "Starting selfplay with {} threads, depth {} {} total positions ({:.02} per matchmaker)",
             threads,
+            ANNOTATION_DEPTH,
             num_positions_total,
             num_positions_total as f64 / threads as f64
         );
@@ -155,8 +157,9 @@ impl SelfplayTrainer {
         mut feeder: Box<dyn PositionFeeder + Send>,
         tables: &tables::Tables,
     ) -> anyhow::Result<()> {
-        let search_params =
-            engine::search::search_params::SearchParams::from_iter("depth 9".split_whitespace());
+        let search_params = engine::search::search_params::SearchParams::from_iter(
+            format!("depth {ANNOTATION_DEPTH}").split_whitespace(),
+        );
 
         // depth 7 -> 2mb, depth 9 -> 4mb
         let mut tt = engine::search::transposition_v2::TranspositionTable::new(4);
