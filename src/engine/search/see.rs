@@ -15,23 +15,15 @@ const PIECE_PAWN: usize = PieceIndex::WhitePawn as usize;
 const PIECE_KING: usize = PieceIndex::WhiteKing as usize;
 
 #[inline(always)]
-pub fn static_exchange_eval<T>(
-    score_table: &[T; 16],
+pub fn static_exchange_eval(
+    score_table: &[i16; 16],
     tables: &tables::Tables,
     board: &ChessGame,
     mut black_board: u64,
     mut white_board: u64,
     mut piece_board: [u64; 8],
     mv: u16,
-) -> T
-where
-    T: std::ops::Sub<Output = T>
-        + std::ops::Neg<Output = T>
-        + Ord
-        + Copy
-        + From<i8>
-        + std::fmt::Debug,
-{
+) -> i16 {
     let from_sq = (mv & 0x3F) as usize;
     let to_sq = ((mv >> 6) & 0x3F) as usize;
     let to_sq_mask = 1u64 << to_sq;
@@ -51,14 +43,14 @@ where
 
     let mut b_move = board.b_move();
     *[&mut white_board, &mut black_board][b_move as usize] ^= (1u64 << from_sq) | to_sq_mask;
-    *[&mut white_board, &mut black_board][!b_move as usize] ^= remove_piece_mask;
+    *[&mut white_board, &mut black_board][!b_move as usize] &= !remove_piece_mask;
 
     // Make the move on the bitboards
     piece_board[from_piece as usize] ^= (1u64 << from_sq) | to_sq_mask;
     piece_board[to_piece as usize & 7] ^= remove_piece_mask;
 
     let mut full_board = black_board | white_board;
-    let mut exchanges = [T::from(0); 32];
+    let mut exchanges = [0; 32];
     let mut exchange_index = 1;
 
     let mut last_moved_piece = if mv & MV_FLAG_PROMOTION != 0 {
@@ -178,6 +170,187 @@ where
     }
 
     exchanges[0]
+}
+
+#[inline(always)]
+pub fn see_threshold(
+    score_table: &[i16; 16],
+    tables: &tables::Tables,
+    board: &ChessGame,
+    mv: u16,
+    threshold: i16,
+    mut black_board: u64,
+    mut white_board: u64,
+    mut piece_board: [u64; 8],
+) -> bool {
+    let from_sq = (mv & 0x3F) as usize;
+    let to_sq = ((mv >> 6) & 0x3F) as usize;
+    let to_sq_mask = 1u64 << to_sq;
+
+    let from_piece = board.spt()[from_sq] & 7;
+
+    let mut last_moved_piece = if mv & MV_FLAG_PROMOTION != 0 {
+        PieceIndex::WhiteQueen as u8
+    } else {
+        from_piece
+    };
+
+    let (remove_piece_mask, to_piece) = if mv & MV_FLAGS == MV_FLAG_EPCAP {
+        let ep_sq = if board.b_move() { to_sq + 8 } else { to_sq - 8 };
+        (1 << ep_sq, PieceIndex::WhitePawn as u8)
+    } else {
+        (to_sq_mask, board.spt()[to_sq])
+    };
+
+    // 1. First capture:
+    // `exchange` tracks the current capture sequence value offset to the
+    // given threshold. It starts from the score of the initially captured
+    // piece (if any) minus the threshold. This means that the exchange will
+    // track the net gain/loss of the capture sequence with respect to the
+    // threshold value
+    let mut exchange = score_table[to_piece as usize] - threshold;
+
+    if exchange < 0 {
+        // Captured piece is not valuable enough to reach the threshold
+        return false;
+    }
+
+    // 2. Possible recapture:
+    // Update to net gain/loss after initial stm's piece has been recaptured
+    exchange = score_table[last_moved_piece as usize] - exchange;
+
+    if exchange <= 0 {
+        // Capturing piece can be lost while still reaching the threshold
+        return true;
+    }
+
+    unsafe {
+        std::hint::assert_unchecked(to_piece < 16);
+    }
+
+    let mut b_move = board.b_move();
+    *[&mut white_board, &mut black_board][b_move as usize] ^= (1u64 << from_sq) | to_sq_mask;
+    *[&mut white_board, &mut black_board][!b_move as usize] &= !remove_piece_mask;
+
+    // Make the move on the bitboards
+    piece_board[from_piece as usize] ^= (1u64 << from_sq) | to_sq_mask;
+    piece_board[to_piece as usize & 7] ^= remove_piece_mask;
+
+    let mut full_board = black_board | white_board;
+
+    // Swap side
+    b_move = !b_move;
+
+    // Safety: to_sq is guaranteed to satisfy < 64
+    let mut all_attackers = unsafe {
+        calc_attackers(
+            tables,
+            full_board,
+            black_board,
+            white_board,
+            piece_board,
+            to_sq as u8,
+        )
+    };
+    let mut stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
+
+    let lva = |stm_attackers: u64, piece_board: &[u64; 8]| unsafe {
+        let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
+        let stm_attackers_x8 = _mm512_set1_epi64(stm_attackers as i64);
+        let and_result = _mm512_and_epi64(piece_board_x8, stm_attackers_x8);
+        let lane_mask = _mm512_test_epi64_mask(and_result, and_result);
+
+        debug_assert!(lane_mask != 0, "LVA called with no attackers");
+        let piece_index = 7 - lane_mask.leading_zeros();
+
+        let attacker_ls_lane = _mm512_permutexvar_epi64(
+            _mm512_castsi128_si512(_mm_cvtsi32_si128(piece_index as i32)),
+            and_result,
+        );
+        let attacker_sq_mask = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
+
+        (
+            piece_index as u8,
+            attacker_sq_mask.isolate_least_significant_one(),
+        )
+    };
+
+    // 3. Start calculating capture sequence alternating sides.
+    // The opponent is stm so pass starts as true since the initial
+    // capture is checked to be valuable enough
+    let mut is_pass = true;
+
+    while stm_attackers != 0 {
+        let (attacker_piece, attacker_sq_mask) = lva(stm_attackers, &piece_board);
+
+        unsafe {
+            std::hint::assert_unchecked(attacker_piece < 8);
+        }
+
+        piece_board[last_moved_piece as usize] ^= to_sq_mask;
+        piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
+        all_attackers ^= attacker_sq_mask;
+        full_board ^= attacker_sq_mask;
+        is_pass = !is_pass;
+        b_move = !b_move;
+
+        // 4. Confirmed recapture, update exchange to net gain/loss
+        // if the attacking piece would get captured in turn
+        exchange = score_table[attacker_piece as usize] - exchange;
+
+        last_moved_piece = attacker_piece;
+
+        if attacker_piece == PieceIndex::WhiteKing as u8 {
+            if (all_attackers & !to_sq_mask) & [white_board, black_board][b_move as usize] != 0 {
+                // King capture won't be applied if there are still attackers left
+                is_pass = !is_pass;
+            }
+            break;
+        }
+
+        if exchange < is_pass as i16 {
+            break;
+        }
+
+        match attacker_piece as usize {
+            PIECE_PAWN | PIECE_BISHOP => {
+                let attack_mask =
+                    unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
+
+                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+
+                all_attackers |= (queen_board | bishop_board) & attack_mask;
+            }
+            PIECE_ROOK => {
+                let attack_mask = unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
+
+                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
+
+                all_attackers |= (queen_board | rook_board) & attack_mask;
+            }
+            PIECE_QUEEN => {
+                let rook_attack_mask =
+                    unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
+                let bishop_attack_mask =
+                    unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
+
+                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
+                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+
+                all_attackers |= (queen_board | rook_board) & rook_attack_mask;
+                all_attackers |= (queen_board | bishop_board) & bishop_attack_mask;
+            }
+            _ => {}
+        }
+
+        all_attackers &= !to_sq_mask;
+        stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
+    }
+
+    is_pass
 }
 
 /// Safety: sq_index must be < 64
@@ -366,6 +539,43 @@ mod tests {
         WEIGHT_TABLE_ABS_I8[piece as usize]
     }
 
+    fn see_test_threshold(
+        tables: &tables::Tables,
+        board: &ChessGame,
+        mv: u16,
+        real_eval: Eval,
+        black_board: u64,
+        white_board: u64,
+        piece_board: [u64; 8],
+    ) {
+        [
+            ("equal", real_eval, true),
+            ("greater (-1)", real_eval - 1, true),
+            ("greater (-500)", real_eval - 500, true),
+            ("less (+1)", real_eval + 1, false),
+            ("less (+500)", real_eval + 500, false),
+        ]
+        .iter()
+        .for_each(|(name, threshold, expected)| {
+            let result = see_threshold(
+                &WEIGHT_TABLE_ABS,
+                &tables,
+                &board,
+                mv,
+                *threshold,
+                black_board,
+                white_board,
+                piece_board,
+            );
+
+            assert_eq!(
+                result, *expected,
+                "SEE threshold test '{}' failed: expected {}, got {} (eval {}, threshold {})",
+                name, expected, result, real_eval, threshold
+            );
+        });
+    }
+
     fn see_test(fen: &'static str, mv_string: &'static str) -> Eval {
         let tables = tables::Tables::new();
         let mut board = chess_v2::ChessGame::new();
@@ -382,13 +592,13 @@ mod tests {
         let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
         let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
 
-        let mut piece_boards: [u64; 8] = [0u64; 8];
+        let mut piece_board: [u64; 8] = [0u64; 8];
         bitboards
             .iter()
             .take(8)
             .zip(bitboards.iter().skip(8))
             .enumerate()
-            .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
+            .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
 
         let real_eval = static_exchange_eval(
             &WEIGHT_TABLE_ABS,
@@ -396,7 +606,7 @@ mod tests {
             &board,
             black_board,
             white_board,
-            piece_boards,
+            piece_board,
             mv,
         );
 
@@ -405,6 +615,16 @@ mod tests {
         assert_eq!(
             real_eval, naive_eval,
             "Mismatch between real SEE and naive SEE"
+        );
+
+        see_test_threshold(
+            &tables,
+            &board,
+            mv,
+            real_eval,
+            black_board,
+            white_board,
+            piece_board,
         );
 
         real_eval
@@ -430,10 +650,14 @@ mod tests {
                 continue;
             }
 
-            if mv & MV_FLAG_CAP == 0 {
+            if true {
                 see_test_fuzz(board, tables, depth - 1);
-                *board = board_copy.clone();
-                continue;
+            } else {
+                if mv & MV_FLAG_CAP == 0 {
+                    see_test_fuzz(board, tables, depth - 1);
+                    *board = board_copy.clone();
+                    continue;
+                }
             }
 
             *board = board_copy.clone();
@@ -449,13 +673,13 @@ mod tests {
             let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
             let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
 
-            let mut piece_boards: [u64; 8] = [0u64; 8];
+            let mut piece_board: [u64; 8] = [0u64; 8];
             bitboards
                 .iter()
                 .take(8)
                 .zip(bitboards.iter().skip(8))
                 .enumerate()
-                .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
+                .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
 
             let real_eval = static_exchange_eval(
                 &WEIGHT_TABLE_ABS,
@@ -463,7 +687,7 @@ mod tests {
                 &board,
                 black_board,
                 white_board,
-                piece_boards,
+                piece_board,
                 mv,
             );
 
@@ -473,30 +697,76 @@ mod tests {
                         real_eval, naive_eval,
                         "Mismatch between real SEE and naive SEE"
                     );
+
+                    see_test_threshold(
+                        &tables,
+                        &board,
+                        mv,
+                        real_eval,
+                        black_board,
+                        white_board,
+                        piece_board,
+                    );
                 }
                 None => {}
             }
         }
     }
 
-    // #[test]
-    // fn test_see_fuzz() {
-    //     let test_fens = [
-    //         // "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-    //         // "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1",
-    //         // "2r5/1P4pk/p2p1b1p/5b1n/BB3p2/2R2p2/P1P2P2/4RK2 w - - 0 1",
-    //         // "1R2r2k/5bp1/3Q2p1/2p5/4P2P/1p6/2r1n1BK/8 b - - 0 1",
-    //     ];
+    #[test]
+    fn test_see_fuzz() {
+        let test_fens = [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1",
+            "2r5/1P4pk/p2p1b1p/5b1n/BB3p2/2R2p2/P1P2P2/4RK2 w - - 0 1",
+            "1R2r2k/5bp1/3Q2p1/2p5/4P2P/1p6/2r1n1BK/8 b - - 0 1",
+        ];
 
-    //     for fen in test_fens {
-    //         let tables = tables::Tables::new();
-    //         let mut board = chess_v2::ChessGame::new();
+        for fen in test_fens {
+            let tables = tables::Tables::new();
+            let mut board = chess_v2::ChessGame::new();
 
-    //         assert!(board.load_fen(fen, &tables).is_ok());
+            assert!(board.load_fen(fen, &tables).is_ok());
 
-    //         see_test_fuzz(&mut board, &tables, 5);
-    //     }
-    // }
+            see_test_fuzz(&mut board, &tables, 4);
+        }
+    }
+
+    #[test]
+    fn test_see_xxx() {
+        let mv = "a6a5";
+        let see_score = see_test(
+            "r3k2r/p1ppqpb1/Qn3np1/3pN3/4PB2/2p4p/PPP2PPP/R3K2R w KQkq - 0 4",
+            mv,
+        );
+        println!("SEE score for {}: {}", mv, see_score);
+    }
+
+    #[test]
+    fn test_see_simple() {
+        let qxp = "b3b6";
+        let see_score = see_test("7k/p7/1p6/8/8/1Q6/8/7K w - - 0 1", qxp);
+        let expected =
+            piece_value(PieceIndex::BlackPawn as u8) - piece_value(PieceIndex::WhiteQueen as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_simple_2() {
+        let mv = "e1e5";
+        let see_score = see_test("1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", mv);
+        let expected = piece_value(PieceIndex::BlackPawn as u8);
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
 
     #[test]
     fn test_see_no_attackers() {
@@ -552,32 +822,6 @@ mod tests {
     }
 
     #[test]
-    fn test_see_simple() {
-        let qxp = "b3b6";
-        let see_score = see_test("7k/p7/1p6/8/8/1Q6/8/7K w - - 0 1", qxp);
-        let expected =
-            piece_value(PieceIndex::BlackPawn as u8) - piece_value(PieceIndex::WhiteQueen as u8);
-
-        assert_eq!(
-            see_score, expected,
-            "Expected SEE to be {}, got {}",
-            expected, see_score
-        );
-    }
-
-    #[test]
-    fn test_see_simple_2() {
-        let mv = "e1e5";
-        let see_score = see_test("1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", mv);
-        let expected = piece_value(PieceIndex::BlackPawn as u8);
-        assert_eq!(
-            see_score, expected,
-            "Expected SEE to be {}, got {}",
-            expected, see_score
-        );
-    }
-
-    #[test]
     fn test_see_multi() {
         let mv = "b3b6";
         let see_score = see_test("7k/p7/1p4R1/8/8/1Q6/8/7K w - - 0 1", mv);
@@ -613,57 +857,6 @@ mod tests {
         let expected = piece_value(PieceIndex::BlackPawn as u8)
             - piece_value(PieceIndex::WhiteQueen as u8)
             + piece_value(PieceIndex::BlackKnight as u8);
-        assert_eq!(
-            see_score, expected,
-            "Expected SEE to be {}, got {}",
-            expected, see_score
-        );
-    }
-
-    #[test]
-    fn test_see_i8() {
-        let mv_string = "b1b6";
-
-        let tables = tables::Tables::new();
-        let mut board = chess_v2::ChessGame::new();
-
-        assert!(
-            board
-                .load_fen("7k/3n4/Rq6/8/8/8/8/1Q4K1 w - - 0 1", &tables)
-                .is_ok()
-        );
-
-        let mv = board.fix_move(util::create_move(mv_string));
-
-        assert!(util::is_legal_slow(&tables, &board, mv));
-        // assert!(mv & MV_FLAG_CAP != 0);
-
-        let bitboards = board.bitboards();
-
-        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
-        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
-
-        let mut piece_boards: [u64; 8] = [0u64; 8];
-        bitboards
-            .iter()
-            .take(8)
-            .zip(bitboards.iter().skip(8))
-            .enumerate()
-            .for_each(|(index, (w, b))| piece_boards[index] = *w | *b);
-
-        let see_score = static_exchange_eval(
-            &WEIGHT_TABLE_ABS_I8,
-            &tables,
-            &board,
-            black_board,
-            white_board,
-            piece_boards,
-            mv,
-        );
-
-        let expected = piece_value_i8(PieceIndex::BlackQueen as u8)
-            - piece_value_i8(PieceIndex::WhiteQueen as u8)
-            + piece_value_i8(PieceIndex::BlackKnight as u8);
         assert_eq!(
             see_score, expected,
             "Expected SEE to be {}, got {}",
