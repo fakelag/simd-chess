@@ -47,6 +47,7 @@ impl SelfplayTrainer {
 
         if let Some(from) = from {
             let mut lock = feeder.inner.lock().unwrap();
+            lock.set_max_positions(from);
             for _ in 0..from {
                 lock.next_position();
             }
@@ -164,11 +165,6 @@ impl SelfplayTrainer {
         // depth 7 -> 2mb, depth 9 -> 4mb
         let mut tt = engine::search::transposition_v2::TranspositionTable::new(4);
         let rt = engine::search::repetition_v2::RepetitionTable::new();
-
-        // depth 9
-        // 2mb -> Games per minute: ~572.48. ETA: 29:05:47.017
-        // 4mb -> Games per minute: ~600.82. ETA: 27:43:23.336
-        // 8mb -> Games per minute: ~552.95. ETA: 29:25:32.639
 
         let mut search_engine =
             engine::search::v12_eval_sp::Search::new(search_params, tables, &mut tt, rt);
@@ -489,6 +485,7 @@ impl FenFeeder {
 
     fn set_max_positions(&mut self, max: usize) {
         self.max_positions_to_play = Some(max);
+        self.cursor = 0;
     }
 
     fn read_chunk(&mut self) {
