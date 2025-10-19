@@ -254,7 +254,7 @@ pub fn parse_pgn<'a>(
                                 }
 
                                 if is_capture
-                                    && (mv & chess_v2::MV_FLAG_EPCAP) != chess_v2::MV_FLAG_EPCAP
+                                    && (mv & chess_v2::MV_FLAGS) != chess_v2::MV_FLAG_EPCAP
                                     && board.piece_at(dst_sq) == PieceIndex::WhiteNullPiece as usize
                                 {
                                     continue;
@@ -476,10 +476,16 @@ mod tests {
         );
         let tables = tables::Tables::new();
 
-        let pgns = [(
-            "1. d4! { [%eval 0.10] } 1... e6!! { [%eval 0.10] } 2. e4? { [%eval 0.10] } 2... d5?? { [%eval 0.10] } 3. Nd2?! { [%eval 0.10] } 3... c5!? { [%eval 0.10] }",
-            6,
-        )];
+        let pgns = [
+            (
+                "1. d4! { [%eval 0.10] } 1... e6!! { [%eval 0.10] } 2. e4? { [%eval 0.10] } 2... d5?? { [%eval 0.10] } 3. Nd2?! { [%eval 0.10] } 3... c5!? { [%eval 0.10] }",
+                6,
+            ),
+            // (
+            //     "1. e4 { [%clk 0:01:00] } Nc6 { [%clk 0:01:00] } 2. Nf3 { [%clk 0:00:59] } e5 { [%clk 0:01:00] } 3. Bc4 { [%clk 0:00:55] } Bc5 { [%clk 0:00:59] } 4. Ng5 { [%clk 0:00:54] } Qxg5 { [%clk 0:00:58] } 5. d4 { [%clk 0:00:53] } Qxg2 { [%clk 0:00:57] } 6. dxc5 { [%clk 0:00:52] } Qxh1+ { [%clk 0:00:55] } 7. Kd2 { [%clk 0:00:52] } Qxe4 { [%clk 0:00:53] } 8. Nc3 { [%clk 0:00:48] } Qxc4 { [%clk 0:00:52] } 9. Ke1 { [%clk 0:00:46] } Nd4 { [%clk 0:00:48] } 10. b3 { [%clk 0:00:45] } Qxc5 { [%clk 0:00:46] } 11. Be3 { [%clk 0:00:43] } Qxc3+ { [%clk 0:00:45] } 12. Kf1 { [%clk 0:00:42] } c5 { [%clk 0:00:40] } 13. Qf3 { [%clk 0:00:40] } Nxf3 { [%clk 0:00:38] } 0-1",
+            //     0,
+            // ),
+        ];
 
         let mut moves = Vec::new();
         for pgn in pgns {
