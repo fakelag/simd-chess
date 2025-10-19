@@ -89,7 +89,7 @@ pub struct Search<'a> {
 
     tt: &'a mut TranspositionTable,
     rt: RepetitionTable,
-    // et: EvalTable,
+    et: EvalTable,
     history_moves: Box<[[i16; 64]; 16]>,
 
     params: Box<SearchParams>,
@@ -178,7 +178,7 @@ impl<'a> Search<'a> {
             pv_length: 0,
             pv_trace: false,
             history_moves: Box::new([[0; 64]; 16]),
-            // et: EvalTable::new(512),
+            et: EvalTable::new(512),
             rt,
             tt,
         };
@@ -460,6 +460,7 @@ impl<'a> Search<'a> {
         //     .zip(self.chess.bitboards().iter().skip(8))
         //     .enumerate()
         //     .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+
         let mut move_list = [0u32; 256];
         for i in 0..move_count {
             move_list[i] = self.score_move_desc32(self.move_list[i], pv_move, tt_move);
@@ -527,6 +528,30 @@ impl<'a> Search<'a> {
                 }
                 None => continue,
             };
+
+            // if apply_pruning && depth_pruning && !self.is_endgame() {
+            //     let threshold = if mv & MV_FLAG_CAP != 0 {
+            //         -50 * depth as i16
+            //     } else {
+            //         -10 * depth as i16 * depth as i16
+            //     };
+
+            //     if !see::see_threshold(
+            //         &WEIGHT_TABLE_ABS,
+            //         self.tables,
+            //         &board_copy,
+            //         mv,
+            //         threshold,
+            //         black_board,
+            //         white_board,
+            //         piece_board,
+            //     ) {
+            //         if !self.chess.in_check(self.tables, self.chess.b_move()) {
+            //             self.chess = board_copy;
+            //             continue;
+            //         }
+            //     }
+            // }
 
             self.nnue.make_move(nnue_update);
 
@@ -885,215 +910,229 @@ impl<'a> Search<'a> {
         // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
         //     return eval;
         // }
+        // let final_score = self.nnue.evaluate(self.chess.b_move()) as Eval;
+        // self.et.store(self.chess.zobrist_key(), final_score);
+        // return final_score;
 
-        let final_score = self.nnue.evaluate(self.chess.b_move()) as Eval;
-
+        // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
+        //     return eval;
+        // }
+        let final_score = self.eval_hc();
         // self.et.store(self.chess.zobrist_key(), final_score);
 
+        /*
+            Checkpoint after 445 games (1.00 mins). Games per minute: ~444.55. 42270 total positions so far, ~94.99 per game avg. Binpack size: 0 B. ETA: 21:29.604
+            Checkpoint after 888 games (1.00 mins). Games per minute: ~442.78. 85435 total positions so far, ~96.21 per game avg. Binpack size: 0 B. ETA: 20:34.751
+            Checkpoint after 1300 games (1.00 mins). Games per minute: ~411.68. 127702 total positions so far, ~98.23 per game avg. Binpack size: 0 B. ETA: 21:07.983
+            Checkpoint after 1723 games (1.00 mins). Games per minute: ~421.98. 170726 total positions so far, ~99.09 per game avg. Binpack size: 0 B. ETA: 19:36.882
+        */
         return final_score;
+    }
 
-        // use std::arch::x86_64::*;
+    #[inline(always)]
+    fn eval_hc(&self) -> Eval {
+        use std::arch::x86_64::*;
 
-        // let bitboards = self.chess.bitboards_new();
+        let bitboards = self.chess.bitboards();
 
-        // let mut bonuses_mg: Eval = 0;
-        // let mut bonuses_eg: Eval = 0;
+        let mut bonuses_mg: Eval = 0;
+        let mut bonuses_eg: Eval = 0;
 
-        // unsafe {
-        //     let mut bonuses_mg_x64 = _mm512_setzero_si512();
-        //     let mut bonuses_eg_x64 = _mm512_setzero_si512();
+        unsafe {
+            let mut bonuses_mg_x64 = _mm512_setzero_si512();
+            let mut bonuses_eg_x64 = _mm512_setzero_si512();
 
-        //     macro_rules! acc_piece_bonus_avx512 {
-        //         ($bonus_vec:ident,$is_eg:expr,$piece_id:expr) => {
-        //             $bonus_vec = _mm512_mask_blend_epi8(
-        //                 bitboards[$piece_id as usize],
-        //                 $bonus_vec,
-        //                 _mm512_loadu_epi8(
-        //                     EVAL_TABLES_INV_MGEG.0[$is_eg][$piece_id as usize].as_ptr()
-        //                         as *const i8,
-        //                 ),
-        //             )
-        //         };
-        //     }
+            macro_rules! acc_piece_bonus_avx512 {
+                ($bonus_vec:ident,$is_eg:expr,$piece_id:expr) => {
+                    $bonus_vec = _mm512_mask_blend_epi8(
+                        bitboards[$piece_id as usize],
+                        $bonus_vec,
+                        _mm512_loadu_epi8(
+                            EVAL_TABLES_INV_MGEG.0[$is_eg][$piece_id as usize].as_ptr()
+                                as *const i8,
+                        ),
+                    )
+                };
+            }
 
-        //     macro_rules! sum_bonus_avx512 {
-        //         ($bonus_acc:ident,$bonus_vec:ident) => {
-        //             let bonuses_lsb = _mm512_castsi512_si256($bonus_vec);
-        //             let bonuses_msb = _mm512_extracti64x4_epi64($bonus_vec, 1);
-        //             let bonuses_lsb_i16 = _mm512_cvtepi8_epi16(bonuses_lsb);
-        //             let bonuses_msb_i16 = _mm512_cvtepi8_epi16(bonuses_msb);
-        //             let summed_bonuses = _mm512_add_epi16(bonuses_lsb_i16, bonuses_msb_i16);
-        //             let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
-        //             let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
+            macro_rules! sum_bonus_avx512 {
+                ($bonus_acc:ident,$bonus_vec:ident) => {
+                    let bonuses_lsb = _mm512_castsi512_si256($bonus_vec);
+                    let bonuses_msb = _mm512_extracti64x4_epi64($bonus_vec, 1);
+                    let bonuses_lsb_i16 = _mm512_cvtepi8_epi16(bonuses_lsb);
+                    let bonuses_msb_i16 = _mm512_cvtepi8_epi16(bonuses_msb);
+                    let summed_bonuses = _mm512_add_epi16(bonuses_lsb_i16, bonuses_msb_i16);
+                    let summed_bonuses_lsb = _mm512_castsi512_si256(summed_bonuses);
+                    let summed_bonuses_msb = _mm512_extracti64x4_epi64(summed_bonuses, 1);
 
-        //             $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_lsb) as Eval;
-        //             $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_msb) as Eval;
-        //         };
-        //     }
+                    $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_lsb) as Eval;
+                    $bonus_acc += _mm256_reduce_add_epi16(summed_bonuses_msb) as Eval;
+                };
+            }
 
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKing);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteQueen);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteRook);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteBishop);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKnight);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhitePawn);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKing);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteQueen);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteRook);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteBishop);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhiteKnight);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::WhitePawn);
 
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKing);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackQueen);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackRook);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackBishop);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKnight);
-        //     acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackPawn);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKing);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackQueen);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackRook);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackBishop);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackKnight);
+            acc_piece_bonus_avx512!(bonuses_mg_x64, 0, PieceIndex::BlackPawn);
 
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKing);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteQueen);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteRook);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteBishop);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKnight);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhitePawn);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKing);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteQueen);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteRook);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteBishop);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhiteKnight);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::WhitePawn);
 
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKing);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackQueen);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackRook);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackBishop);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKnight);
-        //     acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackPawn);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKing);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackQueen);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackRook);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackBishop);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackKnight);
+            acc_piece_bonus_avx512!(bonuses_eg_x64, 1, PieceIndex::BlackPawn);
 
-        //     sum_bonus_avx512!(bonuses_mg, bonuses_mg_x64);
-        //     sum_bonus_avx512!(bonuses_eg, bonuses_eg_x64);
-        // }
+            sum_bonus_avx512!(bonuses_mg, bonuses_mg_x64);
+            sum_bonus_avx512!(bonuses_eg, bonuses_eg_x64);
+        }
 
-        // let wb = bitboards[PieceIndex::WhiteBishop as usize].count_ones();
-        // let bb = bitboards[PieceIndex::BlackBishop as usize].count_ones();
+        let wb = bitboards[PieceIndex::WhiteBishop as usize].count_ones();
+        let bb = bitboards[PieceIndex::BlackBishop as usize].count_ones();
 
-        // let wq_bq = bitboards[PieceIndex::WhiteQueen as usize].count_ones() as Eval
-        //     - bitboards[PieceIndex::BlackQueen as usize].count_ones() as Eval;
+        let wq_bq = bitboards[PieceIndex::WhiteQueen as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackQueen as usize].count_ones() as Eval;
 
-        // let wr_br = bitboards[PieceIndex::WhiteRook as usize].count_ones() as Eval
-        //     - bitboards[PieceIndex::BlackRook as usize].count_ones() as Eval;
+        let wr_br = bitboards[PieceIndex::WhiteRook as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackRook as usize].count_ones() as Eval;
 
-        // let wb_bb = wb as Eval - bb as Eval;
+        let wb_bb = wb as Eval - bb as Eval;
 
-        // let wn_bn = bitboards[PieceIndex::WhiteKnight as usize].count_ones() as Eval
-        //     - bitboards[PieceIndex::BlackKnight as usize].count_ones() as Eval;
+        let wn_bn = bitboards[PieceIndex::WhiteKnight as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackKnight as usize].count_ones() as Eval;
 
-        // let wp_bp = bitboards[PieceIndex::WhitePawn as usize].count_ones() as Eval
-        //     - bitboards[PieceIndex::BlackPawn as usize].count_ones() as Eval;
+        let wp_bp = bitboards[PieceIndex::WhitePawn as usize].count_ones() as Eval
+            - bitboards[PieceIndex::BlackPawn as usize].count_ones() as Eval;
 
-        // let mut score_mg = bonuses_mg
-        //     + wq_bq * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteQueen as usize]
-        //     + wr_br * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteRook as usize]
-        //     + wb_bb * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteBishop as usize]
-        //     + wn_bn * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteKnight as usize]
-        //     + wp_bp * WEIGHT_TABLE_MGEG[0][PieceIndex::WhitePawn as usize];
+        let mut score_mg = bonuses_mg
+            + wq_bq * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteQueen as usize]
+            + wr_br * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteRook as usize]
+            + wb_bb * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteBishop as usize]
+            + wn_bn * WEIGHT_TABLE_MGEG[0][PieceIndex::WhiteKnight as usize]
+            + wp_bp * WEIGHT_TABLE_MGEG[0][PieceIndex::WhitePawn as usize];
 
-        // let mut score_eg = bonuses_eg
-        //     + wq_bq * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteQueen as usize]
-        //     + wr_br * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteRook as usize]
-        //     + wb_bb * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteBishop as usize]
-        //     + wn_bn * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteKnight as usize]
-        //     + wp_bp * WEIGHT_TABLE_MGEG[1][PieceIndex::WhitePawn as usize];
+        let mut score_eg = bonuses_eg
+            + wq_bq * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteQueen as usize]
+            + wr_br * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteRook as usize]
+            + wb_bb * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteBishop as usize]
+            + wn_bn * WEIGHT_TABLE_MGEG[1][PieceIndex::WhiteKnight as usize]
+            + wp_bp * WEIGHT_TABLE_MGEG[1][PieceIndex::WhitePawn as usize];
 
-        // let phase = self.calc_board_phase();
+        let phase = self.calc_board_phase();
 
-        // if wb > 1 {
-        //     score_mg += 20;
-        //     score_eg += 40;
-        // }
-        // if bb > 1 {
-        //     score_mg -= 20;
-        //     score_eg -= 40;
-        // }
+        if wb > 1 {
+            score_mg += 20;
+            score_eg += 40;
+        }
+        if bb > 1 {
+            score_mg -= 20;
+            score_eg -= 40;
+        }
 
-        // let mut white_pawns = bitboards[PieceIndex::WhitePawn as usize];
-        // loop {
-        //     let pawn_sq = pop_ls1b!(white_pawns);
-        //     let file = (0x101010101010101 << 8) << pawn_sq;
-        //     let file_left = (file >> 1) & tables::EX_H_FILE;
-        //     let file_right = (file << 1) & tables::EX_A_FILE;
-        //     let full_mask = file | file_left | file_right;
+        let mut white_pawns = bitboards[PieceIndex::WhitePawn as usize];
+        loop {
+            let pawn_sq = crate::pop_ls1b!(white_pawns);
+            let file = (0x101010101010101 << 8) << pawn_sq;
+            let file_left = (file >> 1) & tables::EX_H_FILE;
+            let file_right = (file << 1) & tables::EX_A_FILE;
+            let full_mask = file | file_left | file_right;
 
-        //     let rank_bonus = [10, 10, 20, 50, 90, 100, 0][(pawn_sq / 8) as usize];
+            let rank_bonus = [10, 10, 20, 50, 90, 100, 0][(pawn_sq / 8) as usize];
 
-        //     if full_mask & bitboards[PieceIndex::BlackPawn as usize] == 0 {
-        //         score_mg += rank_bonus;
-        //         score_eg += rank_bonus;
-        //     }
-        // }
+            if full_mask & bitboards[PieceIndex::BlackPawn as usize] == 0 {
+                score_mg += rank_bonus;
+                score_eg += rank_bonus;
+            }
+        }
 
-        // let mut black_pawns = bitboards[PieceIndex::BlackPawn as usize];
-        // loop {
-        //     let pawn_sq = pop_ls1b!(black_pawns);
-        //     let file = (0x101010101010101u64).wrapping_shr((64 - pawn_sq) as u32);
-        //     let file_left = (file >> 1) & tables::EX_H_FILE;
-        //     let file_right = (file << 1) & tables::EX_A_FILE;
-        //     let full_mask = file | file_left | file_right;
+        let mut black_pawns = bitboards[PieceIndex::BlackPawn as usize];
+        loop {
+            let pawn_sq = crate::pop_ls1b!(black_pawns);
+            let file = (0x101010101010101u64).wrapping_shr((64 - pawn_sq) as u32);
+            let file_left = (file >> 1) & tables::EX_H_FILE;
+            let file_right = (file << 1) & tables::EX_A_FILE;
+            let full_mask = file | file_left | file_right;
 
-        //     let rank_bonus = [0, 100, 90, 50, 20, 10, 10][(pawn_sq / 8) as usize];
+            let rank_bonus = [0, 100, 90, 50, 20, 10, 10][(pawn_sq / 8) as usize];
 
-        //     if full_mask & bitboards[PieceIndex::WhitePawn as usize] == 0 {
-        //         score_mg -= rank_bonus;
-        //         score_eg -= rank_bonus;
-        //     }
-        // }
+            if full_mask & bitboards[PieceIndex::WhitePawn as usize] == 0 {
+                score_mg -= rank_bonus;
+                score_eg -= rank_bonus;
+            }
+        }
 
-        // // King safety
-        // let attacker_bonuses = [10, 30, 60, 100, 200];
-        // let attacker_bonuses_eg = [5, 10, 20, 40, 100];
-        // let white_king_sq = bitboards[PieceIndex::WhiteKing as usize].trailing_zeros() as u8;
-        // let mut white_king_surround_squares =
-        //     tables::Tables::LT_KING_MOVE_MASKS[white_king_sq as usize];
-        // loop {
-        //     let king_surround_sq = pop_ls1b!(white_king_surround_squares);
+        // King safety
+        let attacker_bonuses = [10, 30, 60, 100, 200];
+        let attacker_bonuses_eg = [5, 10, 20, 40, 100];
+        let white_king_sq = bitboards[PieceIndex::WhiteKing as usize].trailing_zeros() as u8;
+        let mut white_king_surround_squares =
+            tables::Tables::LT_KING_MOVE_MASKS[white_king_sq as usize];
+        loop {
+            let king_surround_sq = crate::pop_ls1b!(white_king_surround_squares);
 
-        //     let num_attackers = self.chess.count_king_square_attackers_slow(
-        //         king_surround_sq as u8,
-        //         false,
-        //         self.tables,
-        //     );
+            let num_attackers = self.chess.count_king_square_attackers_slow(
+                king_surround_sq as u8,
+                false,
+                self.tables,
+            );
 
-        //     score_mg -= attacker_bonuses[num_attackers.min(4)];
-        //     score_eg -= attacker_bonuses_eg[num_attackers.min(4)];
-        // }
-        // let black_king_sq = bitboards[PieceIndex::BlackKing as usize].trailing_zeros() as u8;
-        // let mut black_king_surround_squares =
-        //     tables::Tables::LT_KING_MOVE_MASKS[black_king_sq as usize];
-        // loop {
-        //     let king_surround_sq = pop_ls1b!(black_king_surround_squares);
+            score_mg -= attacker_bonuses[num_attackers.min(4)];
+            score_eg -= attacker_bonuses_eg[num_attackers.min(4)];
+        }
+        let black_king_sq = bitboards[PieceIndex::BlackKing as usize].trailing_zeros() as u8;
+        let mut black_king_surround_squares =
+            tables::Tables::LT_KING_MOVE_MASKS[black_king_sq as usize];
+        loop {
+            let king_surround_sq = crate::pop_ls1b!(black_king_surround_squares);
 
-        //     let num_attackers = self.chess.count_king_square_attackers_slow(
-        //         king_surround_sq as u8,
-        //         true,
-        //         self.tables,
-        //     );
+            let num_attackers = self.chess.count_king_square_attackers_slow(
+                king_surround_sq as u8,
+                true,
+                self.tables,
+            );
 
-        //     score_mg += attacker_bonuses[num_attackers.min(4)];
-        //     score_eg += attacker_bonuses_eg[num_attackers.min(4)];
-        // }
+            score_mg += attacker_bonuses[num_attackers.min(4)];
+            score_eg += attacker_bonuses_eg[num_attackers.min(4)];
+        }
 
-        // let w_moves = self.chess.estimate_move_count(false, &self.tables);
-        // let b_moves = self.chess.estimate_move_count(true, &self.tables);
-        // let move_ratio = w_moves as Eval - b_moves as Eval;
+        let w_moves = self.chess.estimate_move_count(false, &self.tables);
+        let b_moves = self.chess.estimate_move_count(true, &self.tables);
+        let move_ratio = w_moves as Eval - b_moves as Eval;
 
-        // // let all_pawns =
-        // //     bitboards[PieceIndex::WhitePawn as usize] | bitboards[PieceIndex::BlackPawn as usize];
+        // let all_pawns =
+        //     bitboards[PieceIndex::WhitePawn as usize] | bitboards[PieceIndex::BlackPawn as usize];
 
-        // let mut score =
-        //     ((score_mg as f32 * phase + score_eg as f32 * (1.0 - phase)) as Eval) + move_ratio * 5;
+        let mut score =
+            ((score_mg as f32 * phase + score_eg as f32 * (1.0 - phase)) as Eval) + move_ratio * 5;
 
-        // score += if self.chess.b_move() { -5 } else { 5 };
+        score += if self.chess.b_move() { -5 } else { 5 };
 
-        // let final_score = score * if self.chess.b_move() { -1 } else { 1 };
+        let final_score = score * if self.chess.b_move() { -1 } else { 1 };
 
-        // // assert!(
-        // //     self.evaluate_legacy() == final_score,
-        // //     "Legacy and simd evaluation mismatch for {} != {}. b_move= {}",
-        // //     self.evaluate_legacy(),
-        // //     final_score,
-        // //     self.chess.b_move()
-        // // );
+        // assert!(
+        //     self.evaluate_legacy() == final_score,
+        //     "Legacy and simd evaluation mismatch for {} != {}. b_move= {}",
+        //     self.evaluate_legacy(),
+        //     final_score,
+        //     self.chess.b_move()
+        // );
 
-        // final_score
+        final_score
     }
 
     #[inline(always)]

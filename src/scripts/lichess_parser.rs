@@ -3,7 +3,7 @@ use std::{
     io::{BufReader, Read, Write},
 };
 
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 
 use crate::{
     engine::{
@@ -30,6 +30,7 @@ pub struct ExtractParams {
     pub fdist_openings: bool,
     pub fno_duplicates: bool,
     pub fpick: MovePick,
+    pub fseed: u64,
 }
 
 #[derive(PartialEq, Eq)]
@@ -191,12 +192,6 @@ pub struct LichessDatabaseReader {
     state: LichessIteratorState,
 }
 
-pub struct LichessGameParser {
-    reader: LichessDatabaseReader,
-    r_start: usize,
-    r_size: usize,
-}
-
 impl LichessDatabaseReader {
     pub fn new(file: File) -> Self {
         LichessDatabaseReader {
@@ -275,6 +270,12 @@ impl LichessDatabaseReader {
             return Ok(Some((ch_start, BACKBUF_SIZE + bp, next_remsize)));
         }
     }
+}
+
+pub struct LichessGameParser {
+    reader: LichessDatabaseReader,
+    r_start: usize,
+    r_size: usize,
 }
 
 impl LichessGameParser {
@@ -382,7 +383,7 @@ pub fn parse_lichess_database(db_path: &str) -> anyhow::Result<LichessGameParser
 }
 
 pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
-    let mut rng = rand::rng();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(params.fseed);
 
     let mut it = parse_lichess_database(&db_path).unwrap();
     let mut storage = LichessDatabaseBuf::new();
@@ -450,33 +451,45 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) {
                         continue;
                     }
 
-                    let to_move = match params.fpick {
-                        MovePick::First => params.ffrom_ply,
-                        MovePick::Random => {
-                            let min = params.ffrom_ply;
-                            let max = moves.len().min(params.fto_ply);
+                    for _ in 0..5 {
+                        let to_move = match params.fpick {
+                            MovePick::First => params.ffrom_ply,
+                            MovePick::Random => {
+                                let min = params.ffrom_ply;
+                                let max = moves.len().min(params.fto_ply);
 
-                            if min >= max {
-                                continue;
+                                if min >= max {
+                                    continue;
+                                }
+
+                                rng.random_range(min..max)
                             }
+                        };
 
-                            rng.random_range(min..max)
+                        let mut game_board = board.clone();
+
+                        for mv in moves.iter().take(to_move) {
+                            unsafe { game_board.make_move(*mv, &tables) };
                         }
-                    };
 
-                    let mut game_board = board.clone();
+                        if params.fno_duplicates && !zobrist_set.insert(game_board.zobrist_key()) {
+                            // println!("Skipping duplicate position {}", game_board.gen_fen());
+                            continue;
+                        }
 
-                    for mv in moves.iter().take(to_move) {
-                        unsafe { game_board.make_move(*mv, &tables) };
+                        if game_count % 10_000 == 0 {
+                            println!(
+                                "Extracting positions {}/{} ({:.2}%)",
+                                game_count,
+                                params.fnum_positions,
+                                (game_count as f64 / params.fnum_positions as f64) * 100.0
+                            );
+                        }
+
+                        buffer.push_str(&format!("{}\n", game_board.gen_fen()));
+                        game_count += 1;
+                        break;
                     }
-
-                    if params.fno_duplicates && !zobrist_set.insert(game_board.zobrist_key()) {
-                        // println!("Skipping duplicate position {}", game_board.gen_fen());
-                        continue;
-                    }
-
-                    buffer.push_str(&format!("{}\n", game_board.gen_fen()));
-                    game_count += 1;
                 }
                 Some(Err(e)) => {
                     eprintln!(

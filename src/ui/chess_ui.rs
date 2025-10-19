@@ -221,7 +221,7 @@ impl ChessUi {
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("evaltest_v2.exe"),
+                Some("v13_nnue_y2_sort32_regtest.exe"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(
