@@ -3,6 +3,7 @@
 #![feature(likely_unlikely)]
 #![feature(cold_path)]
 #![feature(slice_swap_unchecked)]
+#![feature(isolate_most_least_significant_one)]
 
 use std::{cell::SyncUnsafeCell, thread::JoinHandle};
 
@@ -422,6 +423,7 @@ fn main() {
             let mut count = None;
             let mut threads = None;
             let mut out_path = None;
+            let mut positions_path = None;
             let mut annotated = false;
 
             loop {
@@ -434,6 +436,7 @@ fn main() {
                     "--from" => from = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--count" => count = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--positions" => positions_path = Some(arg_it.next().unwrap()),
                     "--annotated" => annotated = true,
                     "--out" => out_path = Some(arg_it.next().unwrap()),
                     _ => panic!("Unknown argument: {}", arg),
@@ -445,12 +448,8 @@ fn main() {
             );
 
             if annotated {
-                selfplay.play_annotated(
-                    threads.unwrap_or(1),
-                    ".\\data\\positions-comp-8to70-2017-1m.txt",
-                    from,
-                    count,
-                )
+                let positions_file_path = positions_path.expect("Expected positions path");
+                selfplay.play_annotated(threads.unwrap_or(1), &positions_file_path, from, count)
             } else {
                 todo!("Unannotated selfplay not implemented");
             }
@@ -460,6 +459,7 @@ fn main() {
                 ffrom_ply: 0,
                 fto_ply: 300,
                 fmin_ply: 0,
+                fseed: 0,
                 fnum_positions: 100,
                 fcompleted_only: false,
                 fdist_openings: false,
@@ -482,6 +482,7 @@ fn main() {
                     "--to-ply" => params.fto_ply = arg_it.next().unwrap().parse().unwrap(),
                     "--min-ply" => params.fmin_ply = arg_it.next().unwrap().parse().unwrap(),
                     "--count" => params.fnum_positions = arg_it.next().unwrap().parse().unwrap(),
+                    "--seed" => params.fseed = arg_it.next().unwrap().parse().unwrap(),
                     "--no-duplicates" => params.fno_duplicates = true,
                     "--dist-openings" => params.fdist_openings = true,
                     "--completed-only" => params.fcompleted_only = true,
