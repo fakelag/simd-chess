@@ -1,18 +1,21 @@
+use super::NnueConfig;
 use crate::{
     engine::chess_v2::{self, PieceIndex},
     pop_ls1b,
 };
 
-const HIDDEN_SIZE: usize = 128;
-const SCALE: i32 = 400;
-const QA: i16 = 255;
-const QB: i16 = 64;
+pub const NNUE_CONFIG: NnueConfig = NnueConfig {
+    hidden_size: 128,
+    quant_scale: 400,
+    qa: 255,
+    qb: 64,
+};
 
 type PairFeature = u32;
 
 #[inline]
 fn crelu(x: i16) -> i32 {
-    i32::from(x).clamp(0, i32::from(QA))
+    i32::from(x).clamp(0, i32::from(NNUE_CONFIG.qa))
 }
 
 // Maps PieceIndex -> NNUE index
@@ -32,7 +35,7 @@ const NNUE_PIECE_INDICES: [usize; 8] = [
 pub struct Network {
     feature_weights: [Accumulator; 768],
     feature_bias: Accumulator,
-    output_weights: [i16; 2 * HIDDEN_SIZE],
+    output_weights: [i16; 2 * NNUE_CONFIG.hidden_size],
     output_bias: i16,
 }
 
@@ -41,16 +44,24 @@ impl Network {
     pub fn evaluate(&self, us: &Accumulator, them: &Accumulator) -> i16 {
         let mut output = i32::from(self.output_bias);
 
-        for (&input, &weight) in us.vals.iter().zip(&self.output_weights[..HIDDEN_SIZE]) {
+        for (&input, &weight) in us
+            .vals
+            .iter()
+            .zip(&self.output_weights[..NNUE_CONFIG.hidden_size])
+        {
             output += crelu(input) * i32::from(weight);
         }
 
-        for (&input, &weight) in them.vals.iter().zip(&self.output_weights[HIDDEN_SIZE..]) {
+        for (&input, &weight) in them
+            .vals
+            .iter()
+            .zip(&self.output_weights[NNUE_CONFIG.hidden_size..])
+        {
             output += crelu(input) * i32::from(weight);
         }
 
-        output *= SCALE;
-        output /= i32::from(QA) * i32::from(QB);
+        output *= NNUE_CONFIG.quant_scale;
+        output /= i32::from(NNUE_CONFIG.qa) * i32::from(NNUE_CONFIG.qb);
 
         output as i16
     }
@@ -59,7 +70,7 @@ impl Network {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(C, align(64))]
 pub struct Accumulator {
-    vals: [i16; HIDDEN_SIZE],
+    vals: [i16; NNUE_CONFIG.hidden_size],
 }
 
 impl Accumulator {
@@ -101,10 +112,10 @@ impl AccumulatorPair {
     pub fn new() -> Self {
         Self {
             white: Accumulator {
-                vals: [0; HIDDEN_SIZE],
+                vals: [0; NNUE_CONFIG.hidden_size],
             },
             black: Accumulator {
-                vals: [0; HIDDEN_SIZE],
+                vals: [0; NNUE_CONFIG.hidden_size],
             },
         }
     }
@@ -148,7 +159,7 @@ impl AccumulatorPair {
         let white_sub = &net.feature_weights[(sub >> 16) as usize].vals;
         let black_sub = &net.feature_weights[(sub & 0xFFFF) as usize].vals;
 
-        for i in 0..HIDDEN_SIZE {
+        for i in 0..NNUE_CONFIG.hidden_size {
             self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub[i];
             self.black.vals[i] = src.black.vals[i] + black_add[i] - black_sub[i];
         }
@@ -170,7 +181,7 @@ impl AccumulatorPair {
         let white_sub2 = &net.feature_weights[(sub2 >> 16) as usize].vals;
         let black_sub2 = &net.feature_weights[(sub2 & 0xFFFF) as usize].vals;
 
-        for i in 0..HIDDEN_SIZE {
+        for i in 0..NNUE_CONFIG.hidden_size {
             self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub1[i] - white_sub2[i];
             self.black.vals[i] = src.black.vals[i] + black_add[i] - black_sub1[i] - black_sub2[i];
         }
@@ -195,7 +206,7 @@ impl AccumulatorPair {
         let white_sub2 = &net.feature_weights[(sub2 >> 16) as usize].vals;
         let black_sub2 = &net.feature_weights[(sub2 & 0xFFFF) as usize].vals;
 
-        for i in 0..HIDDEN_SIZE {
+        for i in 0..NNUE_CONFIG.hidden_size {
             self.white.vals[i] =
                 src.white.vals[i] + white_add1[i] + white_add2[i] - white_sub1[i] - white_sub2[i];
             self.black.vals[i] =

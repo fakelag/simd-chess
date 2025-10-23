@@ -92,10 +92,7 @@ pub fn static_exchange_eval(
         );
         let attacker_sq_mask = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
 
-        (
-            piece_index as u8,
-            attacker_sq_mask.isolate_least_significant_one(),
-        )
+        (piece_index as u8, attacker_sq_mask.isolate_lowest_one())
     };
 
     while stm_attackers != 0 {
@@ -269,10 +266,7 @@ pub fn see_threshold(
         );
         let attacker_sq_mask = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
 
-        (
-            piece_index as u8,
-            attacker_sq_mask.isolate_least_significant_one(),
-        )
+        (piece_index as u8, attacker_sq_mask.isolate_lowest_one())
     };
 
     // 3. Start calculating capture sequence alternating sides.

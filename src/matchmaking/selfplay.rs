@@ -115,17 +115,20 @@ impl SelfplayTrainer {
                 if self.stats_flushed_at.elapsed().as_secs() >= 60 * 1 {
                     let games_per_minute = self.stats_num_games_cp as f64
                         / (self.stats_flushed_at.elapsed().as_secs_f64() / 60.0);
+                    let games_per_minute_stable = self.stats_num_games_total as f64
+                        / (start_at.elapsed().as_secs_f64() / 60.0);
                     println!(
-                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02}. {} total positions so far, ~{:.02} per game avg. Binpack size: {}. ETA: {}",
+                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. Binpack size: {}. ETA: {}",
                         self.stats_num_games_total,
                         self.stats_flushed_at.elapsed().as_secs_f64() / 60.0,
                         games_per_minute,
+                        games_per_minute_stable,
                         self.stats_positions_total,
                         self.stats_positions_total as f64 / self.stats_num_games_total as f64,
                         util::byte_size_string(self.binpack_size_bytes()),
                         util::time_format(
                             ((num_positions_total - self.stats_num_games_total) as f64
-                                / games_per_minute
+                                / games_per_minute_stable
                                 * 60.0
                                 * 1000.0) as u64
                         )
@@ -142,7 +145,7 @@ impl SelfplayTrainer {
             println!(
                 "Selfplay finished with {} games in {}. {} total positions annotated, games per minute ~{}. binpack size: ~{}",
                 self.stats_num_games_total,
-                util::time_format(self.stats_flushed_at.elapsed().as_millis() as u64),
+                util::time_format(start_at.elapsed().as_millis() as u64),
                 self.stats_positions_total,
                 self.stats_num_games_total as f64 / (start_at.elapsed().as_secs_f64() / 60.0),
                 util::byte_size_string(self.binpack_size_bytes()),
@@ -299,6 +302,8 @@ impl SelfplayTrainer {
 
             tx.send(training_entries.clone()).unwrap();
             training_entries.clear();
+
+            // std::thread::yield_now();
         }
 
         if DEBUG {

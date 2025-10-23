@@ -454,6 +454,44 @@ fn main() {
                 todo!("Unannotated selfplay not implemented");
             }
         }
+        "train" => {
+            let mut arg_it = std::env::args().skip(2);
+            let name = arg_it.next().expect("Expected training name");
+
+            let mut out_path = None;
+            let mut valid_path = None;
+            let mut bp_paths: Vec<String> = vec![];
+
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--paths" => bp_paths.push(arg_it.next().unwrap()),
+                    "--validate" => valid_path = Some(arg_it.next().unwrap()),
+                    "--out" => out_path = Some(arg_it.next().unwrap()),
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            if bp_paths.is_empty() {
+                panic!("Expected at least one binpack path");
+            }
+
+            let path_refs = bp_paths.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
+
+            nnue::training::train(
+                &name,
+                path_refs.as_slice(),
+                &out_path.expect("Expected output path"),
+                valid_path.as_deref(),
+                &nnue::nnue::NNUE_CONFIG,
+            );
+
+            Ok(())
+        }
         "lext" => {
             let mut params = lichess_parser::ExtractParams {
                 ffrom_ply: 0,

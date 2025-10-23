@@ -153,7 +153,7 @@ impl<'a> Search<'a> {
         rt: RepetitionTable,
     ) -> Search<'a> {
         let mut s = Search {
-            nnue: nnue_lazy_load!("../../../nnue/y2.bin"), // nnue_load!("../../../nnue/y2.bin"),
+            nnue: nnue_lazy_load!("../../../nnue/z1.bin"), // nnue_lazy_load!("../../../nnue/y2.bin"),
             sig: None,
             chess: chess_v2::ChessGame::new(),
             move_list: [0; 256],
@@ -907,26 +907,21 @@ impl<'a> Search<'a> {
 
     #[inline(always)]
     pub fn evaluate(&mut self) -> Eval {
-        // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
-        //     return eval;
-        // }
-        // let final_score = self.nnue.evaluate(self.chess.b_move()) as Eval;
-        // self.et.store(self.chess.zobrist_key(), final_score);
-        // return final_score;
-
-        // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
-        //     return eval;
-        // }
-        let final_score = self.eval_hc();
-        // self.et.store(self.chess.zobrist_key(), final_score);
-
-        /*
-            Checkpoint after 445 games (1.00 mins). Games per minute: ~444.55. 42270 total positions so far, ~94.99 per game avg. Binpack size: 0 B. ETA: 21:29.604
-            Checkpoint after 888 games (1.00 mins). Games per minute: ~442.78. 85435 total positions so far, ~96.21 per game avg. Binpack size: 0 B. ETA: 20:34.751
-            Checkpoint after 1300 games (1.00 mins). Games per minute: ~411.68. 127702 total positions so far, ~98.23 per game avg. Binpack size: 0 B. ETA: 21:07.983
-            Checkpoint after 1723 games (1.00 mins). Games per minute: ~421.98. 170726 total positions so far, ~99.09 per game avg. Binpack size: 0 B. ETA: 19:36.882
-        */
-        return final_score;
+        if true {
+            // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
+            //     return eval;
+            // }
+            let final_score = self.nnue.evaluate(self.chess.b_move()) as Eval;
+            // self.et.store(self.chess.zobrist_key(), final_score);
+            return final_score;
+        } else {
+            // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
+            //     return eval;
+            // }
+            let final_score = self.eval_hc();
+            // self.et.store(self.chess.zobrist_key(), final_score);
+            return final_score;
+        }
     }
 
     #[inline(always)]
