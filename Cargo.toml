@@ -17,6 +17,7 @@ anyhow = "1.0.98"
 crossbeam = "0.8.4"
 core_affinity = "0.8.3"
 sfbinpack = { version = "0.4.3", features = ["bmi2"] }
+bullet = { git = "https://github.com/jw1912/bullet", rev = "47f2c84", package = "bullet_lib" }
 
 [profile.release]
 debug = true
