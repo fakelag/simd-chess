@@ -508,6 +508,7 @@ fn main() {
                 fdist_openings: false,
                 fno_duplicates: false,
                 fpick: lichess_parser::MovePick::Random,
+                fattempts_per_position: 1,
             };
 
             let mut arg_it = std::env::args().skip(2);
@@ -538,9 +539,7 @@ fn main() {
             let in_path = in_path.expect("Expected path to Lichess database");
             let out_path = out_path.expect("Expected output path");
 
-            lichess_parser::lichess_extract(&in_path, &out_path, params);
-
-            Ok(())
+            lichess_parser::lichess_extract(&in_path, &out_path, params)
         }
         "gui" => chess_ui(),
         "uci" => {
