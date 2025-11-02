@@ -16,7 +16,7 @@ use crate::{
         tables::{self},
     },
     nnue::nnue::{self, UpdatableNnue},
-    nnue_lazy_load,
+    nnue_load,
 };
 
 const PV_DEPTH: usize = 64;
@@ -75,7 +75,7 @@ pub struct Search<'a> {
     tables: &'a tables::Tables,
     sig: Option<AbortSignal>,
 
-    nnue: Box<nnue::LazyNnue>,
+    nnue: Box<nnue::LazyNnue<256>>,
 
     ply: u8,
     is_stopping: bool,
@@ -153,7 +153,7 @@ impl<'a> Search<'a> {
         rt: RepetitionTable,
     ) -> Search<'a> {
         let mut s = Search {
-            nnue: nnue_lazy_load!("../../../nnue/z1.bin"), // nnue_lazy_load!("../../../nnue/y2.bin"),
+            nnue: nnue_load!("../../../nnue/z2-256.bin", 256), // nnue_lazy_load!("../../../nnue/y2.bin"),
             sig: None,
             chess: chess_v2::ChessGame::new(),
             move_list: [0; 256],

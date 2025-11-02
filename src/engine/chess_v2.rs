@@ -1635,7 +1635,7 @@ impl ChessGame {
         depth: u8,
         tables: &Tables,
         mut moves: Option<&mut Vec<(String, u64)>>,
-        mut nnue: Option<&mut nnue::Nnue>,
+        mut nnue: Option<&mut impl nnue::UpdatableNnue>,
     ) -> u64 {
         if depth == 0 {
             return 1;
@@ -1648,7 +1648,6 @@ impl ChessGame {
         let move_count = self.gen_moves_avx512::<false>(tables, &mut move_list[2..]);
 
         let board_copy = self.clone();
-        let acc_copy = nnue.as_mut().map(|n| n.acc.clone());
 
         let mut i = 2;
         while i < move_count + 2 {
@@ -1684,16 +1683,9 @@ impl ChessGame {
                     self.material,
                     self.calc_material(),
                 );
+
                 if let Some(nnue) = nnue.as_mut() {
                     nnue.make_move(nnue_update.unwrap());
-                    let mut expected_pair = nnue::AccumulatorPair::new();
-                    expected_pair.load(self, &nnue.net);
-                    assert_eq!(
-                        nnue.acc,
-                        expected_pair,
-                        "NNUE accumulator mismatch after move {}",
-                        util::move_string_dbg(mv),
-                    );
                 }
                 let nodes = self.perft(depth - 1, tables, None, nnue.as_mut().map(|n| &mut **n));
                 node_count += nodes;
@@ -1701,12 +1693,13 @@ impl ChessGame {
                 if let Some(ref mut moves) = moves {
                     moves.push((util::move_string(mv), nodes));
                 }
+
+                if let Some(nnue) = nnue.as_mut() {
+                    nnue.rollback_move();
+                }
             }
 
             *self = board_copy;
-            if let Some(nnue) = nnue.as_mut() {
-                nnue.acc = acc_copy.unwrap();
-            }
         }
 
         node_count
@@ -2340,7 +2333,7 @@ mod tests {
         depth: u8,
         fen: &'static str,
         moves: Vec<String>,
-        nnue: Box<nnue::Nnue>,
+        nnue: Box<nnue::LazyNnue<128>>,
     }
 
     impl PerftTestContext {
@@ -2350,7 +2343,7 @@ mod tests {
 
             assert!(board.load_fen(fen, &tables).is_ok());
 
-            let mut nnue = nnue_load!("../../nnue/x2.bin");
+            let mut nnue = nnue_load!("../../nnue/x2.bin", 128);
             nnue.load(&board);
 
             Self {
@@ -2374,7 +2367,7 @@ mod tests {
                 depth,
                 &self.tables,
                 Some(&mut perft_results),
-                Some(&mut self.nnue),
+                Some(&mut *self.nnue),
             );
 
             if !PERFT_MOVE_VERIFICATION {

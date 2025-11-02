@@ -326,12 +326,8 @@ impl ApplicationHandler for App {
                         self.chess_ui.draw(DrawCtx { ui, textures });
                     }
 
-                    let fps = 1.0 / delta_s.as_secs_f64();
-                    window.window.set_title(&format!(
-                        "chess | fps={:.1}, ft={:.3} ms",
-                        fps,
-                        delta_s.as_secs_f64() * 1000.0
-                    ));
+                    // let fps = 1.0 / delta_s.as_secs_f64();
+                    window.window.set_title("simd-chess gui");
                 }
 
                 let mut encoder: wgpu::CommandEncoder = window

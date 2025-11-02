@@ -4,6 +4,8 @@
 #![feature(cold_path)]
 #![feature(slice_swap_unchecked)]
 #![feature(isolate_most_least_significant_one)]
+#![feature(adt_const_params)]
+#![feature(generic_const_exprs)]
 
 use std::{cell::SyncUnsafeCell, thread::JoinHandle};
 
@@ -462,6 +464,8 @@ fn main() {
             let mut valid_path = None;
             let mut bp_paths: Vec<String> = vec![];
 
+            let mut config: nnue::NnueConfig = nnue::nnue::NNUE_CONFIG;
+
             loop {
                 let arg = match arg_it.next() {
                     Some(a) => a,
@@ -472,6 +476,7 @@ fn main() {
                     "--paths" => bp_paths.push(arg_it.next().unwrap()),
                     "--validate" => valid_path = Some(arg_it.next().unwrap()),
                     "--out" => out_path = Some(arg_it.next().unwrap()),
+                    "--hs" => config.hidden_size = arg_it.next().unwrap().parse().unwrap(),
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
@@ -487,7 +492,7 @@ fn main() {
                 path_refs.as_slice(),
                 &out_path.expect("Expected output path"),
                 valid_path.as_deref(),
-                &nnue::nnue::NNUE_CONFIG,
+                &config,
             );
 
             Ok(())

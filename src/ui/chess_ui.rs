@@ -444,7 +444,6 @@ impl ChessUi {
                 ui.same_line();
 
                 ui.child_window("side").border(true).build(|| {
-                    ui.text(format!("is_valid: {}", self.matchmaking.board.is_valid()));
                     ui.text(format!(
                         "b_move: {}",
                         if self.matchmaking.board.b_move() {
@@ -454,26 +453,16 @@ impl ChessUi {
                         }
                     ));
 
-                    ui.text(format!(
-                        "zobrist_key: {:016X}",
-                        self.matchmaking.board.zobrist_key()
-                    ));
+                    ui.text(format!("{:016X}", self.matchmaking.board.zobrist_key()));
 
                     ui.text(format!(
-                        "half_moves: {}, full_moves: {}",
+                        "hm: {}, fm: {}",
                         self.matchmaking.board.half_moves(),
                         self.matchmaking.board.full_moves()
                     ));
 
                     ui.text(format!(
-                        "in_check: {}",
-                        self.matchmaking
-                            .board
-                            .in_check(&self.matchmaking.tables, self.matchmaking.board.b_move())
-                    ));
-
-                    ui.text(format!(
-                        "material: {} / {}",
+                        "mat: {} / {}",
                         self.matchmaking.board.material()[0],
                         self.matchmaking.board.material()[1]
                     ));

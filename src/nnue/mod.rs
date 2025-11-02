@@ -1,3 +1,4 @@
+#[derive(std::marker::ConstParamTy, PartialEq, Eq)]
 pub struct NnueConfig {
     pub hidden_size: usize,
     pub quant_scale: i32,

@@ -85,6 +85,10 @@ pub fn train(
         loader::SfBinpackLoader::new_concat_multiple(binpack_paths, buffer_size_mb, threads, filter)
     };
 
+    println!(
+        "NNUE Config: hidden_size={}, qa={}, qb={}, quant_scale={}",
+        cfg.hidden_size, cfg.qa, cfg.qb, cfg.quant_scale
+    );
     println!("Starting training with datasets: {:?}", binpack_paths);
 
     std::thread::sleep(std::time::Duration::from_secs(1));
