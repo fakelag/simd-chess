@@ -6,11 +6,480 @@ use crate::{
     util::{self, Side},
 };
 
-#[derive(Debug, Clone, Copy)]
-enum PgnState {
+struct PgnParser<'a> {
+    input: &'a str,
+    pos: usize,
+    tables: &'a tables::Tables,
+    board: &'a mut chess_v2::ChessGame,
+    moves_out: &'a mut Vec<u16>,
+    side: Side,
+    move_number: usize,
+}
+
+#[derive(Debug)]
+enum PgnMoveOrTermination {
     MoveNumber,
-    Move(Side, bool),
-    Comment,
+    Termination,
+}
+
+impl<'a> PgnParser<'a> {
+    pub fn new(
+        input: &'a str,
+        board: &'a mut chess_v2::ChessGame,
+        tables: &'a tables::Tables,
+        moves_out: &'a mut Vec<u16>,
+    ) -> PgnParser<'a> {
+        Self {
+            input,
+            pos: 0,
+            board,
+            tables,
+            moves_out,
+            side: Side::White,
+            move_number: 1,
+        }
+    }
+
+    pub fn parse(&mut self) -> anyhow::Result<()> {
+        if self.board.b_move() {
+            return Err(anyhow::anyhow!("PGN parsing must start from white to move"));
+        }
+
+        self.side = Side::White;
+
+        self.consume_whitespace();
+
+        loop {
+            if self.is_eof() {
+                break;
+            }
+
+            let move_number = self.consume_move_number_or_termination()?;
+
+            match move_number {
+                PgnMoveOrTermination::Termination => break,
+                PgnMoveOrTermination::MoveNumber => {
+                    self.consume_and_make_move()?;
+
+                    if !self.board.b_move() {
+                        continue;
+                    }
+
+                    match self.peek() {
+                        Some(b'0'..=b'9') | Some(b'*') => {
+                            // Either an ending or a move number continuation
+                            match self.consume_move_number_or_termination()? {
+                                PgnMoveOrTermination::Termination => break,
+                                PgnMoveOrTermination::MoveNumber => {}
+                            }
+                        }
+                        Some(_) => {}
+                        None => break,
+                    };
+
+                    self.consume_and_make_move()?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_eof(&self) -> bool {
+        self.pos >= self.input.len()
+    }
+
+    fn consume(&mut self) -> Option<u8> {
+        if self.pos >= self.input.len() {
+            return None;
+        }
+
+        let byte = self.input.as_bytes()[self.pos];
+        self.pos += 1;
+        Some(byte)
+    }
+
+    fn consume_expect(&mut self, expected: u8) -> anyhow::Result<()> {
+        match self.consume() {
+            Some(b) if b == expected => Ok(()),
+            Some(b) => Err(anyhow::anyhow!(
+                "Expected '{}' but found '{}' in pgn",
+                expected as char,
+                b as char
+            )),
+            None => Err(anyhow::anyhow!(
+                "Expected '{}' but found end of input in pgn",
+                expected as char
+            )),
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        if self.pos >= self.input.len() {
+            return None;
+        }
+
+        Some(self.input.as_bytes()[self.pos])
+    }
+
+    fn consume_while<F>(&mut self, condition: F) -> &str
+    where
+        F: Fn(u8) -> bool,
+    {
+        let start = self.pos;
+
+        while let Some(byte) = self.peek() {
+            if condition(byte) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        &self.input[start..self.pos]
+    }
+
+    fn consume_whitespace(&mut self) {
+        self.consume_while(|b| b.is_ascii_whitespace());
+    }
+
+    fn consume_move_number_or_termination(&mut self) -> anyhow::Result<PgnMoveOrTermination> {
+        let movenum_or_term = self.consume_while(|b| !b.is_ascii_whitespace() && b != b'.');
+
+        match movenum_or_term {
+            "1-0" | "0-1" | "1/2-1/2" | "*" => {
+                self.consume_whitespace();
+                return Ok(PgnMoveOrTermination::Termination);
+            }
+            _ => {
+                let move_number: usize = movenum_or_term.parse().map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to parse move number '{}' in pgn: {}",
+                        movenum_or_term,
+                        e
+                    )
+                })?;
+
+                self.consume_expect(b'.')?;
+
+                if self.board.b_move() {
+                    self.consume_expect(b'.')?;
+                    self.consume_expect(b'.')?;
+                }
+
+                self.consume_whitespace();
+
+                if move_number != self.move_number {
+                    return Err(anyhow::anyhow!(
+                        "Expected move number {} but found {} in pgn",
+                        self.move_number,
+                        move_number
+                    ));
+                }
+
+                return Ok(PgnMoveOrTermination::MoveNumber);
+            }
+        };
+    }
+
+    fn consume_and_make_move(&mut self) -> anyhow::Result<u16> {
+        let mut pseudolegal_moves = [0u16; 256];
+        let pseudolegal_moves_count = self
+            .board
+            .gen_moves_avx512::<false>(&self.tables, &mut pseudolegal_moves);
+
+        let (start, end, len) = {
+            let start = self.pos;
+            self.consume_while(|b| !b.is_ascii_whitespace() && b != b'!' && b != b'?');
+            let end = self.pos;
+
+            self.consume_while(|b| b.is_ascii_whitespace() || b == b'!' || b == b'?');
+
+            if self.peek() == Some(b'{') {
+                self.consume(); // consume '{'
+                self.consume_while(|b| b != b'}');
+                self.consume(); // consume '}'
+                self.consume_whitespace();
+            }
+
+            (start, end, end - start)
+        };
+
+        let move_string = || &self.input[start..end];
+
+        let castle_queen = len > 4 && &self.input[start..start + 5] == "O-O-O";
+        let castle_king = len > 2 && &self.input[start..start + 3] == "O-O";
+
+        let move_to_make = if castle_king || castle_queen {
+            let mv_index = (0..pseudolegal_moves_count).find(|&mv_index| {
+                let mv = pseudolegal_moves[mv_index];
+
+                let castle_flag = if castle_queen {
+                    chess_v2::MV_FLAGS_CASTLE_QUEEN
+                } else {
+                    chess_v2::MV_FLAGS_CASTLE_KING
+                };
+
+                if mv & chess_v2::MV_FLAGS == castle_flag {
+                    let mut board_copy = self.board.clone();
+
+                    let is_legal = unsafe { board_copy.make_move(mv, self.tables) }
+                        && !board_copy.in_check(self.tables, !board_copy.b_move());
+
+                    return is_legal;
+                }
+
+                false
+            });
+
+            match mv_index {
+                Some(mv_index) => pseudolegal_moves[mv_index],
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "No legal castling move found for pgn move: {}",
+                        move_string()
+                    ));
+                }
+            }
+        } else {
+            match move_string() {
+                _ => {
+                    let mut dst_file: Option<u8> = None;
+                    let mut src_file: Option<u8> = None;
+                    let mut src_rank: Option<u8> = None;
+                    let mut dst_rank: Option<u8> = None;
+                    let mut piece = chess_v2::PieceIndex::WhitePawn;
+                    let mut promote_to = None;
+                    let mut is_capture = false;
+                    let mut is_checkmate = false;
+                    let mut is_check = false;
+
+                    for move_part in move_string().chars() {
+                        match move_part {
+                            'a'..='h' => {
+                                if let Some(dst_file) = dst_file {
+                                    src_file = Some(dst_file);
+                                }
+                                dst_file = Some(move_part as u8 - b'a');
+                            }
+                            'x' => is_capture = true,
+                            '+' => is_check = true,
+                            '#' => {
+                                is_checkmate = true;
+                                is_check = true;
+                            }
+                            '1'..='8' => {
+                                if let Some(dst_rank) = dst_rank {
+                                    src_rank = Some(dst_rank);
+                                }
+                                dst_rank = Some(move_part as u8 - b'1');
+                            }
+                            'N' | 'B' | 'R' | 'Q' | 'K' if dst_file.is_none() => {
+                                piece = match move_part {
+                                    'N' => chess_v2::PieceIndex::WhiteKnight,
+                                    'B' => chess_v2::PieceIndex::WhiteBishop,
+                                    'R' => chess_v2::PieceIndex::WhiteRook,
+                                    'Q' => chess_v2::PieceIndex::WhiteQueen,
+                                    'K' => chess_v2::PieceIndex::WhiteKing,
+                                    'P' => chess_v2::PieceIndex::WhitePawn,
+                                    _ => {
+                                        return Err(anyhow::anyhow!(
+                                            "Invalid piece in pgn move: {}",
+                                            move_part
+                                        ));
+                                    }
+                                };
+                            }
+                            'Q' | 'R' | 'B' | 'N' if dst_file.is_some() => {
+                                if promote_to.is_some() {
+                                    return Err(anyhow::anyhow!(
+                                        "Multiple promotion pieces in pgn move: {}",
+                                        move_part
+                                    ));
+                                }
+
+                                if piece != chess_v2::PieceIndex::WhitePawn {
+                                    return Err(anyhow::anyhow!(
+                                        "Non-pawn promotion in pgn move: {}",
+                                        move_part
+                                    ));
+                                }
+
+                                match (self.side, dst_rank) {
+                                    (Side::White, Some(7)) => {}
+                                    (Side::Black, Some(0)) => {}
+                                    _ => {
+                                        return Err(anyhow::anyhow!(
+                                            "Invalid promotion rank in pgn move: {} (side={:?})",
+                                            move_part,
+                                            self.side
+                                        ));
+                                    }
+                                }
+
+                                promote_to = Some(match move_part {
+                                    'Q' => chess_v2::PieceIndex::WhiteQueen,
+                                    'R' => chess_v2::PieceIndex::WhiteRook,
+                                    'B' => chess_v2::PieceIndex::WhiteBishop,
+                                    'N' => chess_v2::PieceIndex::WhiteKnight,
+                                    _ => unreachable!(),
+                                });
+                            }
+                            '?' | '!' => { /* Ignore annotations */ }
+                            '=' | '(' | ')' | '/' => { /* Separators for promotions */ }
+                            c => {
+                                return Err(anyhow::anyhow!(
+                                    "Invalid character '{}' in pgn move: {}",
+                                    c,
+                                    move_part
+                                ));
+                            }
+                        }
+                    }
+
+                    if !dst_file.is_some() {
+                        return Err(anyhow::anyhow!(
+                            "Destination file must be specified in an pgn move: {}",
+                            move_string()
+                        ));
+                    }
+
+                    if !dst_rank.is_some() {
+                        return Err(anyhow::anyhow!(
+                            "Destination rank must be specified in an pgn move: {}",
+                            move_string()
+                        ));
+                    }
+
+                    // Fix piece for side
+                    piece = chess_v2::PieceIndex::from((piece as usize) + (self.side as usize * 8));
+
+                    let board_copy = self.board.clone();
+
+                    let mut found_move = None;
+                    for mv_index in 0..pseudolegal_moves_count {
+                        let mut mv = pseudolegal_moves[mv_index];
+
+                        let src_sq = (mv & 0x3F) as u8;
+                        let dst_sq = ((mv >> 6) & 0x3F) as u8;
+
+                        if let Some(src_file) = src_file {
+                            if src_sq % 8 != src_file {
+                                continue;
+                            }
+                        }
+
+                        if let Some(src_rank) = src_rank {
+                            if src_sq / 8 != src_rank {
+                                continue;
+                            }
+                        }
+
+                        if dst_sq % 8 != dst_file.unwrap() {
+                            continue;
+                        }
+
+                        if dst_sq / 8 != dst_rank.unwrap() {
+                            continue;
+                        }
+
+                        if is_capture
+                            && (mv & chess_v2::MV_FLAGS) != chess_v2::MV_FLAG_EPCAP
+                            && self.board.piece_at(dst_sq) == PieceIndex::WhiteNullPiece as usize
+                        {
+                            continue;
+                        }
+
+                        let sq_piece = self.board.piece_at(src_sq);
+
+                        if sq_piece != piece as usize {
+                            continue;
+                        }
+
+                        if let Some(promote_to) = promote_to {
+                            let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
+                            match mv & chess_v2::MV_FLAGS_PR_MASK {
+                                chess_v2::MV_FLAGS_PR_QUEEN => match promote_to {
+                                    chess_v2::PieceIndex::WhiteQueen => {}
+                                    chess_v2::PieceIndex::WhiteRook => {
+                                        mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK;
+                                    }
+                                    chess_v2::PieceIndex::WhiteBishop => {
+                                        mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP;
+                                    }
+                                    chess_v2::PieceIndex::WhiteKnight => {
+                                        mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
+                                    }
+                                    _ => continue,
+                                },
+                                _ => continue,
+                            }
+                        }
+
+                        let is_legal = unsafe { self.board.make_move(mv, self.tables) }
+                            && !self.board.in_check(self.tables, !self.board.b_move());
+
+                        *self.board = board_copy;
+                        if !is_legal {
+                            continue;
+                        }
+
+                        match found_move {
+                            Some(existing) => {
+                                // *board = board_copy;
+                                return Err(anyhow::anyhow!(
+                                    "Expected exactly one move for opening part: {}, found multiple: {} and {}",
+                                    move_string(),
+                                    util::move_string(existing),
+                                    util::move_string(mv),
+                                ));
+                            }
+                            None => {
+                                found_move = Some(mv);
+                            }
+                        }
+                    }
+
+                    match found_move {
+                        Some(mv) => mv,
+                        None => {
+                            return Err(anyhow::anyhow!(
+                                "Expected exactly one move for opening part: {}, found none",
+                                move_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        };
+
+        if unsafe { !self.board.make_move(move_to_make, &self.tables) } {
+            return Err(anyhow::anyhow!(
+                "Invalid move \"{}\" in pgn",
+                util::move_string(move_to_make)
+            ));
+        }
+
+        if self.board.in_check(&self.tables, !self.board.b_move()) {
+            return Err(anyhow::anyhow!(
+                "Invalid move \"{}\" leaves the king in check",
+                util::move_string(move_to_make)
+            ));
+        }
+
+        self.moves_out.push(move_to_make);
+
+        self.side = match self.board.b_move() {
+            true => Side::Black,
+            false => Side::White,
+        };
+
+        if !self.board.b_move() {
+            self.move_number += 1;
+        }
+
+        Ok(move_to_make)
+    }
 }
 
 pub fn parse_pgn<'a>(
@@ -19,352 +488,18 @@ pub fn parse_pgn<'a>(
     tables: &tables::Tables,
     moves_out: &mut Vec<u16>,
 ) -> anyhow::Result<()> {
-    let mut pgn_state = PgnState::MoveNumber;
-
-    let mut it = move_str.split_whitespace();
-
-    loop {
-        let move_part = match it.next() {
-            Some(part) => part,
-            None => break,
-        };
-
-        match (pgn_state, move_part) {
-            (PgnState::Comment, "}") => pgn_state = PgnState::MoveNumber,
-            (PgnState::Comment, _) => continue,
-            (PgnState::MoveNumber, part) => {
-                match part {
-                    "1-0" | "0-1" | "1/2-1/2" | "*" => break,
-                    _ => {}
-                }
-                if part.starts_with('{') {
-                    pgn_state = PgnState::Comment;
-                    continue;
-                }
-                if !part.contains('.') {
-                    return Err(anyhow::anyhow!("Expected move number in pgn: {}", part));
-                }
-
-                let is_black_continuation = part.contains("...");
-
-                if !board.b_move() && is_black_continuation {
-                    return Err(anyhow::anyhow!(
-                        "Pgn should not start with a black move: {}",
-                        part
-                    ));
-                }
-                pgn_state = PgnState::Move(Side::from(board.b_move()), is_black_continuation);
-
-                if !part.ends_with('.') {
-                    let next_part_start_index = part.rfind('.').unwrap() + 1;
-
-                    let offset =
-                        part.as_ptr() as usize - move_str.as_ptr() as usize + next_part_start_index;
-
-                    it = move_str[offset..].split_whitespace();
-                }
-            }
-            (PgnState::Move(side, both_moves), part) => {
-                let mut pseudolegal_moves = [0u16; 256];
-                let pseudolegal_moves_count =
-                    board.gen_moves_avx512::<false>(&tables, &mut pseudolegal_moves);
-
-                let part_len = part.len();
-
-                let castle_queen = part_len > 4 && &part[0..5] == "O-O-O";
-                let castle_king = part_len > 2 && &part[0..3] == "O-O";
-
-                let move_to_make = if castle_king || castle_queen {
-                    let mv_index = (0..pseudolegal_moves_count).find(|&mv_index| {
-                        let mv = pseudolegal_moves[mv_index];
-
-                        let castle_flag = if castle_queen {
-                            chess_v2::MV_FLAGS_CASTLE_QUEEN
-                        } else {
-                            chess_v2::MV_FLAGS_CASTLE_KING
-                        };
-
-                        if mv & chess_v2::MV_FLAGS == castle_flag {
-                            let mut board_copy = board.clone();
-
-                            let is_legal = unsafe { board_copy.make_move(mv, tables) }
-                                && !board_copy.in_check(tables, !board_copy.b_move());
-
-                            return is_legal;
-                        }
-
-                        false
-                    });
-
-                    match mv_index {
-                        Some(mv_index) => pseudolegal_moves[mv_index],
-                        None => {
-                            return Err(anyhow::anyhow!(
-                                "No legal castling move found for pgn move: {}",
-                                part
-                            ));
-                        }
-                    }
-                } else {
-                    match part {
-                        "{" => {
-                            pgn_state = PgnState::Comment;
-                            continue;
-                        }
-                        "1-0" | "0-1" | "1/2-1/2" | "*" => break,
-                        _ => {
-                            let mut dst_file: Option<u8> = None;
-                            let mut src_file: Option<u8> = None;
-                            let mut src_rank: Option<u8> = None;
-                            let mut dst_rank: Option<u8> = None;
-                            let mut piece = chess_v2::PieceIndex::WhitePawn;
-                            let mut promote_to = None;
-                            let mut is_capture = false;
-                            let mut is_checkmate = false;
-                            let mut is_check = false;
-
-                            for move_part in part.chars() {
-                                match move_part {
-                                    'a'..='h' => {
-                                        if let Some(dst_file) = dst_file {
-                                            src_file = Some(dst_file);
-                                        }
-                                        dst_file = Some(move_part as u8 - b'a');
-                                    }
-                                    'x' => is_capture = true,
-                                    '+' => is_check = true,
-                                    '#' => {
-                                        is_checkmate = true;
-                                        is_check = true;
-                                    }
-                                    '1'..='8' => {
-                                        if let Some(dst_rank) = dst_rank {
-                                            src_rank = Some(dst_rank);
-                                        }
-                                        dst_rank = Some(move_part as u8 - b'1');
-                                    }
-                                    'N' | 'B' | 'R' | 'Q' | 'K' if dst_file.is_none() => {
-                                        piece = match move_part {
-                                            'N' => chess_v2::PieceIndex::WhiteKnight,
-                                            'B' => chess_v2::PieceIndex::WhiteBishop,
-                                            'R' => chess_v2::PieceIndex::WhiteRook,
-                                            'Q' => chess_v2::PieceIndex::WhiteQueen,
-                                            'K' => chess_v2::PieceIndex::WhiteKing,
-                                            'P' => chess_v2::PieceIndex::WhitePawn,
-                                            _ => {
-                                                return Err(anyhow::anyhow!(
-                                                    "Invalid piece in pgn move: {}",
-                                                    move_part
-                                                ));
-                                            }
-                                        };
-                                    }
-                                    'Q' | 'R' | 'B' | 'N' if dst_file.is_some() => {
-                                        if promote_to.is_some() {
-                                            return Err(anyhow::anyhow!(
-                                                "Multiple promotion pieces in pgn move: {}",
-                                                move_part
-                                            ));
-                                        }
-
-                                        if piece != chess_v2::PieceIndex::WhitePawn {
-                                            return Err(anyhow::anyhow!(
-                                                "Non-pawn promotion in pgn move: {}",
-                                                move_part
-                                            ));
-                                        }
-
-                                        match (side, dst_rank) {
-                                            (Side::White, Some(7)) => {}
-                                            (Side::Black, Some(0)) => {}
-                                            _ => {
-                                                return Err(anyhow::anyhow!(
-                                                    "Invalid promotion rank in pgn move: {} (side={:?})",
-                                                    move_part,
-                                                    side
-                                                ));
-                                            }
-                                        }
-
-                                        promote_to = Some(match move_part {
-                                            'Q' => chess_v2::PieceIndex::WhiteQueen,
-                                            'R' => chess_v2::PieceIndex::WhiteRook,
-                                            'B' => chess_v2::PieceIndex::WhiteBishop,
-                                            'N' => chess_v2::PieceIndex::WhiteKnight,
-                                            _ => unreachable!(),
-                                        });
-                                    }
-                                    '?' | '!' => { /* Ignore annotations */ }
-                                    '=' | '(' | ')' | '/' => { /* Separators for promotions */ }
-                                    c => {
-                                        return Err(anyhow::anyhow!(
-                                            "Invalid character '{}' in pgn move: {}",
-                                            c,
-                                            move_part
-                                        ));
-                                    }
-                                }
-                            }
-
-                            if !dst_file.is_some() {
-                                return Err(anyhow::anyhow!(
-                                    "Destination file must be specified in an pgn move: {}",
-                                    part
-                                ));
-                            }
-
-                            if !dst_rank.is_some() {
-                                return Err(anyhow::anyhow!(
-                                    "Destination rank must be specified in an pgn move: {}",
-                                    part
-                                ));
-                            }
-
-                            // Fix piece for side
-                            piece =
-                                chess_v2::PieceIndex::from((piece as usize) + (side as usize * 8));
-
-                            let board_copy = board.clone();
-
-                            let mut found_move = None;
-                            for mv_index in 0..pseudolegal_moves_count {
-                                let mut mv = pseudolegal_moves[mv_index];
-
-                                let src_sq = (mv & 0x3F) as u8;
-                                let dst_sq = ((mv >> 6) & 0x3F) as u8;
-
-                                if let Some(src_file) = src_file {
-                                    if src_sq % 8 != src_file {
-                                        continue;
-                                    }
-                                }
-
-                                if let Some(src_rank) = src_rank {
-                                    if src_sq / 8 != src_rank {
-                                        continue;
-                                    }
-                                }
-
-                                if dst_sq % 8 != dst_file.unwrap() {
-                                    continue;
-                                }
-
-                                if dst_sq / 8 != dst_rank.unwrap() {
-                                    continue;
-                                }
-
-                                if is_capture
-                                    && (mv & chess_v2::MV_FLAGS) != chess_v2::MV_FLAG_EPCAP
-                                    && board.piece_at(dst_sq) == PieceIndex::WhiteNullPiece as usize
-                                {
-                                    continue;
-                                }
-
-                                let sq_piece = board.piece_at(src_sq);
-
-                                if sq_piece != piece as usize {
-                                    continue;
-                                }
-
-                                if let Some(promote_to) = promote_to {
-                                    let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
-                                    match mv & chess_v2::MV_FLAGS_PR_MASK {
-                                        chess_v2::MV_FLAGS_PR_QUEEN => match promote_to {
-                                            chess_v2::PieceIndex::WhiteQueen => {}
-                                            chess_v2::PieceIndex::WhiteRook => {
-                                                mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK;
-                                            }
-                                            chess_v2::PieceIndex::WhiteBishop => {
-                                                mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP;
-                                            }
-                                            chess_v2::PieceIndex::WhiteKnight => {
-                                                mv = mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
-                                            }
-                                            _ => continue,
-                                        },
-                                        _ => continue,
-                                    }
-                                }
-
-                                let is_legal = unsafe { board.make_move(mv, tables) }
-                                    && !board.in_check(tables, !board.b_move());
-
-                                *board = board_copy;
-                                if !is_legal {
-                                    continue;
-                                }
-
-                                match found_move {
-                                    Some(existing) => {
-                                        *board = board_copy;
-                                        return Err(anyhow::anyhow!(
-                                            "Expected exactly one move for opening part: {}, found multiple: {} and {}",
-                                            part,
-                                            util::move_string(existing),
-                                            util::move_string(mv),
-                                        ));
-                                    }
-                                    None => {
-                                        found_move = Some(mv);
-                                    }
-                                }
-                            }
-
-                            match found_move {
-                                Some(mv) => mv,
-                                None => {
-                                    return Err(anyhow::anyhow!(
-                                        "Expected exactly one move for opening part: {}, found none",
-                                        part,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                };
-
-                moves_out.push(move_to_make);
-
-                if unsafe { !board.make_move(move_to_make, &tables) } {
-                    return Err(anyhow::anyhow!(
-                        "Invalid move in pgn: {}, move: {}",
-                        part,
-                        util::move_string(move_to_make)
-                    ));
-                }
-
-                if board.in_check(&tables, !board.b_move()) {
-                    return Err(anyhow::anyhow!(
-                        "Pgn move {} leaves the king in check",
-                        part
-                    ));
-                }
-
-                pgn_state = if both_moves {
-                    PgnState::MoveNumber
-                } else if side == Side::White {
-                    PgnState::Move(Side::Black, true)
-                } else {
-                    PgnState::Move(Side::White, false)
-                };
-            }
-        }
-    }
-
-    Ok(())
+    PgnParser::new(move_str, board, tables, moves_out).parse()
 }
 
 #[cfg(test)]
 mod tests {
-    use sfbinpack::chess::r#move;
-
     use crate::{
         engine::{chess_v2, tables},
         util,
     };
 
     #[test]
-    fn test_parse_pgn() {
+    fn test_parse_pgn_simple() {
         let mut board = chess_v2::ChessGame::new();
         assert!(
             board
@@ -481,11 +616,40 @@ mod tests {
                 "1. d4! { [%eval 0.10] } 1... e6!! { [%eval 0.10] } 2. e4? { [%eval 0.10] } 2... d5?? { [%eval 0.10] } 3. Nd2?! { [%eval 0.10] } 3... c5!? { [%eval 0.10] }",
                 6,
             ),
-            // (
-            //     "1. e4 { [%clk 0:01:00] } Nc6 { [%clk 0:01:00] } 2. Nf3 { [%clk 0:00:59] } e5 { [%clk 0:01:00] } 3. Bc4 { [%clk 0:00:55] } Bc5 { [%clk 0:00:59] } 4. Ng5 { [%clk 0:00:54] } Qxg5 { [%clk 0:00:58] } 5. d4 { [%clk 0:00:53] } Qxg2 { [%clk 0:00:57] } 6. dxc5 { [%clk 0:00:52] } Qxh1+ { [%clk 0:00:55] } 7. Kd2 { [%clk 0:00:52] } Qxe4 { [%clk 0:00:53] } 8. Nc3 { [%clk 0:00:48] } Qxc4 { [%clk 0:00:52] } 9. Ke1 { [%clk 0:00:46] } Nd4 { [%clk 0:00:48] } 10. b3 { [%clk 0:00:45] } Qxc5 { [%clk 0:00:46] } 11. Be3 { [%clk 0:00:43] } Qxc3+ { [%clk 0:00:45] } 12. Kf1 { [%clk 0:00:42] } c5 { [%clk 0:00:40] } 13. Qf3 { [%clk 0:00:40] } Nxf3 { [%clk 0:00:38] } 0-1",
-            //     0,
-            // ),
+            (
+                "1. e4 { [%clk 0:01:00] } Nc6 { [%clk 0:01:00] } 2. Nf3 { [%clk 0:00:59] } e5 { [%clk 0:01:00] } 3. Bc4 { [%clk 0:00:55] } Bc5 { [%clk 0:00:59] } 4. Ng5 { [%clk 0:00:54] } Qxg5 { [%clk 0:00:58] } 5. d4 { [%clk 0:00:53] } 0-1",
+                9,
+            ),
         ];
+
+        let mut moves = Vec::new();
+        for pgn in pgns {
+            moves.clear();
+            let result = super::parse_pgn(pgn.0, &mut board.clone(), &tables, &mut moves);
+            assert!(
+                result.is_ok(),
+                "Failed to parse PGN: {}: {}",
+                pgn.0,
+                result.err().unwrap()
+            );
+            assert_eq!(moves.len(), pgn.1);
+        }
+    }
+
+    #[test]
+    fn test_parse_pgn_annotations_2() {
+        let mut board = chess_v2::ChessGame::new();
+        assert!(
+            board
+                .load_fen(util::FEN_STARTPOS, &tables::Tables::new())
+                .is_ok()
+        );
+        let tables = tables::Tables::new();
+
+        let pgns = [(
+            "1. d4 { [%clk 0:01:00] } g6 { [%clk 0:01:00] } 2. c4 { [%clk 0:01:00] } Bg7 { [%clk 0:01:00] } 3. Nf3 { [%clk 0:01:00] } d6 { [%clk 0:00:59] } 0-1",
+            6,
+        )];
 
         let mut moves = Vec::new();
         for pgn in pgns {
