@@ -422,6 +422,24 @@ mod tests {
 
     use super::*;
 
+    pub fn is_legal_slow(tables: &tables::Tables, board: &chess_v2::ChessGame, mv: u16) -> bool {
+        let mut board_copy = board.clone();
+
+        let mut move_list = [0u16; 256];
+        for i in 0..board_copy.gen_moves_avx512::<false>(tables, &mut move_list) {
+            if move_list[i] == mv {
+                if !unsafe { board_copy.make_move(mv, tables) }
+                    || board_copy.in_check(tables, !board_copy.b_move())
+                {
+                    return false;
+                }
+
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn see_naive<T>(
         score_table: &[T; 16],
         tables: &tables::Tables,
@@ -578,7 +596,7 @@ mod tests {
 
         let mv = board.fix_move(util::create_move(mv_string));
 
-        assert!(util::is_legal_slow(&tables, &board, mv));
+        assert!(is_legal_slow(&tables, &board, mv));
         // assert!(mv & MV_FLAG_CAP != 0);
 
         let bitboards = board.bitboards();

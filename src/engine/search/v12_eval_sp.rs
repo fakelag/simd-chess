@@ -112,6 +112,16 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
         let max_depth = PV_DEPTH as u8 - 1;
         let target_depth = self.params.depth.unwrap_or(max_depth).min(max_depth);
 
+        if let Some(mv) = self.has_single_legal_move() {
+            let static_eval = self.evaluate();
+
+            self.pv_table.lengths[0] = 1;
+            self.pv_table.moves[0][0] = mv;
+
+            self.apply_pv(0, static_eval);
+            return mv;
+        }
+
         'outer: for depth in 1..=target_depth {
             self.ply = 0;
 
@@ -723,12 +733,6 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        if ply == 0 && num_legal_moves == 1 {
-            self.apply_pv(depth, alpha);
-            self.is_stopping = true;
-            return alpha;
-        }
-
         self.tt.store(
             self.chess.zobrist_key(),
             alpha,
@@ -783,7 +787,7 @@ impl<'a> Search<'a> {
             alpha = static_eval;
         }
 
-        let mut move_count = self
+        let move_count = self
             .chess
             .gen_moves_avx512::<true>(self.tables, &mut self.move_list);
 
@@ -1261,5 +1265,33 @@ impl<'a> Search<'a> {
         } else {
             false
         }
+    }
+
+    pub fn has_single_legal_move(&mut self) -> Option<u16> {
+        let mut legal_move = None;
+        let mut board = self.chess.clone();
+
+        let mut move_list = [0u16; 256];
+        let move_count = board.gen_moves_avx512::<false>(self.tables, &mut move_list);
+
+        for i in 0..move_count {
+            if !unsafe { board.make_move(move_list[i], self.tables) } {
+                continue;
+            }
+
+            if board.in_check(self.tables, !board.b_move()) {
+                board = self.chess.clone();
+                continue;
+            }
+
+            if legal_move.is_some() {
+                return None;
+            }
+
+            legal_move = Some(move_list[i]);
+            board = self.chess.clone();
+        }
+
+        return legal_move;
     }
 }
