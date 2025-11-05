@@ -3,7 +3,7 @@ use std::io::Read;
 use sfbinpack::chess::{coords, r#move, piece};
 
 const DEBUG: bool = false;
-const ANNOTATION_DEPTH: u8 = 9;
+const ANNOTATION_DEPTH: u8 = 8;
 
 use crate::{
     engine::{self, chess_v2, search::SearchStrategy, tables},

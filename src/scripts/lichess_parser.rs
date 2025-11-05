@@ -457,7 +457,7 @@ impl ExtractContext<'_> {
                             continue;
                         }
 
-                        if self.game_count % 10_000 == 0 {
+                        if self.game_count % 50_000 == 0 {
                             println!(
                                 "Extracting positions {}/{} ({:.2}%)",
                                 self.game_count,
@@ -553,6 +553,7 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) -> 
     let db_extension = path.extension().and_then(std::ffi::OsStr::to_str);
 
     let mut it = LichessGameParser::new();
+    let mut total_games = 0usize;
 
     match db_extension {
         Some("zst") => {
@@ -565,6 +566,8 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) -> 
                 if !it.next_batch(&mut decoder, &mut ctx.storage, &mut ctx.games) {
                     break;
                 }
+
+                total_games += ctx.games.len();
 
                 if !ctx.process_batch(&params) {
                     break;
@@ -580,6 +583,8 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) -> 
                     break;
                 }
 
+                total_games += ctx.games.len();
+
                 if !ctx.process_batch(&params) {
                     break;
                 }
@@ -593,7 +598,10 @@ pub fn lichess_extract(db_path: &str, out_path: &str, params: ExtractParams) -> 
         }
     };
 
-    println!("Extracted {} games", ctx.game_count);
+    println!(
+        "Extracted {} positions (searched {} games)",
+        ctx.game_count, total_games
+    );
 
     Ok(())
 }

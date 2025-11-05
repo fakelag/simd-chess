@@ -51,6 +51,7 @@ mod tests {
         // let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
         let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
         // let test_fen = util::FEN_STARTPOS;
+        // let test_fen = "8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1";
 
         let bench = || {
             let tt = std::cell::SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(4));

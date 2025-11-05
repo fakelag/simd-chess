@@ -531,6 +531,11 @@ fn main() {
                     "--dist-openings" => params.fdist_openings = true,
                     "--completed-only" => params.fcompleted_only = true,
                     "--db" => in_path = Some(arg_it.next().unwrap()),
+                    "--core" => {
+                        core_affinity::set_for_current(core_affinity::CoreId {
+                            id: arg_it.next().unwrap().parse().unwrap(),
+                        });
+                    }
                     "--out" => out_path = Some(arg_it.next().unwrap()),
                     _ => panic!("Unknown argument: {}", arg),
                 }
