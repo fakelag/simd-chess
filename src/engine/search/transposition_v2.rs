@@ -241,11 +241,12 @@ impl TranspositionTable {
     }
 
     pub fn clear(&mut self) {
-        self.generation = 0;
+        self.generation = TT_EVICT_GENERATIONS.wrapping_sub(1);
         self.min_generation = 0;
         for entry in &mut self.entries {
             entry.depth_and_type = 0;
             entry.generation = 0;
+            entry.mv = 0;
         }
 
         if COLLECT_STATS {

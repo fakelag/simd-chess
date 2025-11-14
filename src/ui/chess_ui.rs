@@ -50,9 +50,9 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
     ui.text(format!(
         "wtime: {} ({})\nbtime: {} ({})",
         util::time_format(white_ms as u64),
-        white_engine.path,
+        white_engine.path.split_whitespace().next().unwrap(),
         util::time_format(black_ms as u64),
-        black_engine.path
+        black_engine.path.split_whitespace().next().unwrap(),
     ));
 
     ui.separator();
@@ -80,16 +80,16 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
 
                 let engine_name_pos = ui.cursor_pos();
 
-                ui.text(format!("{}", stats.engine1_name));
+                ui.text(format!("{}", stats.engine1_name()));
                 ui.text_colored(ENG1_WINS_CLR, format!("{}", engine1_wins));
 
-                let engine2_name_length = ui.calc_text_size(&stats.engine2_name)[0];
+                let engine2_name_length = ui.calc_text_size(stats.engine2_name())[0];
                 ui.set_cursor_pos([
                     content_region_avail[0] - engine2_name_length,
                     engine_name_pos[1],
                 ]);
 
-                ui.text(format!("{}", stats.engine2_name));
+                ui.text(format!("{}", stats.engine2_name()));
 
                 let status_text = format!(
                     "{} ({}/{})",
@@ -177,8 +177,8 @@ fn draw_versus_stats(ui: &&mut imgui::Ui, matchmaking: &Matchmaking) {
                     ui.text(format!(
                         "{}. {} vs {} ({} games)",
                         index + 1,
-                        match_info.stats.engine1_name,
-                        match_info.stats.engine2_name,
+                        match_info.stats.engine1_exe,
+                        match_info.stats.engine2_exe,
                         match_info.stats.num_matches
                     ));
                 }
@@ -206,7 +206,7 @@ impl ChessUi {
             ask_promotion: None,
             input_goparams: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL | imgui::InputTextFlags::ENTER_RETURNS_TRUE,
-                Some("depth 6 infinite"),
+                Some("movetime 100"),
                 Some(256),
             ),
             input_fen: ImguiTextInput::new(
@@ -216,12 +216,12 @@ impl ChessUi {
             ),
             input_white_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("evaltest_v3.exe"),
+                Some("v13_y2_p.exe uci --pin 3"),
                 None,
             ),
             input_black_engine: ImguiTextInput::new(
                 imgui::InputTextFlags::AUTO_SELECT_ALL,
-                Some("v13_nnue_y2_sort32_regtest.exe"),
+                Some("v13_y2_p.exe uci --pin 5"),
                 None,
             ),
             input_num_games: ImguiTextInput::new(

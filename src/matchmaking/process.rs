@@ -83,8 +83,13 @@ impl EngineInternal {
 }
 
 impl EngineProcess {
-    pub fn new(path: &str) -> anyhow::Result<Self> {
-        let child_process = std::process::Command::new(format!("bin/{}", path))
+    pub fn new(path_and_args: &str) -> anyhow::Result<Self> {
+        let mut path_it = path_and_args.split_whitespace();
+
+        let exe_path = path_it.next().unwrap();
+
+        let child_process = std::process::Command::new(format!("bin/{}", exe_path))
+            .args(path_it)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -92,7 +97,7 @@ impl EngineProcess {
             .expect("Failed to start engine chess process");
 
         let int = std::sync::Arc::new(std::sync::Mutex::new(EngineInternal {
-            name: path.to_string(),
+            name: exe_path.to_string(),
             process: child_process,
             bestmove: None,
             state: EngineState::CheckUci,
@@ -111,7 +116,7 @@ impl EngineProcess {
         let engine = EngineProcess {
             int,
             go_params: String::new(),
-            path: path.to_string(),
+            path: path_and_args.to_string(),
             read_handle: Some(read_handle),
             versus_wins: 0,
         };

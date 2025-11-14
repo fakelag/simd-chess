@@ -38,13 +38,31 @@ pub enum GameResult {
 
 #[derive(Debug, Clone)]
 pub struct VersusStats {
-    pub engine1_name: String,
-    pub engine2_name: String,
+    pub engine1_exe: String,
+    pub engine2_exe: String,
     pub engine1_wins: usize,
     pub engine2_wins: usize,
     pub draws: usize,
     pub num_matches: usize,
     pub last_game_status: Option<GameResult>,
+}
+
+impl VersusStats {
+    pub fn engine1_name(&self) -> &str {
+        &self
+            .engine1_exe
+            .split_whitespace()
+            .next()
+            .unwrap_or(&self.engine1_exe)
+    }
+
+    pub fn engine2_name(&self) -> &str {
+        &self
+            .engine2_exe
+            .split_whitespace()
+            .next()
+            .unwrap_or(&self.engine2_exe)
+    }
 }
 
 pub struct VersusMatch {
@@ -345,8 +363,8 @@ impl Matchmaking {
     ) -> anyhow::Result<()> {
         self.versus_queue.push_back(VersusMatch {
             stats: VersusStats {
-                engine1_name: engine_white.to_string(),
-                engine2_name: engine_black.to_string(),
+                engine1_exe: engine_white.to_string(),
+                engine2_exe: engine_black.to_string(),
                 engine1_wins: 0,
                 engine2_wins: 0,
                 draws: 0,
@@ -395,8 +413,8 @@ impl Matchmaking {
 
         self.versus_reset();
 
-        self.engines[0] = Some(EngineProcess::new(&next_versus.stats.engine1_name)?);
-        self.engines[1] = Some(EngineProcess::new(&next_versus.stats.engine2_name)?);
+        self.engines[0] = Some(EngineProcess::new(&next_versus.stats.engine1_exe)?);
+        self.engines[1] = Some(EngineProcess::new(&next_versus.stats.engine2_exe)?);
 
         self.engines[0].as_mut().unwrap().go_params = self.go_params.to_string();
         self.engines[1].as_mut().unwrap().go_params = self.go_params.to_string();
@@ -541,8 +559,8 @@ impl Matchmaking {
     pub fn versus_stats(&self) -> VersusStats {
         self.versus_matches.front().map_or(
             VersusStats {
-                engine1_name: "<none>".to_string(),
-                engine2_name: "<none>".to_string(),
+                engine1_exe: "<none>".to_string(),
+                engine2_exe: "<none>".to_string(),
                 engine1_wins: 0,
                 engine2_wins: 0,
                 draws: 0,
@@ -559,9 +577,9 @@ impl Matchmaking {
         if self.versus_logging {
             println!(
                 "Starting a new match match between {} ({}) vs {} ({})",
-                current_match.stats.engine1_name,
+                current_match.stats.engine1_exe,
                 current_match.stats.engine1_wins,
-                current_match.stats.engine2_name,
+                current_match.stats.engine2_exe,
                 current_match.stats.engine2_wins
             );
         }
@@ -590,6 +608,10 @@ impl Matchmaking {
             }
         }
 
+        // Consistency testing
+        // self.redeploy_engines()
+        //     .expect("Failed to redeploy engines for new match");
+
         for engine in &mut self.engines {
             let engine_process = engine.as_mut().unwrap();
             engine_process
@@ -597,12 +619,14 @@ impl Matchmaking {
                 .expect("Failed to send ucinewgame command to engine");
         }
 
-        for engine in &mut self.engines {
-            let engine_process = engine.as_ref().unwrap();
-            match engine_process.get_state() {
-                EngineState::ReadyOk => {}
-                _ => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+        'outer: loop {
+            for engine in &mut self.engines {
+                let engine_process = engine.as_ref().unwrap();
+                match engine_process.get_state() {
+                    EngineState::ReadyOk => break 'outer,
+                    _ => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                 }
             }
         }

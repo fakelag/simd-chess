@@ -75,7 +75,7 @@ pub struct Search<'a> {
     tables: &'a tables::Tables,
     sig: Option<AbortSignal>,
 
-    nnue: Box<nnue::LazyNnue<256>>,
+    nnue: Box<nnue::LazyNnue<512>>,
 
     ply: u8,
     is_stopping: bool,
@@ -163,7 +163,7 @@ impl<'a> Search<'a> {
         rt: RepetitionTable,
     ) -> Search<'a> {
         let mut s = Search {
-            nnue: nnue_load!("../../../nnue/z2-256.bin", 256), // nnue_lazy_load!("../../../nnue/y2.bin"),
+            nnue: nnue_load!("../../../nnue/z3-512.bin", 512), // nnue_lazy_load!("../../../nnue/y2.bin"),
             sig: None,
             chess: chess_v2::ChessGame::new(),
             move_list: [0; 256],

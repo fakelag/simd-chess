@@ -546,8 +546,42 @@ fn main() {
 
             lichess_parser::lichess_extract(&in_path, &out_path, params)
         }
-        "gui" => chess_ui(),
+        "gui" => {
+            let mut arg_it = std::env::args().skip(2);
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--pin" => {
+                        let core_id: usize = arg_it.next().unwrap().parse().unwrap();
+                        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+                        println!("Pinned GUI thread to core {}", core_id);
+                    }
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            chess_ui()
+        }
         "uci" => {
+            let mut arg_it = std::env::args().skip(2);
+            let mut pin_core_id = None;
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--pin" => {
+                        pin_core_id = Some(arg_it.next().unwrap().parse().unwrap());
+                    }
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
             // Register a panic hook to stop the process if any thread panics.
             // @todo - Restructure code to make parent threads handle panics for their children
             let panic_hook = std::panic::take_hook();
@@ -567,6 +601,11 @@ fn main() {
 
             let result = std::thread::scope(|s| {
                 let st = s.spawn(|| {
+                    if let Some(core_id) = pin_core_id {
+                        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+                        println!("Pinned search thread to core {}", core_id);
+                    }
+
                     search_thread(rx_search, &tables, &tt);
                 });
 
