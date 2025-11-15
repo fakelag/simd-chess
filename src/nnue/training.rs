@@ -6,6 +6,7 @@ use bullet::{
             *,
         },
         inputs,
+        outputs::MaterialCount,
     },
     lr,
     nn::optimiser,
@@ -14,41 +15,18 @@ use bullet::{
     wdl,
 };
 
-use super::NnueConfig;
+use crate::nnue::nnue;
 
-pub fn train(
+pub fn train<const OB: usize>(
     name: &str,
     binpack_paths: &[&str],
     out_path: &str,
     valid_set_path: Option<&str>,
-    cfg: &NnueConfig,
+    hidden_size: usize,
 ) {
-    let mut trainer = ValueTrainerBuilder::default()
-        .dual_perspective()
-        // clipping [-1.98, 1.98]
-        .optimiser(optimiser::AdamW)
-        .inputs(inputs::Chess768)
-        .save_format(&[
-            SavedFormat::id("l0w").quantise::<i16>(cfg.qa),
-            SavedFormat::id("l0b").quantise::<i16>(cfg.qa),
-            SavedFormat::id("l1w").quantise::<i16>(cfg.qb),
-            SavedFormat::id("l1b").quantise::<i16>(cfg.qa * cfg.qb),
-        ])
-        // `target` == wdl * game_result + (1 - wdl) * sigmoid(search score in centipawns / SCALE)
-        .loss_fn(|output, target| output.sigmoid().squared_error(target))
-        .build(|builder, stm_inputs, ntm_inputs| {
-            let l0 = builder.new_affine("l0", 768, cfg.hidden_size);
-            let l1 = builder.new_affine("l1", 2 * cfg.hidden_size, 1);
-
-            let stm_hidden = l0.forward(stm_inputs).screlu();
-            let ntm_hidden = l0.forward(ntm_inputs).screlu();
-            let hidden_layer = stm_hidden.concat(ntm_hidden);
-            l1.forward(hidden_layer)
-        });
-
     let schedule = TrainingSchedule {
         net_id: name.to_string(),
-        eval_scale: cfg.quant_scale as f32,
+        eval_scale: nnue::QS as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
             batches_per_superbatch: 6104,
@@ -86,12 +64,65 @@ pub fn train(
     };
 
     println!(
-        "NNUE Config: hidden_size={}, qa={}, qb={}, quant_scale={}",
-        cfg.hidden_size, cfg.qa, cfg.qb, cfg.quant_scale
+        "NNUE Config: hs={}, qa={}, qb={}, qs={}, os={}",
+        hidden_size,
+        nnue::QA,
+        nnue::QB,
+        nnue::QS,
+        OB
     );
     println!("Starting training with datasets: {:?}", binpack_paths);
 
     std::thread::sleep(std::time::Duration::from_secs(1));
 
-    trainer.run(&schedule, &settings, &data_loader);
+    if OB == 1 {
+        let mut trainer = ValueTrainerBuilder::default()
+            .dual_perspective()
+            // clipping [-1.98, 1.98]
+            .optimiser(optimiser::AdamW)
+            .inputs(inputs::Chess768)
+            .save_format(&[
+                SavedFormat::id("l0w").quantise::<i16>(nnue::QA),
+                SavedFormat::id("l0b").quantise::<i16>(nnue::QA),
+                SavedFormat::id("l1w").quantise::<i16>(nnue::QB),
+                SavedFormat::id("l1b").quantise::<i16>(nnue::QA * nnue::QB),
+            ])
+            // `target` == wdl * game_result + (1 - wdl) * sigmoid(search score in centipawns / SCALE)
+            .loss_fn(|output, target| output.sigmoid().squared_error(target))
+            .build(|builder, stm_inputs, ntm_inputs| {
+                let l0 = builder.new_affine("l0", 768, hidden_size);
+                let l1 = builder.new_affine("l1", 2 * hidden_size, 1);
+
+                let stm_hidden = l0.forward(stm_inputs).screlu();
+                let ntm_hidden = l0.forward(ntm_inputs).screlu();
+                let hidden_layer = stm_hidden.concat(ntm_hidden);
+                l1.forward(hidden_layer)
+            });
+
+        trainer.run(&schedule, &settings, &data_loader);
+    } else {
+        let mut trainer = ValueTrainerBuilder::default()
+            .dual_perspective()
+            .optimiser(optimiser::AdamW)
+            .inputs(inputs::Chess768)
+            .output_buckets(MaterialCount::<OB>)
+            .save_format(&[
+                SavedFormat::id("l0w").quantise::<i16>(nnue::QA),
+                SavedFormat::id("l0b").quantise::<i16>(nnue::QA),
+                SavedFormat::id("l1w").quantise::<i16>(nnue::QB).transpose(),
+                SavedFormat::id("l1b").quantise::<i16>(nnue::QA * nnue::QB),
+            ])
+            .loss_fn(|output, target| output.sigmoid().squared_error(target))
+            .build(|builder, stm_inputs, ntm_inputs, output_buckets| {
+                let l0 = builder.new_affine("l0", 768, hidden_size);
+                let l1 = builder.new_affine("l1", 2 * hidden_size, OB);
+
+                let stm_hidden = l0.forward(stm_inputs).screlu();
+                let ntm_hidden = l0.forward(ntm_inputs).screlu();
+                let hidden_layer = stm_hidden.concat(ntm_hidden);
+                l1.forward(hidden_layer).select(output_buckets)
+            });
+
+        trainer.run(&schedule, &settings, &data_loader);
+    };
 }

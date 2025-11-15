@@ -2333,7 +2333,7 @@ mod tests {
         depth: u8,
         fen: &'static str,
         moves: Vec<String>,
-        nnue: Box<nnue::LazyNnue<128>>,
+        nnue: Box<nnue::LazyNnue<128, 1>>,
     }
 
     impl PerftTestContext {

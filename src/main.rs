@@ -464,7 +464,8 @@ fn main() {
             let mut valid_path = None;
             let mut bp_paths: Vec<String> = vec![];
 
-            let mut config: nnue::NnueConfig = nnue::nnue::NNUE_CONFIG;
+            let mut hidden_size = 128;
+            let mut output_size = 1;
 
             loop {
                 let arg = match arg_it.next() {
@@ -476,7 +477,8 @@ fn main() {
                     "--paths" => bp_paths.push(arg_it.next().unwrap()),
                     "--validate" => valid_path = Some(arg_it.next().unwrap()),
                     "--out" => out_path = Some(arg_it.next().unwrap()),
-                    "--hs" => config.hidden_size = arg_it.next().unwrap().parse().unwrap(),
+                    "--hs" => hidden_size = arg_it.next().unwrap().parse().unwrap(),
+                    "--os" => output_size = arg_it.next().unwrap().parse().unwrap(),
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
@@ -487,13 +489,26 @@ fn main() {
 
             let path_refs = bp_paths.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
 
-            nnue::training::train(
+            macro_rules! train {
+                ($os:expr) => {{
+                    nnue::training::train::<$os>(
                 &name,
                 path_refs.as_slice(),
                 &out_path.expect("Expected output path"),
                 valid_path.as_deref(),
-                &config,
+                        hidden_size,
             );
+                }};
+            }
+
+            match output_size {
+                1 => train!(1),
+                2 => train!(2),
+                4 => train!(4),
+                6 => train!(6),
+                8 => train!(8),
+                _ => panic!("Unsupported output size: {}", output_size),
+            }
 
             Ok(())
         }

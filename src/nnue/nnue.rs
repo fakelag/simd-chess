@@ -1,19 +1,11 @@
-use super::NnueConfig;
 use crate::{
     engine::chess_v2::{self, PieceIndex},
     pop_ls1b,
 };
 
-pub const NNUE_CONFIG: NnueConfig = NnueConfig {
-    hidden_size: 128,
-    quant_scale: 400,
-    qa: 255,
-    qb: 64,
-};
-
-const QA: i16 = 255;
-const QB: i16 = 64;
-const QS: i32 = 400;
+pub const QA: i16 = 255;
+pub const QB: i16 = 64;
+pub const QS: i32 = 400;
 
 type PairFeature = u32;
 
@@ -47,29 +39,42 @@ const NNUE_PIECE_INDICES: [usize; 8] = [
 
 #[derive(Copy, Clone)]
 #[repr(C)]
-pub struct Network<const HS: usize>
+pub struct Network<const HS: usize, const OB: usize>
 where
     [(); 2 * HS]:,
 {
-    feature_weights: [Accumulator<HS>; 768],
-    feature_bias: Accumulator<HS>,
-    output_weights: [i16; 2 * HS],
-    output_bias: i16,
+    feature_weights: [Accumulator<HS, OB>; 768],
+    feature_bias: Accumulator<HS, OB>,
+    output_weights: [[i16; 2 * HS]; OB],
+    output_bias: [i16; OB],
 }
 
-impl<const HS: usize> Network<HS>
+impl<const HS: usize, const OB: usize> Network<HS, OB>
 where
     [(); 2 * HS]:,
 {
     #[inline(always)]
-    pub fn evaluate(&self, us: &Accumulator<HS>, them: &Accumulator<HS>) -> i16 {
-        let mut output = i32::from(self.output_bias);
+    pub fn evaluate(
+        &self,
+        us: &Accumulator<HS, OB>,
+        them: &Accumulator<HS, OB>,
+        bucket: u8,
+    ) -> i16 {
+        let mut output = i32::from(self.output_bias[bucket as usize]);
 
-        for (&input, &weight) in us.vals.iter().zip(&self.output_weights[..HS]) {
+        for (&input, &weight) in us
+            .vals
+            .iter()
+            .zip(&self.output_weights[bucket as usize][..HS])
+        {
             output += crelu::<QA>(input) * i32::from(weight);
         }
 
-        for (&input, &weight) in them.vals.iter().zip(&self.output_weights[HS..]) {
+        for (&input, &weight) in them
+            .vals
+            .iter()
+            .zip(&self.output_weights[bucket as usize][HS..])
+        {
             output += crelu::<QA>(input) * i32::from(weight);
         }
 
@@ -82,21 +87,21 @@ where
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(C, align(64))]
-pub struct Accumulator<const HS: usize> {
+pub struct Accumulator<const HS: usize, const OB: usize> {
     vals: [i16; HS],
 }
 
-impl<const HS: usize> Accumulator<HS>
+impl<const HS: usize, const OB: usize> Accumulator<HS, OB>
 where
     [(); 2 * HS]:,
 {
     #[inline(always)]
-    pub fn new(net: &Network<HS>) -> Self {
+    pub fn new(net: &Network<HS, OB>) -> Self {
         net.feature_bias
     }
 
     #[inline(always)]
-    pub fn add_feature(&mut self, feature_idx: usize, net: &Network<HS>) {
+    pub fn add_feature(&mut self, feature_idx: usize, net: &Network<HS, OB>) {
         for (i, d) in self
             .vals
             .iter_mut()
@@ -107,7 +112,7 @@ where
     }
 
     #[inline(always)]
-    pub fn remove_feature(&mut self, feature_idx: usize, net: &Network<HS>) {
+    pub fn remove_feature(&mut self, feature_idx: usize, net: &Network<HS, OB>) {
         for (i, d) in self
             .vals
             .iter_mut()
@@ -119,12 +124,12 @@ where
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct AccumulatorPair<const HS: usize> {
-    pub white: Accumulator<HS>,
-    pub black: Accumulator<HS>,
+pub struct AccumulatorPair<const HS: usize, const OB: usize> {
+    pub white: Accumulator<HS, OB>,
+    pub black: Accumulator<HS, OB>,
 }
 
-impl<const HS: usize> AccumulatorPair<HS>
+impl<const HS: usize, const OB: usize> AccumulatorPair<HS, OB>
 where
     [(); 2 * HS]:,
 {
@@ -135,7 +140,7 @@ where
         }
     }
 
-    pub fn load(&mut self, board: &chess_v2::ChessGame, net: &Network<HS>) {
+    pub fn load(&mut self, board: &chess_v2::ChessGame, net: &Network<HS, OB>) {
         let bitboards = board.bitboards();
 
         self.white = Accumulator::new(net);
@@ -164,10 +169,10 @@ where
     #[inline(always)]
     pub fn acc_add1_sub1_src(
         &mut self,
-        src: &AccumulatorPair<HS>,
+        src: &AccumulatorPair<HS, OB>,
         add: PairFeature,
         sub: PairFeature,
-        net: &Network<HS>,
+        net: &Network<HS, OB>,
     ) {
         let white_add = &net.feature_weights[(add >> 16) as usize].vals;
         let black_add = &net.feature_weights[(add & 0xFFFF) as usize].vals;
@@ -183,11 +188,11 @@ where
     #[inline(always)]
     pub fn acc_add1_sub2_src(
         &mut self,
-        src: &AccumulatorPair<HS>,
+        src: &AccumulatorPair<HS, OB>,
         add: PairFeature,
         sub1: PairFeature,
         sub2: PairFeature,
-        net: &Network<HS>,
+        net: &Network<HS, OB>,
     ) {
         let white_add = &net.feature_weights[(add >> 16) as usize].vals;
         let black_add = &net.feature_weights[(add & 0xFFFF) as usize].vals;
@@ -205,12 +210,12 @@ where
     #[inline(always)]
     pub fn acc_add2_sub2_src(
         &mut self,
-        src: &AccumulatorPair<HS>,
+        src: &AccumulatorPair<HS, OB>,
         add1: PairFeature,
         add2: PairFeature,
         sub1: PairFeature,
         sub2: PairFeature,
-        net: &Network<HS>,
+        net: &Network<HS, OB>,
     ) {
         let white_add1 = &net.feature_weights[(add1 >> 16) as usize].vals;
         let black_add1 = &net.feature_weights[(add1 & 0xFFFF) as usize].vals;
@@ -230,7 +235,7 @@ where
     }
 
     #[inline(always)]
-    pub fn add_piece(&mut self, piece_id: usize, to_sq: usize, net: &Network<HS>) {
+    pub fn add_piece(&mut self, piece_id: usize, to_sq: usize, net: &Network<HS, OB>) {
         debug_assert!(
             piece_id != PieceIndex::WhiteNullPiece as usize
                 && piece_id != PieceIndex::WhitePad as usize
@@ -309,21 +314,21 @@ pub trait UpdatableNnue {
     fn rollback_move(&mut self);
 }
 
-pub struct LazyNnue<const HS: usize>
+pub struct LazyNnue<const HS: usize, const OB: usize>
 where
     [(); 2 * HS]:,
 {
-    net: Network<HS>,
-    accumulators: Vec<AccumulatorPair<HS>>,
+    net: Network<HS, OB>,
+    accumulators: Vec<AccumulatorPair<HS, OB>>,
     updates: Vec<NnueUpdate>,
     applied_accumulators: Vec<usize>,
 }
 
-impl<const HS: usize> LazyNnue<HS>
+impl<const HS: usize, const OB: usize> LazyNnue<HS, OB>
 where
     [(); 2 * HS]:,
 {
-    pub fn heap_alloc(net: Network<HS>) -> Box<Self> {
+    pub fn heap_alloc(net: Network<HS, OB>) -> Box<Self> {
         unsafe {
             let layout = std::alloc::Layout::new::<Self>();
             let ptr = std::alloc::alloc(layout) as *mut Self;
@@ -354,7 +359,7 @@ where
     }
 
     #[inline(always)]
-    pub fn evaluate(&mut self, b_move: bool) -> i16 {
+    pub fn evaluate(&mut self, b_move: bool, bucket: u8) -> i16 {
         let start = self.applied_accumulators.last().copied().unwrap();
 
         debug_assert!(start <= self.updates.len());
@@ -396,11 +401,11 @@ where
 
         let us = [&acc.white, &acc.black][b_move as usize];
         let them = [&acc.black, &acc.white][b_move as usize];
-        self.net.evaluate(us, them)
+        self.net.evaluate(us, them, bucket)
     }
 }
 
-impl<const HS: usize> UpdatableNnue for LazyNnue<HS>
+impl<const HS: usize, const OB: usize> UpdatableNnue for LazyNnue<HS, OB>
 where
     [(); 2 * HS]:,
 {
@@ -423,9 +428,10 @@ where
 
 #[macro_export]
 macro_rules! nnue_load {
-    ($path:expr, $hs:expr) => {{
-        let net: &nnue::Network<$hs> = &unsafe { std::mem::transmute(*include_bytes!($path)) };
+    ($path:expr, $hs:expr,$ob:expr) => {{
+        let net: &nnue::Network<$hs, $ob> = &unsafe { std::mem::transmute(*include_bytes!($path)) };
 
         nnue::LazyNnue::heap_alloc(*net)
     }};
+    ($path:expr, $hs:expr) => {{ nnue_load!($path, $hs, 1) }};
 }

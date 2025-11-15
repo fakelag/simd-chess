@@ -19,6 +19,14 @@ use crate::{
     nnue_load,
 };
 
+macro_rules! net_path {
+    () => {
+        "../../../nnue/z3-512-b8.bin"
+    };
+}
+const NNUE_HSIZE: usize = 512;
+const NNUE_OSIZE: usize = 8;
+
 const PV_DEPTH: usize = 64;
 
 const SORT_CAPTURE_RANGE: u16 = 32;
@@ -75,7 +83,7 @@ pub struct Search<'a> {
     tables: &'a tables::Tables,
     sig: Option<AbortSignal>,
 
-    nnue: Box<nnue::LazyNnue<512>>,
+    nnue: Box<nnue::LazyNnue<NNUE_HSIZE, NNUE_OSIZE>>,
 
     ply: u8,
     is_stopping: bool,
@@ -163,7 +171,7 @@ impl<'a> Search<'a> {
         rt: RepetitionTable,
     ) -> Search<'a> {
         let mut s = Search {
-            nnue: nnue_load!("../../../nnue/z3-512.bin", 512), // nnue_lazy_load!("../../../nnue/y2.bin"),
+            nnue: nnue_load!(net_path!(), NNUE_HSIZE, NNUE_OSIZE),
             sig: None,
             chess: chess_v2::ChessGame::new(),
             move_list: [0; 256],
@@ -910,12 +918,30 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
+    fn output_bucket(&self) -> u8 {
+        if NNUE_OSIZE == 1 {
+            return 0;
+        }
+
+        let divisor = 32usize.div_ceil(NNUE_OSIZE);
+        let full_board = self
+            .chess
+            .bitboards()
+            .iter()
+            .fold(0u64, |acc, &bb| acc | bb);
+
+        (full_board.count_ones() as u8 - 2) / divisor as u8
+    }
+
+    #[inline(always)]
     pub fn evaluate(&mut self) -> Eval {
         if true {
             // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
             //     return eval;
             // }
-            let final_score = self.nnue.evaluate(self.chess.b_move()) as Eval;
+            let final_score =
+                self.nnue
+                    .evaluate(self.chess.b_move(), self.output_bucket()) as Eval;
             // self.et.store(self.chess.zobrist_key(), final_score);
             return final_score;
         } else {
