@@ -21,7 +21,7 @@ pub const WEIGHT_BISHOP_I8: i8 = 3;
 pub const WEIGHT_KNIGHT_I8: i8 = 3;
 pub const WEIGHT_PAWN_I8: i8 = 1;
 
-const COLLECT_STATS: bool = true;
+const COLLECT_STATS: bool = false;
 
 pub struct EvalStats {
     pub probe_hit: usize,
@@ -162,6 +162,21 @@ impl EvalTable {
     pub fn get_hash_part(index_bits: u32, hash: u64) -> u64 {
         let hash_bits = hash >> index_bits;
         hash_bits
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.hash_0 = 0;
+            entry.hash_1 = 0;
+            entry.hash_2 = 0;
+            entry.eval = 0;
+        }
+        if COLLECT_STATS {
+            self.stats.probe_hit = 0;
+            self.stats.probe_miss = 0;
+            self.stats.collisions = 0;
+        }
     }
 
     pub fn calc_stats(&self) -> EvalStats {

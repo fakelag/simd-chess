@@ -21,7 +21,7 @@ checksum = "c71b1793ee61086797f5c80b6efa2b8ffa6d5dd703f118545808a7f2e27f7046"
 [[package]]
 name = "acyclib"
 version = "0.3.0"
-source = "git+https://github.com/jw1912/bullet?rev=47f2c84#47f2c84bf694a3d17d6c3931a7c126ca23172389"
+source = "git+https://github.com/jw1912/bullet?rev=e37db79#e37db79ee3ee54be2a2f310004b1b82f3b60c0ca"
 dependencies = [
  "parking_lot",
  "rand",
@@ -182,7 +182,7 @@ dependencies = [
 [[package]]
 name = "bullet_cuda_backend"
 version = "0.1.0"
-source = "git+https://github.com/jw1912/bullet?rev=47f2c84#47f2c84bf694a3d17d6c3931a7c126ca23172389"
+source = "git+https://github.com/jw1912/bullet?rev=e37db79#e37db79ee3ee54be2a2f310004b1b82f3b60c0ca"
 dependencies = [
  "acyclib",
  "cudarc",
@@ -192,7 +192,7 @@ dependencies = [
 [[package]]
 name = "bullet_lib"
 version = "1.0.0"
-source = "git+https://github.com/jw1912/bullet?rev=47f2c84#47f2c84bf694a3d17d6c3931a7c126ca23172389"
+source = "git+https://github.com/jw1912/bullet?rev=e37db79#e37db79ee3ee54be2a2f310004b1b82f3b60c0ca"
 dependencies = [
  "acyclib",
  "bullet_cuda_backend",

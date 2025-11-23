@@ -21,9 +21,11 @@ use crate::{
 
 macro_rules! net_path {
     () => {
-        "../../../nnue/z3-512-b8.bin"
+        "../../../nnue/w1-6M-512-8b.bin"
     };
 }
+
+const EVAL_NNUE: bool = false;
 const NNUE_HSIZE: usize = 512;
 const NNUE_OSIZE: usize = 8;
 
@@ -170,8 +172,10 @@ impl<'a> Search<'a> {
         tt: &'a mut TranspositionTable,
         rt: RepetitionTable,
     ) -> Search<'a> {
+        let nnue = nnue_load!(net_path!(), NNUE_HSIZE, NNUE_OSIZE);
+
         let mut s = Search {
-            nnue: nnue_load!(net_path!(), NNUE_HSIZE, NNUE_OSIZE),
+            nnue,
             sig: None,
             chess: chess_v2::ChessGame::new(),
             move_list: [0; 256],
@@ -196,7 +200,7 @@ impl<'a> Search<'a> {
             pv_length: 0,
             pv_trace: false,
             history_moves: Box::new([[0; 64]; 16]),
-            et: EvalTable::new(512),
+            et: EvalTable::new(1024),
             rt,
             tt,
         };
@@ -250,6 +254,7 @@ impl<'a> Search<'a> {
     ) -> Result<usize, String> {
         self.rt.clear();
         self.tt.clear();
+        self.et.clear();
         let fen_length = self.chess.load_fen(fen, tables)?;
         self.nnue.load(&self.chess);
         Ok(fen_length)
@@ -924,18 +929,14 @@ impl<'a> Search<'a> {
         }
 
         let divisor = 32usize.div_ceil(NNUE_OSIZE);
-        let full_board = self
-            .chess
-            .bitboards()
-            .iter()
-            .fold(0u64, |acc, &bb| acc | bb);
+        let occupancy = self.chess.occupancy();
 
-        (full_board.count_ones() as u8 - 2) / divisor as u8
+        (occupancy.count_ones() as u8 - 2) / divisor as u8
     }
 
     #[inline(always)]
     pub fn evaluate(&mut self) -> Eval {
-        if true {
+        if EVAL_NNUE {
             // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
             //     return eval;
             // }
@@ -945,11 +946,11 @@ impl<'a> Search<'a> {
             // self.et.store(self.chess.zobrist_key(), final_score);
             return final_score;
         } else {
-            // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
-            //     return eval;
-            // }
+            if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
+                return eval;
+            }
             let final_score = self.eval_hc();
-            // self.et.store(self.chess.zobrist_key(), final_score);
+            self.et.store(self.chess.zobrist_key(), final_score);
             return final_score;
         }
     }

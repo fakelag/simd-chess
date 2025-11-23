@@ -24,6 +24,10 @@ pub fn train<const OB: usize>(
     valid_set_path: Option<&str>,
     hidden_size: usize,
 ) {
+    let superbatches = 320;
+    let initial_lr = 0.001;
+    let final_lr = 0.001 * 0.3f32.powi(5);
+
     let schedule = TrainingSchedule {
         net_id: name.to_string(),
         eval_scale: nnue::QS as f32,
@@ -31,13 +35,13 @@ pub fn train<const OB: usize>(
             batch_size: 16_384,
             batches_per_superbatch: 6104,
             start_superbatch: 1,
-            end_superbatch: 40,
+            end_superbatch: superbatches,
         },
         wdl_scheduler: wdl::ConstantWDL { value: 0.75 },
-        lr_scheduler: lr::StepLR {
-            start: 0.001,
-            gamma: 0.1,
-            step: 18,
+        lr_scheduler: lr::CosineDecayLR {
+            initial_lr,
+            final_lr,
+            final_superbatch: superbatches,
         },
         save_rate: 10,
     };
@@ -82,10 +86,12 @@ pub fn train<const OB: usize>(
             .optimiser(optimiser::AdamW)
             .inputs(inputs::Chess768)
             .save_format(&[
-                SavedFormat::id("l0w").quantise::<i16>(nnue::QA),
-                SavedFormat::id("l0b").quantise::<i16>(nnue::QA),
-                SavedFormat::id("l1w").quantise::<i16>(nnue::QB),
-                SavedFormat::id("l1b").quantise::<i16>(nnue::QA * nnue::QB),
+                SavedFormat::id("l0w").round().quantise::<i16>(nnue::QA),
+                SavedFormat::id("l0b").round().quantise::<i16>(nnue::QA),
+                SavedFormat::id("l1w").round().quantise::<i16>(nnue::QB),
+                SavedFormat::id("l1b")
+                    .round()
+                    .quantise::<i16>(nnue::QA * nnue::QB),
             ])
             // `target` == wdl * game_result + (1 - wdl) * sigmoid(search score in centipawns / SCALE)
             .loss_fn(|output, target| output.sigmoid().squared_error(target))
@@ -107,10 +113,15 @@ pub fn train<const OB: usize>(
             .inputs(inputs::Chess768)
             .output_buckets(MaterialCount::<OB>)
             .save_format(&[
-                SavedFormat::id("l0w").quantise::<i16>(nnue::QA),
-                SavedFormat::id("l0b").quantise::<i16>(nnue::QA),
-                SavedFormat::id("l1w").quantise::<i16>(nnue::QB).transpose(),
-                SavedFormat::id("l1b").quantise::<i16>(nnue::QA * nnue::QB),
+                SavedFormat::id("l0w").round().quantise::<i16>(nnue::QA),
+                SavedFormat::id("l0b").round().quantise::<i16>(nnue::QA),
+                SavedFormat::id("l1w")
+                    .round()
+                    .quantise::<i16>(nnue::QB)
+                    .transpose(),
+                SavedFormat::id("l1b")
+                    .round()
+                    .quantise::<i16>(nnue::QA * nnue::QB),
             ])
             .loss_fn(|output, target| output.sigmoid().squared_error(target))
             .build(|builder, stm_inputs, ntm_inputs, output_buckets| {

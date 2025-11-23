@@ -2170,6 +2170,11 @@ impl ChessGame {
     }
 
     #[inline(always)]
+    pub fn occupancy(&self) -> u64 {
+        self.board.bitboards.iter().fold(0u64, |acc, &bb| acc | bb)
+    }
+
+    #[inline(always)]
     pub fn is_kingside_castle_allowed(&self, b_move: bool) -> bool {
         self.castles & (0b10 << (!b_move as u8 * 2)) != 0
     }

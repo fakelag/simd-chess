@@ -4,9 +4,16 @@ use sfbinpack::chess::{coords, r#move, piece};
 
 const DEBUG: bool = false;
 const ANNOTATION_DEPTH: u8 = 8;
+const INSUFFICIENT_MATERIAL_DRAW: bool = true;
+const THREE_FOLD_REPETITION_DRAW: bool = true;
 
 use crate::{
-    engine::{self, chess_v2, search::SearchStrategy, tables},
+    engine::{
+        self,
+        chess_v2::{self, PieceIndex},
+        search::SearchStrategy,
+        tables,
+    },
     matchmaking::{matchmaking::PositionFeeder, *},
     nnue::nnue::UpdatableNnue,
     util,
@@ -258,10 +265,27 @@ impl SelfplayTrainer {
                 let rt = search_engine.get_rt_mut();
                 rt.push_position(board_zobrist, last_move_irreversible);
 
-                if game_state == chess_v2::GameState::Ongoing
-                    && rt.is_repeated_times(board_zobrist) >= 3
-                {
-                    game_state = chess_v2::GameState::Draw;
+                if THREE_FOLD_REPETITION_DRAW && game_state == chess_v2::GameState::Ongoing {
+                    if rt.is_repeated_times(board_zobrist) >= 3 {
+                        game_state = chess_v2::GameState::Draw;
+                    }
+                }
+
+                if INSUFFICIENT_MATERIAL_DRAW && game_state == chess_v2::GameState::Ongoing {
+                    let occupancy = board.occupancy();
+                    let bitboards = board.bitboards();
+
+                    let king_vs_king = occupancy.count_ones() == 2;
+                    let king_and_bishop_vs_king = occupancy.count_ones() == 3
+                        && (bitboards[PieceIndex::WhiteBishop as usize].count_ones() == 1
+                            || bitboards[PieceIndex::BlackBishop as usize].count_ones() == 1);
+                    let king_and_knight_vs_king = occupancy.count_ones() == 3
+                        && (bitboards[PieceIndex::WhiteKnight as usize].count_ones() == 1
+                            || bitboards[PieceIndex::BlackKnight as usize].count_ones() == 1);
+
+                    if king_vs_king || king_and_bishop_vs_king || king_and_knight_vs_king {
+                        game_state = chess_v2::GameState::Draw;
+                    }
                 }
 
                 match game_state {
