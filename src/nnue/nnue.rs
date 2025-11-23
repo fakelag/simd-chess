@@ -1,3 +1,5 @@
+use std::arch::x86_64::*;
+
 use crate::{
     engine::chess_v2::{self, PieceIndex},
     pop_ls1b,
@@ -23,6 +25,12 @@ fn pair_feature_from_piece_square(piece_index: u8, square: u8) -> PairFeature {
 #[inline]
 fn crelu<const QA: i16>(x: i16) -> i32 {
     i32::from(x).clamp(0, i32::from(QA))
+}
+
+#[inline]
+fn screlu(x: i16) -> i32 {
+    let y = i32::from(x).clamp(0, i32::from(QA));
+    y * y
 }
 
 // Maps PieceIndex -> NNUE index
@@ -54,32 +62,104 @@ where
     [(); 2 * HS]:,
 {
     #[inline(always)]
-    pub fn evaluate(
+    pub fn evaluate_naive(
         &self,
         us: &Accumulator<HS, OB>,
         them: &Accumulator<HS, OB>,
         bucket: u8,
     ) -> i16 {
-        let mut output = i32::from(self.output_bias[bucket as usize]);
+        let mut output = 0;
 
-        for (&input, &weight) in us
-            .vals
-            .iter()
-            .zip(&self.output_weights[bucket as usize][..HS])
-        {
-            output += crelu::<QA>(input) * i32::from(weight);
+        let weights = &self.output_weights[bucket as usize];
+
+        for (&input, &weight) in us.vals.iter().zip(&weights[..HS]) {
+            output += screlu(input) * i32::from(weight);
         }
 
-        for (&input, &weight) in them
-            .vals
-            .iter()
-            .zip(&self.output_weights[bucket as usize][HS..])
-        {
-            output += crelu::<QA>(input) * i32::from(weight);
+        for (&input, &weight) in them.vals.iter().zip(&weights[HS..]) {
+            output += screlu(input) * i32::from(weight);
         }
 
+        output /= i32::from(QA);
+        output += i32::from(self.output_bias[bucket as usize]);
         output *= QS;
         output /= i32::from(QA) * i32::from(QB);
+
+        debug_assert!(
+            output >= i32::from(i16::MIN) && output <= i32::from(i16::MAX),
+            "NNUE output overflow: {}",
+            output,
+        );
+
+        output as i16
+    }
+
+    #[inline(always)]
+    pub fn evaluate(
+        &self,
+        stm: &Accumulator<HS, OB>,
+        ntm: &Accumulator<HS, OB>,
+        bucket: u8,
+    ) -> i16 {
+        assert!(
+            HS % 32 == 0,
+            "HS must be a multiple of 32 for SIMD evaluation"
+        );
+
+        let weights = &self.output_weights[bucket as usize];
+        let bias = self.output_bias[bucket as usize];
+
+        let output = unsafe {
+            let qa_x32 = _mm512_set1_epi16(QA);
+            let zero_x32 = _mm512_setzero_si512();
+            let mut output_x32 = _mm512_setzero_si512();
+
+            for i in 0..HS / 32 {
+                let stm_input_x32 = _mm512_load_si512(stm.vals.as_ptr().add(i * 32) as *const _);
+                let ntm_input_x32 = _mm512_load_si512(ntm.vals.as_ptr().add(i * 32) as *const _);
+                let stm_weight_x32 =
+                    _mm512_load_si512(weights[..HS].as_ptr().add(i * 32) as *const _);
+                let ntm_weight_x32 =
+                    _mm512_load_si512(weights[HS..].as_ptr().add(i * 32) as *const _);
+
+                let stm_input_clipped_x32 =
+                    _mm512_max_epi16(_mm512_min_epi16(stm_input_x32, qa_x32), zero_x32);
+                let ntm_input_clipped_x32 =
+                    _mm512_max_epi16(_mm512_min_epi16(ntm_input_x32, qa_x32), zero_x32);
+
+                let stm_output_x32 = _mm512_madd_epi16(
+                    _mm512_mullo_epi16(stm_input_clipped_x32, stm_weight_x32),
+                    stm_input_clipped_x32,
+                );
+                let ntm_output_x32 = _mm512_madd_epi16(
+                    _mm512_mullo_epi16(ntm_input_clipped_x32, ntm_weight_x32),
+                    ntm_input_clipped_x32,
+                );
+
+                output_x32 = _mm512_add_epi32(output_x32, stm_output_x32);
+                output_x32 = _mm512_add_epi32(output_x32, ntm_output_x32);
+            }
+
+            let mut output = _mm512_reduce_add_epi32(output_x32);
+
+            output /= i32::from(QA);
+            output += i32::from(bias);
+            output *= QS;
+            output /= i32::from(QA) * i32::from(QB);
+
+            output
+        };
+
+        debug_assert!(
+            output >= i32::from(i16::MIN) && output <= i32::from(i16::MAX),
+            "NNUE output overflow: {}",
+            output,
+        );
+        debug_assert_eq!(
+            self.evaluate_naive(stm, ntm, bucket),
+            output as i16,
+            "NNUE output mismatch"
+        );
 
         output as i16
     }
@@ -399,9 +479,9 @@ where
 
         let acc = &self.accumulators[ply];
 
-        let us = [&acc.white, &acc.black][b_move as usize];
-        let them = [&acc.black, &acc.white][b_move as usize];
-        self.net.evaluate(us, them, bucket)
+        let stm = [&acc.white, &acc.black][b_move as usize];
+        let ntm = [&acc.black, &acc.white][b_move as usize];
+        self.net.evaluate(stm, ntm, bucket)
     }
 }
 
