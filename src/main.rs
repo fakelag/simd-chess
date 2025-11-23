@@ -7,7 +7,7 @@
 #![feature(adt_const_params)]
 #![feature(generic_const_exprs)]
 
-use std::{cell::SyncUnsafeCell, thread::JoinHandle};
+use std::cell::SyncUnsafeCell;
 
 use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -15,10 +15,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use crate::engine::search::search_params::SearchParams;
 use crate::engine::search::{SearchStrategy, repetition_v2, transposition_v2};
 use crate::scripts::lichess_parser::{self};
+use crate::uci::uci::{GoCommand, chess_uci};
 use crate::{
     engine::{
-        chess, chess_v2,
-        search::{self, AbortSignal, SigAbort, search_params},
+        chess_v2,
+        search::{self},
         tables,
     },
     ui::chess_ui::ChessUi,
@@ -30,18 +31,11 @@ mod matchmaking;
 mod nnue;
 mod pgn;
 mod scripts;
+mod uci;
 mod ui;
 mod uicomponents;
 mod util;
 mod window;
-
-struct GoCommand {
-    start_time: std::time::Instant,
-    params: search_params::SearchParams,
-    chess: chess::ChessGame,
-    sig: AbortSignal,
-    repetition_table: search::repetition_v2::RepetitionTable,
-}
 
 fn chess_ui() -> anyhow::Result<()> {
     let event_loop = EventLoop::new().unwrap();
@@ -57,6 +51,7 @@ fn chess_ui() -> anyhow::Result<()> {
 }
 
 fn search_thread(
+    uci_context: uci::context::UciContext<uci::uci::UciOptions>,
     rx_search: channel::Receiver<GoCommand>,
     tables: &tables::Tables,
     transposition_table: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
@@ -85,104 +80,24 @@ fn search_thread(
                 search_engine.set_rt(go.repetition_table);
                 search_engine.set_search_params(go.params);
 
-                // let mut search_engine = search::v13_nnue::Search::new(
-                //     go.params,
-                //     chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-
-                // let mut search_engine = search::v12_eval::Search::new(
-                //     go.params,
-                //     chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-                // let mut search_engine = search::v10_mvcache::Search::new(
-                //     go.params,
-                //     go.chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-                // let mut search_engine = search::v9_prune::Search::new(
-                //     go.params,
-                //     go.chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-                // let mut search_engine = search::v8_quiesc::Search::new(
-                //     go.params,
-                //     go.chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-                // let mut search_engine = search::v7_mvvlva::Search::new(
-                //     go.params,
-                //     go.chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-
-                // let mut search_engine = search::v6_psquare::Search::new(
-                //     go.params,
-                //     go.chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-
-                // let mut search_engine = search::v5_tt::Search::new(
-                //     go.params,
-                //     go.chess,
-                //     tables,
-                //     tt,
-                //     go.repetition_table,
-                //     &go.sig,
-                // );
-
-                // let mut search_engine =
-                //     search::v4_pv::Search::new(go.params, go.chess, tables, &go.sig);
-
-                // let mut search_engine =
-                //     search::v3_itdep::IterativeDeepening::new(go.params, go.chess, tables, &go.sig);
-
-                // let mut search_engine =
-                //     search::v2_alphabeta::Alphabeta::new(go.params, go.chess, tables, &go.sig);
-
                 let best_move = search_engine.search();
 
-                println!(
-                    "bestmove {}",
-                    if best_move != 0 {
-                        util::move_string(best_move)
-                    } else {
-                        "0000".to_string()
-                    }
-                );
-
                 if debug {
-                    let elapsed = go.start_time.elapsed();
+                    println!(
+                        "info depth {} score cp {}",
+                        search_engine.get_depth(),
+                        search_engine.search_score()
+                    );
 
                     let search_nodes = search_engine.num_nodes_searched();
                     let search_depth = search_engine.get_depth();
                     let search_score = search_engine.search_score();
                     let tt_stats = unsafe { &mut *transposition_table.get() }.calc_stats();
 
+                    let elapsed = go.start_time.elapsed();
+
                     println!(
-                        "info searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy, {:.02} probe hit rate)",
+                        "info string searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy, {:.02} probe hit rate)",
                         search_nodes,
                         util::time_format(elapsed.as_millis() as u64),
                         search_depth,
@@ -204,6 +119,15 @@ fn search_thread(
                     //         .collect::<Vec<String>>()
                     // );
                 }
+
+                println!(
+                    "bestmove {}",
+                    if best_move != 0 {
+                        util::move_string(best_move)
+                    } else {
+                        "0000".to_string()
+                    }
+                );
             }
             Err(_) => {
                 println!("info search thread terminated");
@@ -211,186 +135,6 @@ fn search_thread(
             }
         }
     }
-}
-
-fn chess_uci(
-    tx_search: channel::Sender<GoCommand>,
-    tables: &tables::Tables,
-    tt: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
-) -> anyhow::Result<()> {
-    let mut debug = true;
-    let mut game_board: Option<chess::ChessGame> = None;
-    let mut repetition_table: Option<search::repetition_v2::RepetitionTable> = None;
-
-    struct GoContext {
-        tx_abort: channel::Sender<SigAbort>,
-        tx_stop: channel::Sender<SigAbort>,
-        timeout_handle: Option<JoinHandle<()>>,
-    }
-
-    let mut context: Option<GoContext> = None;
-
-    fn abort_search_uci(_debug: bool, context: &mut Option<GoContext>) {
-        if let Some(context) = context.take() {
-            let _ = context.tx_abort.try_send(SigAbort {});
-
-            if let Some(handle) = context.timeout_handle {
-                // Exit timeout thread
-                if !handle.is_finished() {
-                    let _ = context.tx_stop.try_send(SigAbort {});
-                    handle.join().unwrap();
-                }
-            }
-        }
-    }
-
-    loop {
-        let mut buffer = String::new();
-        std::io::stdin().read_line(&mut buffer)?;
-
-        let mut input = buffer.split_whitespace();
-
-        match input.next() {
-            Some("uci") => {
-                println!("id name chess\nuciok")
-            }
-            Some("debug") => match input.next() {
-                Some("on") => debug = true,
-                Some("off") => debug = false,
-                _ => panic!("Expected 'on' or 'off' after debug command"),
-            },
-            Some("ucinewgame") => {
-                // Safety: Engine should not be calculating when receiving a ucinewgame command
-                unsafe { &mut *tt.get() }.clear();
-            }
-            Some("stop") => abort_search_uci(debug, &mut context),
-            Some("isready") => println!("readyok"),
-            Some("position") => {
-                let mut board = chess::ChessGame::new();
-                let mut rep_table = search::repetition_v2::RepetitionTable::new();
-
-                // Safety: Engine should not be calculating when receiving a position command
-                let tt = unsafe { &mut *tt.get() };
-                tt.clear();
-
-                let position_start_index = input
-                    .next()
-                    .expect("Expected \"startpos\" or \"fen\" after position")
-                    .as_ptr() as usize
-                    - buffer.as_ptr() as usize;
-
-                util::parse_position(
-                    &buffer[position_start_index..],
-                    &mut board,
-                    tables,
-                    Some(&mut rep_table),
-                    None,
-                    None,
-                )?;
-
-                game_board = Some(board);
-                repetition_table = Some(rep_table);
-            }
-            Some("go") => {
-                let start_time = std::time::Instant::now();
-
-                abort_search_uci(debug, &mut context);
-
-                let (tx_abort, rx_abort) = channel::bounded(1);
-                let (tx_stop, rx_stop) = channel::bounded(1);
-
-                let mut new_context = GoContext {
-                    tx_abort,
-                    tx_stop,
-                    timeout_handle: None,
-                };
-
-                let chess = game_board
-                    .take()
-                    .expect("Expected position command to be sent before go");
-
-                let mut search_params = search_params::SearchParams::from_iter(input);
-                search_params.debug = debug;
-
-                let infinite = search_params.infinite;
-                let movetime = search_params.movetime;
-                // let movestogo = search_params.movestogo;
-                let time = if chess.b_move {
-                    search_params.btime
-                } else {
-                    search_params.wtime
-                };
-                let inc = if chess.b_move {
-                    search_params.binc
-                } else {
-                    search_params.winc
-                };
-
-                tx_search.send(GoCommand {
-                    start_time,
-                    params: search_params,
-                    chess,
-                    repetition_table: repetition_table
-                        .take()
-                        .expect("Expected position command to be sent before go"),
-                    sig: rx_abort,
-                })?;
-
-                if !infinite {
-                    let movetime_ms = if let Some(movetime) = movetime {
-                        Some(movetime)
-                    } else {
-                        // base / 20 + inc / 2
-                        time.and_then(|t| Some(t / 20 + inc.unwrap_or(0) / 2))
-                    };
-
-                    /*
-                        position startpos moves d2d4 g8f6 c2c4 e7e6 b1c3 f8b4 f2f3 d7d5 a2a3 b4c3 b2c3 e8g8 c4d5 e6d5 e2e3 c7c5 f1d3                                                                                                                                  engine.py:950
-                        go wtime 187750 btime 126970 winc 1000 binc 1000
-                    */
-
-                    if let Some(mut movetime_ms) = movetime_ms {
-                        movetime_ms = movetime_ms.max(1);
-
-                        let think_time = std::time::Duration::from_millis(movetime_ms as u64);
-
-                        // Timeout thread
-                        let tx_abort = new_context.tx_abort.clone();
-
-                        new_context.timeout_handle =
-                            Some(std::thread::spawn(move || {
-                                match rx_stop.recv_timeout(think_time) {
-                                    Ok(_) => {}
-                                    Err(channel::RecvTimeoutError::Timeout) => {
-                                        let _ = tx_abort.try_send(SigAbort {});
-                                    }
-                                    Err(channel::RecvTimeoutError::Disconnected) => {
-                                        panic!("Timeout thread disconnected")
-                                    }
-                                }
-                            }));
-
-                        if debug {
-                            println!("info movetime ms {}", movetime_ms);
-                        }
-                    }
-                }
-
-                context = Some(new_context);
-            }
-            Some("quit") => break,
-            Some(arg) => return Err(anyhow::anyhow!("Unknown command: \"{}\"", arg)),
-            None => return Err(anyhow::anyhow!("No command provided")),
-        }
-    }
-
-    if debug {
-        println!("info exiting UCI mode");
-    }
-
-    abort_search_uci(debug, &mut context);
-
-    Ok(())
 }
 
 fn main() {
@@ -492,12 +236,12 @@ fn main() {
             macro_rules! train {
                 ($os:expr) => {{
                     nnue::training::train::<$os>(
-                &name,
-                path_refs.as_slice(),
-                &out_path.expect("Expected output path"),
-                valid_path.as_deref(),
+                        &name,
+                        path_refs.as_slice(),
+                        &out_path.expect("Expected output path"),
+                        valid_path.as_deref(),
                         hidden_size,
-            );
+                    );
                 }};
             }
 
@@ -608,6 +352,8 @@ fn main() {
             let (tx_search, rx_search) = channel::bounded(1);
             let tables = tables::Tables::new();
 
+            let uci_context = uci::uci::create_context();
+
             // Safety: TranspositionTable is Send+Sync, it is up to the table implementation itself to
             // implement thread safety correctly. This has a few benefits:
             // 1. TranspositionTable can be accessed without runtime costs such as locks or refcounters
@@ -621,10 +367,10 @@ fn main() {
                         println!("Pinned search thread to core {}", core_id);
                     }
 
-                    search_thread(rx_search, &tables, &tt);
+                    search_thread(uci_context.clone(), rx_search, &tables, &tt);
                 });
 
-                let result = chess_uci(tx_search, &tables, &tt);
+                let result = chess_uci(uci_context.clone(), tx_search, &tables, &tt);
 
                 st.join().unwrap();
 
