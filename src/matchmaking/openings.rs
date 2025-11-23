@@ -3,6 +3,7 @@ use std::io::BufRead;
 use crate::{
     engine::{chess_v2, tables},
     matchmaking::matchmaking::PositionFeeder,
+    pgn::moves::parse_moves,
     util,
 };
 
@@ -192,17 +193,16 @@ pub fn load_openings_from_dir(
 
             moves_buf.clear();
 
-            let moves =
-                match crate::pgn::parse_pgn(move_str, &mut opening_board, tables, &mut moves_buf) {
-                    Ok(_) => &moves_buf,
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to parse opening \"{}\" line in file {:?}: {}",
-                            name, file_path, e
-                        );
-                        continue;
-                    }
-                };
+            let moves = match parse_moves(move_str, &mut opening_board, tables, &mut moves_buf) {
+                Ok(_) => &moves_buf,
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse opening \"{}\" line in file {:?}: {}",
+                        name, file_path, e
+                    );
+                    continue;
+                }
+            };
 
             if is_board_checkmated(&opening_board, tables) {
                 // Skip checkmate openings

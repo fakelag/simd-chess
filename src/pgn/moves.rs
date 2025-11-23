@@ -482,7 +482,7 @@ impl<'a> PgnParser<'a> {
     }
 }
 
-pub fn parse_pgn<'a>(
+pub fn parse_moves<'a>(
     move_str: &'a str,
     board: &mut chess_v2::ChessGame,
     tables: &tables::Tables,
@@ -495,6 +495,7 @@ pub fn parse_pgn<'a>(
 mod tests {
     use crate::{
         engine::{chess_v2, tables},
+        pgn::moves::parse_moves,
         util,
     };
 
@@ -510,13 +511,48 @@ mod tests {
 
         let pgn = "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7";
         let mut moves = Vec::new();
-        assert!(super::parse_pgn(pgn, &mut board, &tables, &mut moves).is_ok());
+        assert!(parse_moves(pgn, &mut board, &tables, &mut moves).is_ok());
 
         assert_eq!(moves.len(), 20);
         assert_eq!(
             board.gen_fen(),
             "r1bq1rk1/2pnbppp/p2p1n2/1p2p3/3PP3/1BP2N1P/PP3PP1/RNBQR1K1 w - - 1 11"
         );
+    }
+
+    #[test]
+    fn test_parse_pgn_multiline() {
+        let mut board = chess_v2::ChessGame::new();
+        assert!(
+            board
+                .load_fen(util::FEN_STARTPOS, &tables::Tables::new())
+                .is_ok()
+        );
+        let tables = tables::Tables::new();
+
+        let pgns = [
+            (
+                "1. Nf3 d5 2. g3 c6 3. Bg2\nNf6 4. d3 Bg4 5. h3 Bh5 6. b3 e6 7. Bb2 Qa5+ 8.\nQd2 Qxd2+ 1/2-1/2",
+                16,
+            ),
+            (
+                "1. Nf3 d5 2. g3 c6 3. Bg2\r\nNf6 4. d3 Bg4 5. h3 Bh5 6. b3 e6 7. Bb2 Qa5+ 8.\r\nQd2 Qxd2+ 1/2-1/2",
+                16,
+            ),
+        ];
+
+        let mut moves = Vec::new();
+        for pgn in pgns {
+            moves.clear();
+            let result = super::parse_moves(pgn.0, &mut board.clone(), &tables, &mut moves);
+            assert!(
+                result.is_ok(),
+                "Failed to parse PGN: {}: {}",
+                pgn.0,
+                result.err().unwrap()
+            );
+            assert_eq!(moves.len(), pgn.1);
+        }
     }
 
     #[test]
@@ -532,7 +568,7 @@ mod tests {
         let pgn = "1. e4 e5 2. Nf7 Nc6";
         let mut moves = Vec::new();
         assert_eq!(
-            super::parse_pgn(pgn, &mut board, &tables, &mut moves)
+            parse_moves(pgn, &mut board, &tables, &mut moves)
                 .unwrap_err()
                 .to_string(),
             "Expected exactly one move for opening part: Nf7, found none"
@@ -556,12 +592,15 @@ mod tests {
             ("1-0", 0),
             ("0-1", 0),
             ("1/2-1/2", 0),
+            (" 1-0", 0),
+            (" 0-1", 0),
+            (" 1/2-1/2", 0),
         ];
 
         let mut moves = Vec::new();
         for pgn in pgns {
             moves.clear();
-            let result = super::parse_pgn(pgn.0, &mut board.clone(), &tables, &mut moves);
+            let result = super::parse_moves(pgn.0, &mut board.clone(), &tables, &mut moves);
             assert!(
                 result.is_ok(),
                 "Failed to parse PGN: {}: {}",
@@ -590,7 +629,7 @@ mod tests {
         let mut moves = Vec::new();
         for pgn in pgns {
             moves.clear();
-            let result = super::parse_pgn(pgn.0, &mut board.clone(), &tables, &mut moves);
+            let result = super::parse_moves(pgn.0, &mut board.clone(), &tables, &mut moves);
             assert!(
                 result.is_ok(),
                 "Failed to parse PGN: {}: {}",
@@ -625,7 +664,7 @@ mod tests {
         let mut moves = Vec::new();
         for pgn in pgns {
             moves.clear();
-            let result = super::parse_pgn(pgn.0, &mut board.clone(), &tables, &mut moves);
+            let result = super::parse_moves(pgn.0, &mut board.clone(), &tables, &mut moves);
             assert!(
                 result.is_ok(),
                 "Failed to parse PGN: {}: {}",
@@ -654,7 +693,7 @@ mod tests {
         let mut moves = Vec::new();
         for pgn in pgns {
             moves.clear();
-            let result = super::parse_pgn(pgn.0, &mut board.clone(), &tables, &mut moves);
+            let result = super::parse_moves(pgn.0, &mut board.clone(), &tables, &mut moves);
             assert!(
                 result.is_ok(),
                 "Failed to parse PGN: {}: {}",
@@ -695,7 +734,7 @@ mod tests {
         for pgn in pgns {
             moves.clear();
             let b = &mut board.clone();
-            let result = super::parse_pgn(pgn.0, b, &tables, &mut moves);
+            let result = super::parse_moves(pgn.0, b, &tables, &mut moves);
             assert!(
                 result.is_ok(),
                 "Failed to parse PGN: {}: {}",

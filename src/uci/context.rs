@@ -9,11 +9,11 @@ where
 
 pub struct UciContext<OID>(std::sync::Arc<std::sync::Mutex<UciContextInner<OID>>>)
 where
-    OID: std::cmp::PartialEq + std::fmt::Debug;
+    OID: std::cmp::PartialEq + Copy + std::fmt::Debug;
 
 impl<OID> UciContext<OID>
 where
-    OID: std::cmp::PartialEq + std::fmt::Debug,
+    OID: std::cmp::PartialEq + Copy + std::fmt::Debug,
 {
     pub fn new() -> Self {
         Self(std::sync::Arc::new(std::sync::Mutex::new(
@@ -33,7 +33,7 @@ where
 
 impl<OID> Clone for UciContext<OID>
 where
-    OID: std::cmp::PartialEq + std::fmt::Debug,
+    OID: std::cmp::PartialEq + Copy + std::fmt::Debug,
 {
     fn clone(&self) -> Self {
         UciContext(self.0.clone())
@@ -68,7 +68,7 @@ where
 
 impl<OID> UciContextInner<OID>
 where
-    OID: std::cmp::PartialEq + std::fmt::Debug,
+    OID: std::cmp::PartialEq + Copy + std::fmt::Debug,
 {
     pub fn new() -> Self {
         Self {
@@ -108,14 +108,17 @@ where
         option.1.as_mut()
     }
 
-    pub fn get_by_name(&self, name: &str) -> Option<&Box<dyn UciOption + Send + Sync>> {
+    pub fn get_by_name(&self, name: &str) -> Option<(OID, &Box<dyn UciOption + Send + Sync>)> {
         let option = self.options.iter().find(|(_, opt)| opt.name() == name);
-        option.map(|(_, opt)| opt)
+        option.map(|(oid, opt)| (*oid, opt))
     }
 
-    pub fn get_by_name_mut(&mut self, name: &str) -> Option<&mut Box<dyn UciOption + Send + Sync>> {
+    pub fn get_by_name_mut(
+        &mut self,
+        name: &str,
+    ) -> Option<(OID, &mut Box<dyn UciOption + Send + Sync>)> {
         let option = self.options.iter_mut().find(|(_, opt)| opt.name() == name);
-        option.map(|(_, option)| option)
+        option.map(|(oid, opt)| (*oid, opt))
     }
 
     pub fn iter<'a>(&'a self) -> UciOptionIterator<'a, OID> {

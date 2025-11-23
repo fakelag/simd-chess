@@ -12,9 +12,10 @@ use crate::{
     util,
 };
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Copy, Clone, Debug)]
 pub enum UciOptions {
     OwnBook,
+    OwnBookPath,
 }
 
 pub fn create_context() -> UciContext<UciOptions> {
@@ -22,7 +23,15 @@ pub fn create_context() -> UciContext<UciOptions> {
 
     uci_context.lock_add(
         UciOptions::OwnBook,
-        Box::new(UciOptionType::<bool>::new("OwnBook", true)),
+        Box::new(UciOptionType::<bool>::new("OwnBook", false)),
+    );
+
+    uci_context.lock_add(
+        UciOptions::OwnBookPath,
+        Box::new(UciOptionType::<FilePathString>::new(
+            "OwnBookPath",
+            "openings/8moves_v3.pgn".to_string(),
+        )),
     );
 
     uci_context
@@ -36,9 +45,14 @@ pub struct GoCommand {
     pub repetition_table: search::repetition_v2::RepetitionTable,
 }
 
+pub enum UciCommand {
+    Go(GoCommand),
+    OptionChange(UciOptions),
+}
+
 pub fn chess_uci(
     uci_context: UciContext<UciOptions>,
-    tx_search: channel::Sender<GoCommand>,
+    tx_search: channel::Sender<UciCommand>,
     tables: &tables::Tables,
     tt: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) -> anyhow::Result<()> {
@@ -155,7 +169,7 @@ pub fn chess_uci(
                     search_params.winc
                 };
 
-                tx_search.send(GoCommand {
+                tx_search.send(UciCommand::Go(GoCommand {
                     start_time,
                     params: search_params,
                     chess,
@@ -163,7 +177,7 @@ pub fn chess_uci(
                         .take()
                         .expect("Expected position command to be sent before go"),
                     sig: rx_abort,
-                })?;
+                }))?;
 
                 if !infinite {
                     let movetime_ms = if let Some(movetime) = movetime {
@@ -214,8 +228,8 @@ pub fn chess_uci(
                 let mut lock = uci_context.lock();
                 let option = lock.get_by_name_mut(opt_name);
 
-                let option = match option {
-                    Some(opt) => opt,
+                let (oid, option) = match option {
+                    Some(val) => val,
                     None => {
                         return Err(anyhow::anyhow!(
                             "Option with name \"{}\" not found",
@@ -252,6 +266,10 @@ pub fn chess_uci(
                         ));
                     }
                 }
+
+                drop(lock);
+
+                tx_search.send(UciCommand::OptionChange(oid))?;
             }
             Some("quit") => break,
             Some(arg) => return Err(anyhow::anyhow!("Unknown command: \"{}\"", arg)),

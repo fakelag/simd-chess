@@ -12,10 +12,10 @@ use std::cell::SyncUnsafeCell;
 use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
 
+use crate::engine::ownbook::OwnBook;
 use crate::engine::search::search_params::SearchParams;
 use crate::engine::search::{SearchStrategy, repetition_v2, transposition_v2};
-use crate::scripts::lichess_parser::{self};
-use crate::uci::uci::{GoCommand, chess_uci};
+use crate::uci::uci::{UciCommand, chess_uci};
 use crate::{
     engine::{
         chess_v2,
@@ -30,7 +30,6 @@ mod engine;
 mod matchmaking;
 mod nnue;
 mod pgn;
-mod scripts;
 mod uci;
 mod ui;
 mod uicomponents;
@@ -50,9 +49,29 @@ fn chess_ui() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn get_opening_book(
+    uci_context: &uci::context::UciContext<uci::uci::UciOptions>,
+    tables: &tables::Tables,
+) -> Option<OwnBook> {
+    if uci_context
+        .lock()
+        .get_by_id(uci::uci::UciOptions::OwnBook)
+        .val_bool()
+    {
+        let book_path = uci_context
+            .lock()
+            .get_by_id(uci::uci::UciOptions::OwnBookPath)
+            .val_string()
+            .to_string();
+        Some(OwnBook::from_pgn(&tables, &book_path, |_, _, _| true).unwrap())
+    } else {
+        None
+    }
+}
+
 fn search_thread(
     uci_context: uci::context::UciContext<uci::uci::UciOptions>,
-    rx_search: channel::Receiver<GoCommand>,
+    rx_search: channel::Receiver<UciCommand>,
     tables: &tables::Tables,
     transposition_table: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) {
@@ -65,9 +84,11 @@ fn search_thread(
         repetition_v2::RepetitionTable::new(),
     );
 
+    let mut used_book = get_opening_book(&uci_context, tables);
+
     loop {
         match rx_search.recv() {
-            Ok(go) => {
+            Ok(UciCommand::Go(go)) => {
                 let debug = go.params.debug;
 
                 let chess = chess_v2::ChessGame::from(go.chess);
@@ -80,35 +101,46 @@ fn search_thread(
                 search_engine.set_rt(go.repetition_table);
                 search_engine.set_search_params(go.params);
 
-                let best_move = search_engine.search();
+                let book_move = match used_book {
+                    Some(ref own_book) if chess.ply() < 16 => own_book
+                        .probe(chess.zobrist_key())
+                        .map(|entry| entry.bestmove),
+                    _ => None,
+                };
+
+                let best_move = book_move.unwrap_or_else(|| search_engine.search());
 
                 if debug {
-                    println!(
-                        "info depth {} score cp {}",
-                        search_engine.get_depth(),
-                        search_engine.search_score()
-                    );
+                    if book_move.is_some() {
+                        println!("info depth 0 score cp 0 (book)");
+                    } else {
+                        println!(
+                            "info depth {} score cp {}",
+                            search_engine.get_depth(),
+                            search_engine.search_score()
+                        );
+                    }
 
-                    let search_nodes = search_engine.num_nodes_searched();
-                    let search_depth = search_engine.get_depth();
-                    let search_score = search_engine.search_score();
-                    let tt_stats = unsafe { &mut *transposition_table.get() }.calc_stats();
+                    // let search_nodes = search_engine.num_nodes_searched();
+                    // let search_depth = search_engine.get_depth();
+                    // let search_score = search_engine.search_score();
+                    // let tt_stats = unsafe { &mut *transposition_table.get() }.calc_stats();
 
-                    let elapsed = go.start_time.elapsed();
+                    // let elapsed = go.start_time.elapsed();
 
-                    println!(
-                        "info string searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy, {:.02} probe hit rate)",
-                        search_nodes,
-                        util::time_format(elapsed.as_millis() as u64),
-                        search_depth,
-                        util::move_string(best_move),
-                        best_move,
-                        search_score,
-                        tt_stats.fill_percentage * 100.0,
-                        tt_stats.probe_hit as f64
-                            / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
-                            * 100.0
-                    );
+                    // println!(
+                    //     "info string searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy, {:.02} probe hit rate)",
+                    //     search_nodes,
+                    //     util::time_format(elapsed.as_millis() as u64),
+                    //     search_depth,
+                    //     util::move_string(best_move),
+                    //     best_move,
+                    //     search_score,
+                    //     tt_stats.fill_percentage * 100.0,
+                    //     tt_stats.probe_hit as f64
+                    //         / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
+                    //         * 100.0
+                    // );
 
                     // println!(
                     //     "info pv {:?}",
@@ -129,6 +161,13 @@ fn search_thread(
                     }
                 );
             }
+            Ok(UciCommand::OptionChange(changed_option)) => match changed_option {
+                uci::uci::UciOptions::OwnBook | uci::uci::UciOptions::OwnBookPath => {
+                    // Reload opening book
+                    used_book = get_opening_book(&uci_context, tables);
+                    println!("info string reloaded opening book");
+                }
+            },
             Err(_) => {
                 println!("info search thread terminated");
                 break;
@@ -256,8 +295,8 @@ fn main() {
 
             Ok(())
         }
-        "lext" => {
-            let mut params = lichess_parser::ExtractParams {
+        "pgnextract" => {
+            let mut params = pgn::extract::PositionExtractParams {
                 ffrom_ply: 0,
                 fto_ply: 300,
                 fmin_ply: 0,
@@ -266,7 +305,7 @@ fn main() {
                 fcompleted_only: false,
                 fdist_openings: false,
                 fno_duplicates: false,
-                fpick: lichess_parser::MovePick::Random,
+                fpick: pgn::extract::MovePick::Random,
                 fattempts_per_position: 1,
             };
 
@@ -300,10 +339,10 @@ fn main() {
                 }
             }
 
-            let in_path = in_path.expect("Expected path to Lichess database");
+            let in_path = in_path.expect("Expected path to pgn input file");
             let out_path = out_path.expect("Expected output path");
 
-            lichess_parser::lichess_extract(&in_path, &out_path, params)
+            pgn::extract::extract_positions(&in_path, &out_path, params)
         }
         "gui" => {
             let mut arg_it = std::env::args().skip(2);
