@@ -186,7 +186,7 @@ pub struct Bitboards {
     // [0, K, Q, R, B, N, P, 0, 0, k, q, r, b, n, p, 0]
     pub bitboards: [u64; 16],
 }
-const BITBOARDS_SIZE_ASSERT: [u8; 128] = [0; std::mem::size_of::<Bitboards>()];
+const _BITBOARDS_SIZE_ASSERT: () = assert!(std::mem::size_of::<Bitboards>() == 128);
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChessGame {
@@ -200,7 +200,7 @@ pub struct ChessGame {
     material: [u16; 2],
     spt: [u8; 64],
 }
-const CHESS_GAME_SIZE_ASSERT: [u8; 256] = [0; std::mem::size_of::<ChessGame>()];
+const _CHESS_GAME_SIZE_ASSERT: () = assert!(std::mem::size_of::<ChessGame>() == 256);
 
 impl From<chess::ChessGame> for ChessGame {
     fn from(value: chess::ChessGame) -> Self {
