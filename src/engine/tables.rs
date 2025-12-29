@@ -75,6 +75,8 @@ pub struct ZobristKeys {
     pub hash_side_to_move: u64,
     pub hash_castling_rights: [u64; 16],
     pub hash_en_passant_squares: [u64; 64],
+    pub no_pawn_key: u64,
+    pub hash_pawn_squares: [[u64; 64]; 16],
 }
 
 pub struct Tables {
@@ -93,6 +95,8 @@ impl Tables {
             zobrist_side_to_move,
             zobrist_castling_rights,
             zobrist_en_passant_squares,
+            no_pawn_key,
+            hash_pawn_squares,
         ) = Self::gen_zobrist_hashes();
 
         let rook_move_mask = Self::gen_rook_move_table();
@@ -125,6 +129,8 @@ impl Tables {
                 hash_side_to_move: zobrist_side_to_move,
                 hash_castling_rights: zobrist_castling_rights,
                 hash_en_passant_squares: zobrist_en_passant_squares,
+                no_pawn_key,
+                hash_pawn_squares,
             }),
         }
     }
@@ -858,7 +864,15 @@ impl Tables {
         (hash_magics, hash_shifts)
     }
 
-    pub fn gen_zobrist_hashes() -> ([[u64; 64]; 16], [[u64; 64]; 13], u64, [u64; 16], [u64; 64]) {
+    pub fn gen_zobrist_hashes() -> (
+        [[u64; 64]; 16],
+        [[u64; 64]; 13],
+        u64,
+        [u64; 16],
+        [u64; 64],
+        u64,
+        [[u64; 64]; 16],
+    ) {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         let mut hash_squares_old = [[0u64; 64]; 13];
@@ -866,6 +880,8 @@ impl Tables {
         let mut hash_side_to_move = 0;
         let mut hash_castling_rights: [u64; 16] = [0; 16];
         let mut zobrist_en_passant_squares = [0; 64];
+        let mut no_pawn_key: u64 = 0;
+        let mut hash_pawn_squares = [[0u64; 64]; 16];
 
         for piece in 1..13 {
             for square in 0..64 {
@@ -887,12 +903,26 @@ impl Tables {
             zobrist_en_passant_squares[square] = rng.random::<u64>();
         }
 
+        no_pawn_key = rng.random::<u64>();
+
+        let mut testset = std::collections::BTreeSet::<u16>::new();
+
+        for square in 0..64 {
+            hash_pawn_squares[chess_v2::PieceIndex::WhitePawn as usize][square] =
+                hash_squares_new[chess_v2::PieceIndex::WhitePawn as usize][square];
+
+            hash_pawn_squares[chess_v2::PieceIndex::BlackPawn as usize][square] =
+                hash_squares_new[chess_v2::PieceIndex::BlackPawn as usize][square];
+        }
+
         (
             hash_squares_new,
             hash_squares_old,
             hash_side_to_move,
             hash_castling_rights,
             zobrist_en_passant_squares,
+            no_pawn_key,
+            hash_pawn_squares,
         )
     }
 

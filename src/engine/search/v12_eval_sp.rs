@@ -1,3 +1,5 @@
+use std::cell::OnceCell;
+
 use crossbeam::channel;
 
 use crate::{
@@ -21,13 +23,17 @@ use crate::{
 
 macro_rules! net_path {
     () => {
-        "../../../nnue/w1-6M-512-8b.bin"
+        "../../../nnue/w1-10M-512-b8.bin"
     };
 }
 
-const EVAL_NNUE: bool = false;
+const EVAL_NNUE: bool = true;
 const NNUE_HSIZE: usize = 512;
 const NNUE_OSIZE: usize = 8;
+
+const CORR_WEIGHT_SCALE: Eval = 128;
+const CORR_MAX_ERROR: Eval = 1024;
+const CORR_GRAIN: Eval = 2;
 
 const PV_DEPTH: usize = 64;
 
@@ -41,9 +47,9 @@ const SORT_PVTT_BASE: u16 = SORT_CAPTURE_BASE + SORT_CAPTURE_RANGE;
 const HISTORY_MAX: i16 = i16::MAX - 0_017;
 const HISTORY_MIN: i16 = i16::MIN + 0_017;
 
-const ASSERT_SORT_RANGE: [bool; u16::MAX as usize - 1] = [false; SORT_PVTT_BASE as usize];
-const ASSERT_SORT_HISTORY_MINMAX_RANGE: [bool; SORT_QUIET_RANGE as usize - 1] =
-    [false; (HISTORY_MAX as usize + HISTORY_MIN.abs() as usize)];
+const _ASSERT_SORT_RANGE: () = assert!(u16::MAX as usize - 1 == SORT_PVTT_BASE as usize);
+const _ASSERT_SORT_HISTORY_MINMAX_RANGE: () =
+    assert!(SORT_QUIET_RANGE as usize - 1 == HISTORY_MAX as usize + HISTORY_MIN.abs() as usize);
 
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
@@ -80,6 +86,11 @@ impl PvTable {
     }
 }
 
+// pub struct CorrStats {
+//     pub original_eval: Eval,
+//     pub error: Eval,
+// }
+
 pub struct Search<'a> {
     chess: ChessGame,
     tables: &'a tables::Tables,
@@ -112,6 +123,9 @@ pub struct Search<'a> {
     quiet_nodes: u64,
     quiet_depth: u32,
     depth: u8,
+
+    pawn_correction_heuristic: [[Eval; u16::MAX as usize + 1]; 2],
+    // pub corr_stats: Vec<CorrStats>,
 }
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
@@ -203,6 +217,8 @@ impl<'a> Search<'a> {
             et: EvalTable::new(1024),
             rt,
             tt,
+            pawn_correction_heuristic: [[0; u16::MAX as usize + 1]; 2],
+            // corr_stats: Vec::new(),
         };
 
         s.nnue.load(&s.chess);
@@ -235,6 +251,7 @@ impl<'a> Search<'a> {
             self.pv[i] = 0;
         }
 
+        // @todo - Test if clearing history on every new search is beneficial
         for piece in 0..16 {
             for square in 0..64 {
                 self.history_moves[piece][square] = 0;
@@ -244,17 +261,9 @@ impl<'a> Search<'a> {
         self.tt.new_search();
     }
 
-    /// A hard reset. Clears all counters, the transposition and repetition tables.
-    /// and resets the board position to the starting position.
+    /// Resets the board & nnue state without clearing the transposition or repetition tables.
     #[inline(always)]
-    pub fn new_game_from_fen(
-        &mut self,
-        fen: &str,
-        tables: &tables::Tables,
-    ) -> Result<usize, String> {
-        self.rt.clear();
-        self.tt.clear();
-        self.et.clear();
+    pub fn load_from_fen(&mut self, fen: &str, tables: &tables::Tables) -> Result<usize, String> {
         let fen_length = self.chess.load_fen(fen, tables)?;
         self.nnue.load(&self.chess);
         Ok(fen_length)
@@ -262,9 +271,29 @@ impl<'a> Search<'a> {
 
     /// Resets the board & nnue state without clearing the transposition or repetition tables.
     #[inline(always)]
-    pub fn new_game_from_board(&mut self, board: &ChessGame) {
+    pub fn load_from_board(&mut self, board: &ChessGame) {
         self.chess = *board;
         self.nnue.load(&self.chess);
+    }
+
+    /// A hard reset. Clears transposition and repetition tables and
+    /// resets all heuristics.
+    pub fn new_game(&mut self) {
+        self.rt.clear();
+        self.tt.clear();
+        self.et.clear();
+
+        for i in 0..16 {
+            for j in 0..64 {
+                self.history_moves[i][j] = 0;
+            }
+        }
+
+        for i in 0..2 {
+            for j in 0..=u16::MAX as usize {
+                self.pawn_correction_heuristic[i][j] = 0;
+            }
+        }
     }
 
     // pub fn resize_eval_table(&mut self, new_size_mb: usize) {
@@ -402,19 +431,19 @@ impl<'a> Search<'a> {
             pv_move = self.pv[ply];
         }
 
-        let mut static_eval = None;
+        let static_eval = OnceCell::new();
 
         // Reverse futility pruning
         if apply_pruning && depth < 3 && !in_check {
             let eval_margin = 150 * depth as Eval;
-            let eval = self.evaluate();
+            let static_eval = *static_eval.get_or_init(|| self.evaluate());
 
-            if eval - eval_margin >= beta {
+            let eval_corrected = self.eval_with_correction(static_eval);
+
+            if eval_corrected - eval_margin >= beta {
                 self.rt.pop_position();
-                return eval - eval_margin;
+                return eval_corrected - eval_margin;
             }
-
-            static_eval = Some(eval);
         }
 
         // Null move pruning
@@ -498,7 +527,9 @@ impl<'a> Search<'a> {
         );
         debug_assert!(pv_move == 0 || move_list[0] as u16 == pv_move);
 
+        let mut best_score = -Eval::MAX;
         let mut best_move = 0;
+        let mut alpha_raise_mv = 0;
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
@@ -627,6 +658,11 @@ impl<'a> Search<'a> {
                 return 0;
             }
 
+            if score > best_score {
+                best_score = score;
+                best_move = mv;
+            }
+
             if score <= alpha {
                 continue;
             }
@@ -634,7 +670,7 @@ impl<'a> Search<'a> {
             self.a_raise_count += 1;
             bound_type = BoundType::Exact;
             alpha = score;
-            best_move = mv;
+            alpha_raise_mv = mv;
 
             unsafe {
                 // Safety: ply+1 is guaranteed to be within PV_DEPTH from search_done check above
@@ -722,6 +758,13 @@ impl<'a> Search<'a> {
                     }
                 }
 
+                if !in_check && best_move & MV_FLAG_CAP == 0 {
+                    let static_eval = *static_eval.get_or_init(|| self.evaluate());
+                    if score >= static_eval {
+                        self.update_correction_heuristics(score - static_eval, depth as Eval);
+                    }
+                }
+
                 // @todo - test fail-hard vs fail-soft
                 self.tt.store(
                     self.chess.zobrist_key(),
@@ -737,6 +780,21 @@ impl<'a> Search<'a> {
         }
         self.rt.pop_position();
 
+        if !in_check && best_move & MV_FLAG_CAP == 0 {
+            let static_eval = *static_eval.get_or_init(|| self.evaluate());
+
+            let update_score = match bound_type {
+                BoundType::UpperBound if best_move == 0 => Some(0),
+                BoundType::UpperBound if best_score <= static_eval => Some(best_score),
+                BoundType::Exact => Some(best_score),
+                _ => None,
+            };
+
+            if let Some(score) = update_score {
+                self.update_correction_heuristics(score - static_eval, depth as Eval);
+            }
+        }
+
         if num_legal_moves == 0 {
             if in_check {
                 return -SCORE_INF + self.ply as Eval;
@@ -750,7 +808,7 @@ impl<'a> Search<'a> {
             self.chess.zobrist_key(),
             alpha,
             depth,
-            best_move,
+            alpha_raise_mv,
             bound_type,
         );
 
@@ -783,7 +841,8 @@ impl<'a> Search<'a> {
         //     self.ply
         // );
 
-        let static_eval = self.evaluate();
+        let raw_eval = self.evaluate();
+        let static_eval = self.eval_with_correction(raw_eval);
 
         let mut alpha = alpha;
 
@@ -902,6 +961,55 @@ impl<'a> Search<'a> {
         self.pv_trace = self.pv_length > 0;
         self.depth = depth;
         self.score = score;
+    }
+
+    #[inline(always)]
+    fn pawn_correction_heuristic_entry(&mut self) -> &mut Eval {
+        &mut self.pawn_correction_heuristic[self.chess.b_move() as usize]
+            [(self.chess.pawn_key() & 0xFFFF) as usize]
+    }
+
+    #[inline(always)]
+    fn update_correction_heuristics(&mut self, diff: Eval, depth: i16) {
+        let diff_scaled = diff * CORR_GRAIN;
+
+        let depth_weight = (depth * depth + 2 * depth + 1).min(CORR_WEIGHT_SCALE) as Eval;
+
+        Self::update_correction_heuristic_entry(
+            self.pawn_correction_heuristic_entry(),
+            diff_scaled,
+            depth_weight,
+        );
+    }
+
+    #[inline(always)]
+    fn update_correction_heuristic_entry(entry: &mut Eval, diff_scaled: Eval, depth_weight: Eval) {
+        let mut current_value = *entry as Eval;
+
+        current_value = (current_value * (CORR_WEIGHT_SCALE - depth_weight)
+            + diff_scaled * depth_weight)
+            / CORR_WEIGHT_SCALE;
+
+        current_value = current_value.max(-CORR_MAX_ERROR).min(CORR_MAX_ERROR);
+
+        *entry = current_value as Eval;
+    }
+
+    #[inline(always)]
+    pub fn eval_with_correction(&mut self, base_eval: Eval) -> Eval {
+        let pawn_corr = *self.pawn_correction_heuristic_entry();
+
+        let mut correction = 0;
+        correction += pawn_corr / CORR_GRAIN;
+
+        // self.corr_stats.push(CorrStats {
+        //     original_eval: base_eval,
+        //     error: correction,
+        // });
+
+        (base_eval + correction)
+            .min(SCORE_INF - PV_DEPTH as i16)
+            .max((-SCORE_INF) + PV_DEPTH as i16)
     }
 
     #[inline(always)]

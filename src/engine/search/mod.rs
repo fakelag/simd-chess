@@ -72,7 +72,8 @@ mod tests {
             let mut search_engine =
                 v12_eval_sp::Search::new(params, &tables, unsafe { &mut *tt.get() }, rt);
 
-            search_engine.new_game_from_fen(test_fen, &tables).unwrap();
+            search_engine.new_game();
+            search_engine.load_from_fen(test_fen, &tables).unwrap();
             search_engine.new_search();
 
             let (bestmove, delta) = {
@@ -83,6 +84,57 @@ mod tests {
                 let end = rdtsc();
                 (mv, end - start)
             };
+
+            // let corr_stats = &mut search_engine.corr_stats;
+            // corr_stats.sort_by(|a, b| b.error.abs().cmp(&a.error.abs()));
+            // let len = corr_stats.len();
+
+            // println!("PC: Top 10 pawn correction errors:");
+            // for stat in corr_stats.iter().take(10) {
+            //     println!(
+            //         "Original eval: {}, Correction error: {}",
+            //         stat.original_eval, stat.error
+            //     );
+            // }
+            // println!(
+            //     "PC: Median pawn correction error: {}",
+            //     corr_stats[len / 2].error
+            // );
+            // println!(
+            //     "PC: Average pawn correction error: {}",
+            //     corr_stats.iter().map(|s| s.error as i64).sum::<i64>() / len as i64
+            // );
+            // println!("num corrections applied: {}", corr_stats.len());
+
+            // let categories = [
+            //     -501, -500, -400, -300, -200, -100, -50, -20, -10, -5, 0, 5, 10, 20, 50, 100, 200,
+            //     300, 400, 500, 501,
+            // ];
+            // let mut distribution = vec![0; categories.len() + 1];
+            // for stat in corr_stats.iter() {
+            //     let mut placed = false;
+            //     for (i, &cat) in categories.iter().enumerate() {
+            //         if stat.error <= cat {
+            //             distribution[i] += 1;
+            //             placed = true;
+            //             break;
+            //         }
+            //     }
+            //     if !placed {
+            //         distribution[categories.len()] += 1;
+            //     }
+            // }
+
+            // println!("PC: Pawn correction error distribution:");
+            // for (i, &cat) in categories.iter().enumerate() {
+            //     if i == 0 {
+            //         println!("  <= {}: {}", cat, distribution[i]);
+            //     } else if i == categories.len() - 1 {
+            //         println!("  > {}: {}", categories[i - 1], distribution[i]);
+            //     } else {
+            //         println!("  ({} , {}]: {}", categories[i - 1], cat, distribution[i]);
+            //     }
+            // }
 
             let tt_stats = unsafe { &mut *tt.get() }.calc_stats();
 

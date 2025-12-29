@@ -48,6 +48,7 @@ pub struct GoCommand {
 pub enum UciCommand {
     Go(GoCommand),
     OptionChange(UciOptions),
+    NewGame,
 }
 
 pub fn chess_uci(
@@ -105,6 +106,9 @@ pub fn chess_uci(
             Some("ucinewgame") => {
                 // Safety: Engine should not be calculating when receiving a ucinewgame command
                 unsafe { &mut *tt.get() }.clear();
+
+                // @todo - Clear TT on the other end
+                tx_search.send(UciCommand::NewGame)?;
             }
             Some("stop") => abort_search_uci(debug_enabled, &mut context),
             Some("isready") => println!("readyok"),

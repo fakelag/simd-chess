@@ -186,7 +186,7 @@ pub struct Bitboards {
     // [0, K, Q, R, B, N, P, 0, 0, k, q, r, b, n, p, 0]
     pub bitboards: [u64; 16],
 }
-const _BITBOARDS_SIZE_ASSERT: () = assert!(std::mem::size_of::<Bitboards>() == 128);
+const _ASSERT_BITBOARDS_SIZE: () = assert!(std::mem::size_of::<Bitboards>() == 128);
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChessGame {
@@ -199,40 +199,9 @@ pub struct ChessGame {
     zobrist_key: u64,
     material: [u16; 2],
     spt: [u8; 64],
+    pawn_key: u64,
 }
-const _CHESS_GAME_SIZE_ASSERT: () = assert!(std::mem::size_of::<ChessGame>() == 256);
-
-impl From<chess::ChessGame> for ChessGame {
-    fn from(value: chess::ChessGame) -> Self {
-        let mut v2 = ChessGame::new();
-
-        for piece_id in util::PieceId::WhiteKing as usize..=util::PieceId::BlackPawn as usize {
-            let piece_id = util::PieceId::from(piece_id);
-            let piece_index: PieceIndex = piece_id.into();
-
-            v2.board.bitboards[piece_index as usize] = value.board.bitboards[piece_id as usize];
-        }
-
-        v2.b_move = value.b_move;
-        v2.castles = value.castles;
-        v2.en_passant = value.en_passant.unwrap_or(0);
-        v2.half_moves = value.half_moves;
-        v2.full_moves = value.full_moves as u16;
-        v2.zobrist_key = value.zobrist_key;
-        v2.material[0] = value.material[0];
-        v2.material[1] = value.material[1];
-
-        for sq in 0..64 {
-            if value.spt[sq] == 0 {
-                continue;
-            }
-            let piece_index = PieceIndex::from(util::PieceId::from(value.spt[sq] as usize - 1));
-            v2.spt[sq] = piece_index as u8;
-        }
-
-        v2
-    }
-}
+const _ASSERT_CHESS_GAME_SIZE: () = assert!(std::mem::size_of::<ChessGame>() == 256);
 
 impl ChessGame {
     pub fn new() -> Self {
@@ -246,6 +215,7 @@ impl ChessGame {
             zobrist_key: 0,
             material: [0; 2],
             spt: [0; 64],
+            pawn_key: 0,
         }
     }
 
@@ -1392,6 +1362,12 @@ impl ChessGame {
                         .hash_piece_squares_new
                         .get_unchecked(cap_piece_id)
                         .get_unchecked(cap_pawn_sq as usize);
+
+                    self.pawn_key ^= tables
+                        .zobrist_hash_keys
+                        .hash_pawn_squares
+                        .get_unchecked(cap_piece_id)
+                        .get_unchecked(cap_pawn_sq as usize);
                 }
 
                 self.material[!self.b_move as usize] -= MATERIAL_TABLE[cap_piece_id];
@@ -1478,10 +1454,22 @@ impl ChessGame {
             self.zobrist_key ^= zb_keys
                 .hash_piece_squares_new
                 .get_unchecked(to_square_piece)[to_sq as usize];
+            self.pawn_key ^= tables
+                .zobrist_hash_keys
+                .hash_pawn_squares
+                .get_unchecked(from_piece)[from_sq as usize];
+            self.pawn_key ^= tables
+                .zobrist_hash_keys
+                .hash_pawn_squares
+                .get_unchecked(to_square_piece)[to_sq as usize];
 
             // Remove captured piece from Zobrist key
             self.zobrist_key ^=
                 zb_keys.hash_piece_squares_new.get_unchecked(to_piece)[to_sq as usize];
+            self.pawn_key ^= tables
+                .zobrist_hash_keys
+                .hash_pawn_squares
+                .get_unchecked(to_piece)[to_sq as usize];
 
             // Remove en passant square from Zobrist key
             self.zobrist_key ^= zb_keys
@@ -1521,10 +1509,6 @@ impl ChessGame {
 
         self.b_move = !self.b_move;
         self.zobrist_key ^= zb_keys.hash_side_to_move;
-
-        // if let Some(nnue) = nnue.as_mut() {
-        //     nnue.make_move(nnue_update);
-        // }
 
         // println!(
         //     "played move {} ({}), b_move: {}, zobrist_key: {:x}",
@@ -1581,55 +1565,6 @@ impl ChessGame {
         }
     }
 
-    pub fn perft_prev<const INTEGRITY_CHECK: bool>(
-        &mut self,
-        depth: u8,
-        tables: &Tables,
-        mut moves: Option<&mut Vec<(String, u64)>>,
-    ) -> u64 {
-        if depth == 0 {
-            return 1;
-        }
-
-        let mut move_list = [0; 256];
-        let move_count = self.gen_moves_slow(tables, &mut move_list);
-
-        let mut node_count = 0;
-
-        let board_copy = self.clone();
-
-        for mv_index in 0..move_count {
-            let mv = move_list[mv_index];
-
-            if unsafe { self.make_move(mv, tables) } && !self.in_check(tables, !self.b_move) {
-                if INTEGRITY_CHECK {
-                    assert!(
-                        self.zobrist_key == self.calc_initial_zobrist_key(tables),
-                        "Zobrist key mismatch after move {}",
-                        util::move_string(mv),
-                    );
-                    assert!(self.spt == self.calc_spt(), "Spt mismatch after move");
-                    assert!(
-                        self.material == self.calc_material(),
-                        "Material mismatch after move {}: {:?} vs {:?}",
-                        util::move_string(mv),
-                        self.material,
-                        self.calc_material(),
-                    );
-                }
-                let nodes = self.perft_prev::<INTEGRITY_CHECK>(depth - 1, tables, None);
-                node_count += nodes;
-
-                if let Some(ref mut moves) = moves {
-                    moves.push((util::move_string(mv), nodes));
-                }
-            }
-            *self = board_copy;
-        }
-
-        node_count
-    }
-
     pub fn perft(
         &mut self,
         depth: u8,
@@ -1666,10 +1601,16 @@ impl ChessGame {
             let nnue_update = unsafe { self.make_move_nnue(mv, tables) };
 
             if nnue_update.is_some() && !self.in_check(tables, !self.b_move) {
+                let (board_key, pawn_key) = self.calc_initial_zobrist_key(tables);
                 assert!(
-                    self.zobrist_key == self.calc_initial_zobrist_key(tables),
+                    self.zobrist_key == board_key,
                     "Zobrist key mismatch after move {}",
                     util::move_string_dbg(mv),
+                );
+                assert!(
+                    self.pawn_key == pawn_key,
+                    "Pawn key mismatch after move {}",
+                    util::move_string_dbg(mv)
                 );
                 assert!(
                     self.spt == self.calc_spt(),
@@ -1855,7 +1796,7 @@ impl ChessGame {
             }
         }
 
-        self.zobrist_key = self.calc_initial_zobrist_key(tables);
+        (self.zobrist_key, self.pawn_key) = self.calc_initial_zobrist_key(tables);
         self.material = self.calc_material();
         self.spt = self.calc_spt();
 
@@ -2054,26 +1995,35 @@ impl ChessGame {
         true
     }
 
-    pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> u64 {
-        let mut zobrist_hash = 0u64;
+    pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> (u64, u64) {
         let zb_keys = &tables.zobrist_hash_keys;
+
+        let mut board_key = 0u64;
+        let mut pawn_key = zb_keys.no_pawn_key;
 
         for square in 0..64 {
             let piece_id = self.piece_at_slow(1 << square);
-            zobrist_hash ^= zb_keys.hash_piece_squares_new[piece_id][square as usize];
+            board_key ^= zb_keys.hash_piece_squares_new[piece_id][square as usize];
+
+            match PieceIndex::from(piece_id) {
+                PieceIndex::WhitePawn | PieceIndex::BlackPawn => {
+                    pawn_key ^= zb_keys.hash_pawn_squares[piece_id][square as usize];
+                }
+                _ => {}
+            }
         }
 
-        zobrist_hash ^= zb_keys.hash_en_passant_squares[self.en_passant as usize];
+        board_key ^= zb_keys.hash_en_passant_squares[self.en_passant as usize];
 
-        zobrist_hash ^= zb_keys.hash_castling_rights[self.castles as usize];
+        board_key ^= zb_keys.hash_castling_rights[self.castles as usize];
 
-        zobrist_hash ^= if self.b_move {
+        board_key ^= if self.b_move {
             zb_keys.hash_side_to_move
         } else {
             0
         };
 
-        zobrist_hash
+        (board_key, pawn_key)
     }
 
     // Sets move flags based on board state that can't be derived from move string
@@ -2152,6 +2102,11 @@ impl ChessGame {
     #[inline(always)]
     pub fn zobrist_key(&self) -> u64 {
         self.zobrist_key
+    }
+
+    #[inline(always)]
+    pub fn pawn_key(&self) -> u64 {
+        self.pawn_key
     }
 
     #[inline(always)]
@@ -2244,6 +2199,46 @@ impl ChessGame {
 
             slider_movement_mask_x8
         }
+    }
+
+    pub fn from_v1(value: chess::ChessGame, tables: &Tables) -> Self {
+        let mut v2 = ChessGame::new();
+
+        v2.pawn_key = tables.zobrist_hash_keys.no_pawn_key;
+
+        for piece_id in util::PieceId::WhiteKing as usize..=util::PieceId::BlackPawn as usize {
+            let piece_id = util::PieceId::from(piece_id);
+            let piece_index: PieceIndex = piece_id.into();
+
+            v2.board.bitboards[piece_index as usize] = value.board.bitboards[piece_id as usize];
+        }
+
+        v2.b_move = value.b_move;
+        v2.castles = value.castles;
+        v2.en_passant = value.en_passant.unwrap_or(0);
+        v2.half_moves = value.half_moves;
+        v2.full_moves = value.full_moves as u16;
+        v2.zobrist_key = value.zobrist_key;
+        v2.material[0] = value.material[0];
+        v2.material[1] = value.material[1];
+
+        for sq in 0..64 {
+            if value.spt[sq] == 0 {
+                continue;
+            }
+            let piece_index = PieceIndex::from(util::PieceId::from(value.spt[sq] as usize - 1));
+            v2.spt[sq] = piece_index as u8;
+
+            match piece_index {
+                PieceIndex::WhitePawn | PieceIndex::BlackPawn => {
+                    v2.pawn_key ^=
+                        tables.zobrist_hash_keys.hash_piece_squares_new[piece_index as usize][sq];
+                }
+                _ => {}
+            }
+        }
+
+        v2
     }
 }
 
@@ -2557,16 +2552,25 @@ mod tests {
                         continue;
                     }
 
-                    let calculated_zobrist_key = board.calc_initial_zobrist_key(&tables);
+                    let (board_key, pawn_key) = board.calc_initial_zobrist_key(&tables);
 
                     assert_eq!(
                         board.zobrist_key(),
-                        calculated_zobrist_key,
+                        board_key,
                         "Zobrist hash mismatch for move {}. Fen: {} Expected: {:#X}, got: {:#X}",
                         util::move_string(mv),
                         fen,
-                        calculated_zobrist_key,
+                        board_key,
                         board.zobrist_key(),
+                    );
+                    assert_eq!(
+                        board.pawn_key(),
+                        pawn_key,
+                        "Pawn key mismatch for move {}. Fen: {} Expected: {:#X}, got: {:#X}",
+                        util::move_string(mv),
+                        fen,
+                        pawn_key,
+                        board.pawn_key(),
                     );
 
                     check_keys_to_depth(fen, depth - 1, board, tables);

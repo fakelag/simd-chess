@@ -189,8 +189,10 @@ impl SelfplayTrainer {
                 None => break,
             };
 
+            search_engine.new_game();
+
             search_engine
-                .new_game_from_fen(&position, tables)
+                .load_from_fen(&position, tables)
                 .map_err(|err| {
                     anyhow::anyhow!(
                         "Failed to load FEN \"{}\" during annotated selfplay - {:?}",

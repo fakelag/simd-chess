@@ -91,11 +91,13 @@ fn search_thread(
             Ok(UciCommand::Go(go)) => {
                 let debug = go.params.debug;
 
-                let chess = chess_v2::ChessGame::from(go.chess);
+                let chess = chess_v2::ChessGame::from_v1(go.chess, tables);
 
-                assert!(chess.zobrist_key() == chess.calc_initial_zobrist_key(tables));
+                let (board_key, pawn_key) = chess.calc_initial_zobrist_key(tables);
+                assert!(chess.zobrist_key() == board_key);
+                assert!(chess.pawn_key() == pawn_key);
 
-                search_engine.new_game_from_board(&chess);
+                search_engine.load_from_board(&chess);
                 search_engine.new_search();
                 search_engine.set_sig(go.sig);
                 search_engine.set_rt(go.repetition_table);
@@ -168,6 +170,9 @@ fn search_thread(
                     println!("info string reloaded opening book");
                 }
             },
+            Ok(UciCommand::NewGame) => {
+                search_engine.new_game();
+            }
             Err(_) => {
                 println!("info search thread terminated");
                 break;
