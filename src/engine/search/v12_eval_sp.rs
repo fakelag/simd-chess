@@ -251,7 +251,6 @@ impl<'a> Search<'a> {
             self.pv[i] = 0;
         }
 
-        // @todo - Test if clearing history on every new search is beneficial
         for piece in 0..16 {
             for square in 0..64 {
                 self.history_moves[piece][square] = 0;
@@ -282,12 +281,6 @@ impl<'a> Search<'a> {
         self.rt.clear();
         self.tt.clear();
         self.et.clear();
-
-        for i in 0..16 {
-            for j in 0..64 {
-                self.history_moves[i][j] = 0;
-            }
-        }
 
         for i in 0..2 {
             for j in 0..=u16::MAX as usize {
@@ -529,7 +522,6 @@ impl<'a> Search<'a> {
 
         let mut best_score = -Eval::MAX;
         let mut best_move = 0;
-        let mut alpha_raise_mv = 0;
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
@@ -670,7 +662,6 @@ impl<'a> Search<'a> {
             self.a_raise_count += 1;
             bound_type = BoundType::Exact;
             alpha = score;
-            alpha_raise_mv = mv;
 
             unsafe {
                 // Safety: ply+1 is guaranteed to be within PV_DEPTH from search_done check above
@@ -765,7 +756,6 @@ impl<'a> Search<'a> {
                     }
                 }
 
-                // @todo - test fail-hard vs fail-soft
                 self.tt.store(
                     self.chess.zobrist_key(),
                     score,
@@ -806,13 +796,13 @@ impl<'a> Search<'a> {
 
         self.tt.store(
             self.chess.zobrist_key(),
-            alpha,
+            best_score,
             depth,
-            alpha_raise_mv,
+            best_move,
             bound_type,
         );
 
-        alpha
+        best_score
     }
 
     fn quiescence(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {

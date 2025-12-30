@@ -1,11 +1,11 @@
-use std::{cell::SyncUnsafeCell, thread::JoinHandle};
+use std::thread::JoinHandle;
 
 use crossbeam::channel;
 
 use crate::{
     engine::{
         chess,
-        search::{self, AbortSignal, SigAbort, search_params, transposition_v2},
+        search::{self, AbortSignal, SigAbort, search_params},
         tables,
     },
     uci::{context::UciContext, option::*},
@@ -55,7 +55,6 @@ pub fn chess_uci(
     uci_context: UciContext<UciOptions>,
     tx_search: channel::Sender<UciCommand>,
     tables: &tables::Tables,
-    tt: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) -> anyhow::Result<()> {
     let mut debug_enabled = true;
 
@@ -104,10 +103,6 @@ pub fn chess_uci(
                 _ => panic!("Expected 'on' or 'off' after debug command"),
             },
             Some("ucinewgame") => {
-                // Safety: Engine should not be calculating when receiving a ucinewgame command
-                unsafe { &mut *tt.get() }.clear();
-
-                // @todo - Clear TT on the other end
                 tx_search.send(UciCommand::NewGame)?;
             }
             Some("stop") => abort_search_uci(debug_enabled, &mut context),
@@ -115,10 +110,6 @@ pub fn chess_uci(
             Some("position") => {
                 let mut board = chess::ChessGame::new();
                 let mut rep_table = search::repetition_v2::RepetitionTable::new();
-
-                // Safety: Engine should not be calculating when receiving a position command
-                let tt = unsafe { &mut *tt.get() };
-                tt.clear();
 
                 let position_start_index = input
                     .next()

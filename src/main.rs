@@ -414,7 +414,7 @@ fn main() {
                     search_thread(uci_context.clone(), rx_search, &tables, &tt);
                 });
 
-                let result = chess_uci(uci_context.clone(), tx_search, &tables, &tt);
+                let result = chess_uci(uci_context.clone(), tx_search, &tables);
 
                 st.join().unwrap();
 
