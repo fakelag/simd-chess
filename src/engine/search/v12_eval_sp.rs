@@ -416,9 +416,6 @@ impl<'a> Search<'a> {
 
         let depth_pruning = depth >= 3 && !in_check;
 
-        self.rt
-            .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
-
         if self.pv_trace {
             self.pv_trace = self.pv_length > (ply + 1);
             pv_move = self.pv[ply];
@@ -426,50 +423,54 @@ impl<'a> Search<'a> {
 
         let static_eval = OnceCell::new();
 
-        // Reverse futility pruning
-        if apply_pruning && depth < 3 && !in_check {
-            let eval_margin = 150 * depth as Eval;
-            let static_eval = *static_eval.get_or_init(|| self.evaluate());
+        if apply_pruning {
+            if !in_check {
+                // Reverse futility pruning
+                if depth < 3 {
+                    let eval_margin = 150 * depth as Eval;
+                    let static_eval = *static_eval.get_or_init(|| self.evaluate());
 
-            let eval_corrected = self.eval_with_correction(static_eval);
+                    let eval_corrected = self.eval_with_correction(static_eval);
 
-            if eval_corrected - eval_margin >= beta {
-                self.rt.pop_position();
-                return eval_corrected - eval_margin;
+                    if eval_corrected - eval_margin >= beta {
+                        return eval_corrected - eval_margin;
+                    }
+                }
+            }
+
+            // Null move pruning
+            if depth_pruning && !self.is_endgame() {
+                let ep_square = self.chess.make_null_move(self.tables);
+
+                self.ply += 1;
+                let score = -self.go(-beta, -beta + 1, depth - 3);
+                self.ply -= 1;
+
+                self.chess.rollback_null_move(ep_square, self.tables);
+
+                // debug_assert_eq!(
+                //     self.nnue.acc,
+                //     {
+                //         let mut expected_pair = nnue::AccumulatorPair::new();
+                //         expected_pair.load(&self.chess, &self.nnue.net);
+                //         expected_pair
+                //     },
+                //     "NNUE accumulator mismatch after null move",
+                // );
+
+                if self.is_stopping {
+                    return 0;
+                }
+
+                if score >= beta {
+                    self.b_cut_null_count += 1;
+                    return score;
+                }
             }
         }
 
-        // Null move pruning
-        if apply_pruning && depth_pruning && !self.is_endgame() {
-            let ep_square = self.chess.make_null_move(self.tables);
-
-            self.ply += 1;
-            let score = -self.go(-beta, -beta + 1, depth - 3);
-            self.ply -= 1;
-
-            self.chess.rollback_null_move(ep_square, self.tables);
-
-            // debug_assert_eq!(
-            //     self.nnue.acc,
-            //     {
-            //         let mut expected_pair = nnue::AccumulatorPair::new();
-            //         expected_pair.load(&self.chess, &self.nnue.net);
-            //         expected_pair
-            //     },
-            //     "NNUE accumulator mismatch after null move",
-            // );
-
-            if self.is_stopping {
-                self.rt.pop_position();
-                return 0;
-            }
-
-            if score >= beta {
-                self.rt.pop_position();
-                self.b_cut_null_count += 1;
-                return score;
-            }
-        }
+        self.rt
+            .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
 
         let mut move_count = self
             .chess
