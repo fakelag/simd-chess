@@ -5,6 +5,11 @@ use crate::{
 
 pub type Eval = i16;
 
+#[inline(always)]
+pub fn is_mate(score: Eval) -> bool {
+    score.abs() > SCORE_INF - 64
+}
+
 pub const SCORE_INF: Eval = i16::MAX - 1;
 pub const WEIGHT_KING: Eval = 0;
 pub const WEIGHT_QUEEN: Eval = 1000;
