@@ -229,22 +229,21 @@ fn is_board_checkmated(board: &chess_v2::ChessGame, tables: &tables::Tables) -> 
     let mut move_list = [0u16; 256];
 
     // No need to try all promotion variants
-    let is_checkmate =
-        (0..board.gen_moves_avx512::<false>(tables, &mut move_list)).all(|mv_index| {
-            let mv = move_list[mv_index];
+    let is_checkmate = (0..board.gen_moves_avx512::<false>(&mut move_list)).all(|mv_index| {
+        let mv = move_list[mv_index];
 
-            let mut board_copy = board.clone();
+        let mut board_copy = board.clone();
 
-            if unsafe { !board_copy.make_move(mv, tables) } {
-                return true;
-            }
+        if unsafe { !board_copy.make_move(mv, tables) } {
+            return true;
+        }
 
-            if board_copy.in_check(tables, !board_copy.b_move()) {
-                return true;
-            }
+        if board_copy.in_check(tables, !board_copy.b_move()) {
+            return true;
+        }
 
-            false
-        });
+        false
+    });
 
     is_checkmate
 }

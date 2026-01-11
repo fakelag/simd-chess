@@ -158,9 +158,7 @@ impl Matchmaking {
         self.legal_moves.clear();
 
         let mut move_list = [0u16; 256];
-        let move_count = self
-            .board
-            .gen_moves_avx512::<false>(&self.tables, &mut move_list);
+        let move_count = self.board.gen_moves_avx512::<false>(&mut move_list);
 
         for i in 0..move_count {
             let mv = move_list[i];

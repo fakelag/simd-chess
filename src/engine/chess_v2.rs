@@ -1,5 +1,8 @@
 use crate::{
-    engine::{chess, tables::Tables},
+    engine::{
+        chess,
+        tables::{self, Tables},
+    },
     nnue::nnue::{self, UpdatableNnue},
     pop_ls1b,
     util::{self},
@@ -220,11 +223,7 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn gen_moves_avx512<const CAPTURE_ONLY: bool>(
-        &self,
-        tables: &Tables,
-        move_list: &mut [u16],
-    ) -> usize {
+    pub fn gen_moves_avx512<const CAPTURE_ONLY: bool>(&self, move_list: &mut [u16]) -> usize {
         let mut mv_cursor = 0usize;
 
         unsafe {
@@ -252,8 +251,8 @@ impl ChessGame {
                 0xFFFFFFFF_FFFFFFFFu64 as i64,
             );
             const PAWN_LANES: u8 = 0b11111000;
-            // const KNIGHT_LANES: u8 = 0b00000110;
-            // const KING_LANES: u8 = 0b00000001;
+            const KING_LANES: u8 = 0b00000001;
+            const KNIGHT_LANES: u8 = 0b00000110;
 
             let const_slider_selector = _mm512_set_epi64(
                 PieceIndex::WhiteQueen as i64,
@@ -276,33 +275,8 @@ impl ChessGame {
                 0xAA55AA55AA55AA55u64 as i64, // black squares
                 0x55AA55AA55AA55AAu64 as i64, // light squares
             );
-            // 0x0 = rook, 0x40 = bishop
-            let const_slider_gather_magic_masks_offsets_x8 =
-                _mm512_set_epi64(0x40, 0, 0, 0, 0, 0, 0x40, 0x40);
-            let const_slider_gather_moves_shifts_x8 = _mm512_set_epi64(
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-            );
-            const BISHOP_MV_GATHER_OFFSET: i64 = (64 * Tables::ROOK_OCCUPANCY_MAX) as i64;
-            let const_moves_gather_base_offsets_x8 = _mm512_set_epi64(
-                BISHOP_MV_GATHER_OFFSET,
-                0,
-                0,
-                0,
-                0,
-                0,
-                BISHOP_MV_GATHER_OFFSET,
-                BISHOP_MV_GATHER_OFFSET,
-            );
-            // const BISHOP_LANES: u8 = 0b00000011;
-            // const ROOK_LANES: u8 = 0b00111100;
-            // const QUEEN_LANES: u8 = 0b11000000;
+            const BISHOP_LANES: u8 = 0b10000011;
+            const ROOK_LANES: u8 = 0b01111100;
 
             let bitboard_x8 = _mm512_load_si512(
                 self.board.bitboards.as_ptr().add(friendly_move_offset) as *const __m512i,
@@ -328,7 +302,6 @@ impl ChessGame {
             let opponent_ep_x8 = _mm512_set1_epi64((1u64 << self.en_passant >> 1 << 1) as i64);
 
             let const_63_x8 = _mm512_set1_epi64(63);
-            let const_64_x8 = _mm512_set1_epi64(64);
             let const_1_x8 = _mm512_set1_epi64(1);
             let const_n1_x8 = _mm512_set1_epi64(-1);
             let const_zero_x8 = _mm512_setzero_si512();
@@ -341,7 +314,6 @@ impl ChessGame {
 
             let b_move_rank_offset = (56 * (self.b_move as u64)) as u8;
 
-            let friendly_move_offset_x8 = _mm512_set1_epi64(friendly_move_offset as i64);
             let full_board_x8 = _mm512_set1_epi64(full_board as i64);
             let full_board_inv_x8 = _mm512_set1_epi64(!full_board as i64);
             let friendly_board_inv_x8 = _mm512_set1_epi64(!friendly_board as i64);
@@ -377,30 +349,84 @@ impl ChessGame {
             }
 
             loop {
-                let mut slider_moves_x8 = ChessGame::get_slider_moves_avx512_x8(
-                    tables,
-                    full_board_x8,
-                    one_of_each_slider_index_x8,
-                    const_slider_gather_magic_masks_offsets_x8,
-                    const_moves_gather_base_offsets_x8,
-                    const_slider_gather_moves_shifts_x8,
-                    active_pieces_slider_mask,
-                );
-
                 let pawn_mask = PAWN_LANES & active_pieces_non_slider_mask;
 
-                let mut non_slider_moves_x8 = _mm512_mask_i64gather_epi64(
-                    _mm512_setzero_si512(),
+                let one_of_each_non_slider_sq_mask_x8 =
+                    _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
+
+                let mut slider_moves_x8 = Self::calc_slider_moves_avx512_x8(
+                    full_board_x8,
+                    one_of_each_slider_index_x8,
+                    ROOK_LANES & active_pieces_slider_mask,
+                    BISHOP_LANES & active_pieces_slider_mask,
+                );
+
+                // let print_m512 = |label: &str, a: &__m512i| {
+                //     let mut arr: [u64; 8] = [0u64; 8];
+                //     unsafe {
+                //         _mm512_storeu_si512(arr.as_mut_ptr() as *mut __m512i, *a);
+                //     }
+                //     println!("{}: {:#x?}", label, arr);
+                // };
+
+                // print_m512("slider_moves_x8", &slider_moves_x8);
+
+                // 0x0 = rook, 0x40 = bishop
+                // let const_slider_gather_magic_masks_offsets_x8 =
+                //     _mm512_set_epi64(0x40, 0, 0, 0, 0, 0, 0x40, 0x40);
+                // let const_slider_gather_moves_shifts_x8 = _mm512_set_epi64(
+                //     Tables::BISHOP_OCCUPANCY_BITS as i64,
+                //     Tables::ROOK_OCCUPANCY_BITS as i64,
+                //     Tables::ROOK_OCCUPANCY_BITS as i64,
+                //     Tables::ROOK_OCCUPANCY_BITS as i64,
+                //     Tables::ROOK_OCCUPANCY_BITS as i64,
+                //     Tables::ROOK_OCCUPANCY_BITS as i64,
+                //     Tables::BISHOP_OCCUPANCY_BITS as i64,
+                //     Tables::BISHOP_OCCUPANCY_BITS as i64,
+                // );
+                // const BISHOP_MV_GATHER_OFFSET: i64 = (64 * Tables::ROOK_OCCUPANCY_MAX) as i64;
+                // let const_moves_gather_base_offsets_x8 = _mm512_set_epi64(
+                //     BISHOP_MV_GATHER_OFFSET,
+                //     0,
+                //     0,
+                //     0,
+                //     0,
+                //     0,
+                //     BISHOP_MV_GATHER_OFFSET,
+                //     BISHOP_MV_GATHER_OFFSET,
+                // );
+                // let mut slider_moves_x8 = Self::gather_slider_moves_avx512_x8(
+                //     tables,
+                //     full_board_x8,
+                //     one_of_each_slider_index_x8,
+                //     const_slider_gather_magic_masks_offsets_x8,
+                //     const_moves_gather_base_offsets_x8,
+                //     const_slider_gather_moves_shifts_x8,
+                //     active_pieces_slider_mask,
+                // );
+
+                // let friendly_move_offset_x8 = _mm512_set1_epi64(friendly_move_offset as i64);
+                // let mut non_slider_moves_x8 = _mm512_mask_i64gather_epi64(
+                //     _mm512_setzero_si512(),
+                //     active_pieces_non_slider_mask,
+                //     _mm512_add_epi64(
+                //         _mm512_mullo_epi64(
+                //             _mm512_add_epi64(const_nonslider_selector, friendly_move_offset_x8),
+                //             const_64_x8,
+                //         ),
+                //         one_of_each_non_slider_index_x8,
+                //     ),
+                //     Tables::LT_NON_SLIDER_MASKS_GATHER.0.as_ptr() as *const i64,
+                //     8,
+                // );
+
+                let mut non_slider_moves_x8 = Self::calc_non_slider_moves_avx512_x8(
+                    self.b_move,
+                    one_of_each_non_slider_sq_mask_x8,
+                    KNIGHT_LANES,
+                    KING_LANES,
+                    PAWN_LANES,
                     active_pieces_non_slider_mask,
-                    _mm512_add_epi64(
-                        _mm512_mullo_epi64(
-                            _mm512_add_epi64(const_nonslider_selector, friendly_move_offset_x8),
-                            const_64_x8,
-                        ),
-                        one_of_each_non_slider_index_x8,
-                    ),
-                    Tables::LT_NON_SLIDER_MASKS_GATHER.0.as_ptr() as *const i64,
-                    8,
                 );
 
                 if CAPTURE_ONLY {
@@ -415,11 +441,12 @@ impl ChessGame {
 
                 // Pawn push moves
                 if !CAPTURE_ONLY {
-                    let src_sq_bit_x8 =
-                        _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
                     let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
                         pawn_mask,
-                        _mm512_rolv_epi64(src_sq_bit_x8, pawn_push_rank_rolv_offset_x8),
+                        _mm512_rolv_epi64(
+                            one_of_each_non_slider_sq_mask_x8,
+                            pawn_push_rank_rolv_offset_x8,
+                        ),
                         full_board_inv_x8,
                     );
                     let promotion_mask =
@@ -521,8 +548,7 @@ impl ChessGame {
 
                     let slider_dst_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, slider_dst_sq_x8);
 
-                    let s_quiet_mask =
-                        _mm512_test_epi64_mask(slider_dst_sq_bit_x8, full_board_inv_x8);
+                    let s_all_mask = _mm512_cmpneq_epi64_mask(slider_dst_sq_x8, const_n1_x8);
 
                     let s_cap_mask =
                         _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_board_x8);
@@ -540,7 +566,7 @@ impl ChessGame {
                     // Convert full move to 16-bit format
                     let s_mv_epi16_x8 = _mm512_cvtepi64_epi16(slider_full_move_x8);
 
-                    push_moves!(s_cap_mask | s_quiet_mask, s_mv_epi16_x8);
+                    push_moves!(s_all_mask, s_mv_epi16_x8);
 
                     non_slider_moves_x8 =
                         _mm512_xor_epi64(non_slider_moves_x8, non_slider_dst_sq_bit_x8);
@@ -607,223 +633,16 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn estimate_move_count(&self, b_move: bool, tables: &Tables) -> usize {
-        let mut move_count = 0usize;
+    pub fn estimate_move_count(&mut self, b_move: bool, _tables: &Tables) -> usize {
+        let b_move_save = self.b_move;
+        self.b_move = b_move;
 
-        unsafe {
-            let friendly_move_offset = (b_move as usize) << 3;
-            let opponent_move_offset = (!b_move as usize) << 3;
+        let mut move_list = [0u16; 256];
+        let move_count = self.gen_moves_avx512::<false>(&mut move_list);
 
-            let const_nonslider_selector = _mm512_set_epi64(
-                PieceIndex::WhitePawn as i64,
-                PieceIndex::WhitePawn as i64,
-                PieceIndex::WhitePawn as i64,
-                PieceIndex::WhitePawn as i64,
-                PieceIndex::WhitePawn as i64,
-                PieceIndex::WhiteKnight as i64,
-                PieceIndex::WhiteKnight as i64,
-                PieceIndex::WhiteKing as i64,
-            );
-            let const_nonslider_split = _mm512_set_epi64(
-                0x4040404040404040u64 as i64, // g // 0x8080808080808080u64 as i64, // h file
-                0x2020202020202020u64 as i64, // f // 0x4040404040404040u64 as i64, // g file
-                0x404040404040404u64 as i64,  // c // 0x3030303030303030u64 as i64, // ef file
-                0x1212121212121212u64 as i64, // be // 0xc0c0c0c0c0c0c0cu64 as i64,  // cd file
-                0x8989898989898989u64 as i64, // adh // 0x303030303030303u64 as i64,  // ab file
-                0xF0F0F0F0F0F0F0F0u64 as i64, // right half
-                0x0F0F0F0F0F0F0F0Fu64 as i64, // left half
-                0xFFFFFFFF_FFFFFFFFu64 as i64,
-            );
-            const PAWN_LANES: u8 = 0b11111000;
+        self.b_move = b_move_save;
 
-            let const_slider_selector = _mm512_set_epi64(
-                PieceIndex::WhiteQueen as i64,
-                PieceIndex::WhiteQueen as i64,
-                PieceIndex::WhiteRook as i64,
-                PieceIndex::WhiteRook as i64,
-                PieceIndex::WhiteRook as i64,
-                PieceIndex::WhiteRook as i64,
-                PieceIndex::WhiteBishop as i64,
-                PieceIndex::WhiteBishop as i64,
-            );
-
-            let const_slider_split = _mm512_set_epi64(
-                0xFFFFFFFF_FFFFFFFFu64 as i64,
-                0xFFFFFFFF_FFFFFFFFu64 as i64,
-                0x050A050A050A050Au64 as i64, // left light squares
-                0x0A050A050A050A05u64 as i64, // left black squares
-                0x50A050A050A050A0u64 as i64, // right light squares
-                0xA050A050A050A050u64 as i64, // right black squares
-                0xAA55AA55AA55AA55u64 as i64, // black squares
-                0x55AA55AA55AA55AAu64 as i64, // light squares
-            );
-            // 0x0 = rook, 0x40 = bishop
-            let const_slider_gather_magic_masks_offsets_x8 =
-                _mm512_set_epi64(0x40, 0, 0, 0, 0, 0, 0x40, 0x40);
-            let const_slider_gather_moves_shifts_x8 = _mm512_set_epi64(
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::ROOK_OCCUPANCY_BITS as i64,
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-                Tables::BISHOP_OCCUPANCY_BITS as i64,
-            );
-            const BISHOP_MV_GATHER_OFFSET: i64 = (64 * Tables::ROOK_OCCUPANCY_MAX) as i64;
-            let const_moves_gather_base_offsets_x8 = _mm512_set_epi64(
-                BISHOP_MV_GATHER_OFFSET,
-                0,
-                0,
-                0,
-                0,
-                0,
-                BISHOP_MV_GATHER_OFFSET,
-                BISHOP_MV_GATHER_OFFSET,
-            );
-
-            let bitboard_x8 = _mm512_load_si512(
-                self.board.bitboards.as_ptr().add(friendly_move_offset) as *const __m512i,
-            );
-
-            let mut sliders_x8 = _mm512_and_epi64(
-                _mm512_permutex2var_epi64(bitboard_x8, const_slider_selector, bitboard_x8),
-                const_slider_split,
-            );
-
-            let mut non_sliders_x8 = _mm512_and_epi64(
-                _mm512_permutex2var_epi64(bitboard_x8, const_nonslider_selector, bitboard_x8),
-                const_nonslider_split,
-            );
-
-            let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
-            let friendly_board = _mm512_reduce_or_epi64(bitboard_x8) as u64;
-            let opponent_board = self.board.bitboards
-                [opponent_move_offset..opponent_move_offset + 8]
-                .iter()
-                .fold(0, |acc, &bb| acc | bb);
-
-            let opponent_ep_x8 = _mm512_set1_epi64(
-                (((b_move == self.b_move) as u64) << self.en_passant >> 1 << 1) as i64,
-            );
-
-            let const_63_x8 = _mm512_set1_epi64(63);
-            let const_64_x8 = _mm512_set1_epi64(64);
-            let const_1_x8 = _mm512_set1_epi64(1);
-            let const_n1_x8 = _mm512_set1_epi64(-1);
-            let const_zero_x8 = _mm512_setzero_si512();
-
-            let b_move_rank_offset = (56 * (b_move as u64)) as u8;
-
-            let friendly_move_offset_x8 = _mm512_set1_epi64(friendly_move_offset as i64);
-            let full_board_x8 = _mm512_set1_epi64(full_board as i64);
-            let full_board_inv_x8 = _mm512_set1_epi64(!full_board as i64);
-            let friendly_board_inv_x8 = _mm512_set1_epi64(!friendly_board as i64);
-            let opponent_board_and_ep_x8 =
-                _mm512_or_epi64(_mm512_set1_epi64(opponent_board as i64), opponent_ep_x8);
-
-            let pawn_double_push_rank_x8 =
-                _mm512_set1_epi64((0xFF000000u64 << ((b_move as usize) << 3)) as i64);
-
-            let pawn_push_offset_ranks =
-                (opponent_move_offset as u64 + b_move_rank_offset as u64) as i64;
-            let pawn_push_rank_rolv_offset_x8 = _mm512_set1_epi64(pawn_push_offset_ranks); // white=8, black=56
-
-            let mut one_of_each_slider_index_x8 =
-                _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
-            let mut one_of_each_non_slider_index_x8 =
-                _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
-            let mut active_pieces_non_slider_mask =
-                _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
-            let mut active_pieces_slider_mask =
-                _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
-
-            loop {
-                let mut slider_moves_x8 = ChessGame::get_slider_moves_avx512_x8(
-                    tables,
-                    full_board_x8,
-                    one_of_each_slider_index_x8,
-                    const_slider_gather_magic_masks_offsets_x8,
-                    const_moves_gather_base_offsets_x8,
-                    const_slider_gather_moves_shifts_x8,
-                    active_pieces_slider_mask,
-                );
-
-                let pawn_mask = PAWN_LANES & active_pieces_non_slider_mask;
-
-                let mut non_slider_moves_x8 = _mm512_mask_i64gather_epi64(
-                    _mm512_setzero_si512(),
-                    active_pieces_non_slider_mask,
-                    _mm512_add_epi64(
-                        _mm512_mullo_epi64(
-                            _mm512_add_epi64(const_nonslider_selector, friendly_move_offset_x8),
-                            const_64_x8,
-                        ),
-                        one_of_each_non_slider_index_x8,
-                    ),
-                    Tables::LT_NON_SLIDER_MASKS_GATHER.0.as_ptr() as *const i64,
-                    8,
-                );
-
-                slider_moves_x8 = _mm512_and_si512(slider_moves_x8, friendly_board_inv_x8);
-                non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
-                non_slider_moves_x8 = _mm512_mask_and_epi64(
-                    non_slider_moves_x8,
-                    PAWN_LANES,
-                    non_slider_moves_x8,
-                    opponent_board_and_ep_x8,
-                );
-
-                // Pawn push moves
-                let src_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
-                let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
-                    pawn_mask,
-                    _mm512_rolv_epi64(src_sq_bit_x8, pawn_push_rank_rolv_offset_x8),
-                    full_board_inv_x8,
-                );
-                let pawn_push_double_bit_x8 = _mm512_and_epi64(
-                    _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
-                    _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
-                );
-                let pawn_push_single_mask =
-                    pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
-                let pawn_push_double_mask =
-                    pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
-
-                move_count += pawn_push_single_mask.count_ones() as usize;
-                move_count += pawn_push_double_mask.count_ones() as usize;
-
-                move_count +=
-                    _mm512_reduce_add_epi64(_mm512_popcnt_epi64(non_slider_moves_x8)) as usize;
-                move_count +=
-                    _mm512_reduce_add_epi64(_mm512_popcnt_epi64(slider_moves_x8)) as usize;
-
-                // Pop pieces
-                non_sliders_x8 = _mm512_xor_epi64(
-                    non_sliders_x8,
-                    _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8),
-                );
-                sliders_x8 = _mm512_xor_epi64(
-                    sliders_x8,
-                    _mm512_sllv_epi64(const_1_x8, one_of_each_slider_index_x8),
-                );
-
-                one_of_each_slider_index_x8 =
-                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
-                one_of_each_non_slider_index_x8 =
-                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
-                active_pieces_non_slider_mask =
-                    _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
-                active_pieces_slider_mask =
-                    _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
-
-                if (active_pieces_non_slider_mask | active_pieces_slider_mask) == 0 {
-                    break;
-                }
-            }
-
-            move_count
-        }
+        move_count
     }
 
     pub fn gen_moves_slow(&self, tables: &Tables, move_list: &mut [u16]) -> usize {
@@ -1580,7 +1399,7 @@ impl ChessGame {
 
         let mut move_list = [0u16; 220];
 
-        let move_count = self.gen_moves_avx512::<false>(tables, &mut move_list[2..]);
+        let move_count = self.gen_moves_avx512::<false>(&mut move_list[2..]);
 
         let board_copy = self.clone();
 
@@ -2140,7 +1959,7 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    fn get_slider_moves_avx512_x8(
+    fn gather_slider_moves_avx512_x8(
         tables: &Tables,
         full_board_x8: __m512i,
         piece_indices: __m512i,
@@ -2198,6 +2017,250 @@ impl ChessGame {
             );
 
             slider_movement_mask_x8
+        }
+    }
+
+    #[inline(always)]
+    fn calc_slider_moves_avx512_x8(
+        full_board_x8: __m512i,
+        one_of_each_index_x8: __m512i,
+        rook_mask: u8,
+        bish_mask: u8,
+    ) -> __m512i {
+        unsafe {
+            const RAY_A2_A8: u64 = 0x101010101010100u64;
+            const RAY_A1_A8: u64 = 0x0101010101010101u64;
+            const RAY_A1_H8: u64 = 0x8040201008040201u64;
+            const RAY_A8_H1: u64 = 0x0102040810204080u64;
+
+            let byteswap_epi64_x8 = |input_x8: __m512i| -> __m512i {
+                let swap_x8 = _mm512_set_epi64(
+                    0x38393a3b3c3d3e3f,
+                    0x3031323334353637,
+                    0x28292a2b2c2d2e2f,
+                    0x2021222324252627,
+                    0x18191a1b1c1d1e1f,
+                    0x1011121314151617,
+                    0x8090a0b0c0d0e0f,
+                    0x1020304050607,
+                );
+
+                _mm512_shuffle_epi8(input_x8, swap_x8)
+            };
+
+            let ray_moves_with_occ_x8 = |active_mask: u8,
+                                         forward_x8: __m512i,
+                                         line_mask_x8: __m512i,
+                                         sq_mask_x8: __m512i,
+                                         sq_mask_bswap_x8: __m512i|
+             -> __m512i {
+                let mut forward_x8 = forward_x8;
+                let mut reverse_x8 = byteswap_epi64_x8(forward_x8);
+
+                forward_x8 = _mm512_sub_epi64(forward_x8, sq_mask_x8);
+                reverse_x8 = _mm512_sub_epi64(reverse_x8, sq_mask_bswap_x8);
+
+                forward_x8 = _mm512_xor_epi64(forward_x8, byteswap_epi64_x8(reverse_x8));
+                forward_x8 = _mm512_maskz_and_epi64(active_mask, forward_x8, line_mask_x8);
+
+                forward_x8
+            };
+
+            let slider_sq_x8 = _mm512_sllv_epi64(_mm512_set1_epi64(1), one_of_each_index_x8);
+            let slider_sq_bswap_x8 = byteswap_epi64_x8(slider_sq_x8);
+
+            let line_mask_x8 =
+                _mm512_rolv_epi64(_mm512_set1_epi64(RAY_A2_A8 as i64), one_of_each_index_x8);
+
+            let sq_file_x8 = _mm512_and_epi64(one_of_each_index_x8, _mm512_set1_epi64(7));
+            let sq_rank_x8 = _mm512_and_epi64(one_of_each_index_x8, _mm512_set1_epi64(56));
+
+            let diag_rank_x8 = _mm512_slli_epi64(sq_file_x8, 3);
+
+            let diagonal_mask_x8 = {
+                let diag_x8 = _mm512_sub_epi64(diag_rank_x8, sq_rank_x8);
+                let diag_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), diag_x8);
+                let top_x8 = _mm512_and_epi64(diag_neg_x8, _mm512_srai_epi64(diag_x8, 31));
+                let bot_x8 = _mm512_and_epi64(diag_x8, _mm512_srai_epi64(diag_neg_x8, 31));
+
+                let base_mask = _mm512_set1_epi64(RAY_A1_H8 as i64);
+                _mm512_sllv_epi64(_mm512_srlv_epi64(base_mask, bot_x8), top_x8)
+            };
+
+            let antidiag_mask_x8 = {
+                let antid_x8 = _mm512_sub_epi64(
+                    _mm512_sub_epi64(_mm512_set1_epi64(56), diag_rank_x8),
+                    sq_rank_x8,
+                );
+                let antid_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), antid_x8);
+                let top_x8 = _mm512_and_epi64(antid_neg_x8, _mm512_srai_epi64(antid_x8, 31));
+                let bot_x8 = _mm512_and_epi64(antid_x8, _mm512_srai_epi64(antid_neg_x8, 31));
+
+                let base_mask = _mm512_set1_epi64(RAY_A8_H1 as i64);
+                _mm512_sllv_epi64(_mm512_srlv_epi64(base_mask, bot_x8), top_x8)
+            };
+
+            let full_board_without_sq_x8 = _mm512_andnot_epi64(slider_sq_x8, full_board_x8);
+
+            let moves_file_x8 = ray_moves_with_occ_x8(
+                rook_mask,
+                _mm512_and_epi64(full_board_without_sq_x8, line_mask_x8),
+                line_mask_x8,
+                slider_sq_x8,
+                slider_sq_bswap_x8,
+            );
+            let moves_diag_x8 = ray_moves_with_occ_x8(
+                bish_mask,
+                _mm512_and_epi64(full_board_without_sq_x8, diagonal_mask_x8),
+                diagonal_mask_x8,
+                slider_sq_x8,
+                slider_sq_bswap_x8,
+            );
+            let moves_anti_x8 = ray_moves_with_occ_x8(
+                bish_mask,
+                _mm512_and_epi64(full_board_without_sq_x8, antidiag_mask_x8),
+                antidiag_mask_x8,
+                slider_sq_x8,
+                slider_sq_bswap_x8,
+            );
+
+            // Calculate rank attacks by translating rank to a1-h1 diagonal, calculating attacks and translating back:
+            let sq_propagate_x8 = _mm512_and_epi64(
+                _mm512_sllv_epi64(_mm512_set1_epi64(0xFFu64 as i64), diag_rank_x8),
+                _mm512_set1_epi64(RAY_A1_H8 as i64),
+            );
+
+            let occ_bottom_x8 = _mm512_and_epi64(
+                _mm512_srlv_epi64(full_board_without_sq_x8, sq_rank_x8),
+                _mm512_set1_epi64(0xFFu64 as i64),
+            );
+            let occ_propagate_x8 = _mm512_maskz_mullo_epi64(
+                rook_mask,
+                occ_bottom_x8,
+                _mm512_set1_epi64(RAY_A1_A8 as i64),
+            );
+
+            let diagonal_rank_moves_x8 = ray_moves_with_occ_x8(
+                rook_mask,
+                _mm512_and_epi64(occ_propagate_x8, _mm512_set1_epi64(RAY_A1_H8 as i64)),
+                _mm512_set1_epi64(RAY_A1_H8 as i64),
+                sq_propagate_x8,
+                byteswap_epi64_x8(sq_propagate_x8),
+            );
+
+            let moves_rank_x8 = _mm512_maskz_sllv_epi64(
+                rook_mask,
+                _mm512_srlv_epi64(
+                    _mm512_maskz_mullo_epi64(
+                        rook_mask,
+                        diagonal_rank_moves_x8,
+                        _mm512_set1_epi64(RAY_A1_A8 as i64),
+                    ),
+                    _mm512_set1_epi64(56),
+                ),
+                sq_rank_x8,
+            );
+
+            let slider_moves_x8 = _mm512_or_epi64(
+                _mm512_ternarylogic_epi64(moves_file_x8, moves_diag_x8, moves_anti_x8, 0xFE),
+                moves_rank_x8,
+            );
+
+            slider_moves_x8
+        }
+    }
+
+    #[inline(always)]
+    fn calc_non_slider_moves_avx512_x8(
+        b_move: bool,
+        non_slider_sq_x8: __m512i,
+        knight_mask: u8,
+        king_mask: u8,
+        pawn_mask: u8,
+        active_mask: u8,
+    ) -> __m512i {
+        unsafe {
+            let const_ex_file_a_x8 = _mm512_set1_epi64(tables::EX_A_FILE as i64);
+            let const_ex_file_ab_x8 =
+                _mm512_set1_epi64(tables::EX_A_FILE as i64 & tables::EX_B_FILE as i64);
+            let const_ex_file_gh_x8 =
+                _mm512_set1_epi64(tables::EX_G_FILE as i64 & tables::EX_H_FILE as i64);
+            let const_ex_file_h_x8 = _mm512_set1_epi64(tables::EX_H_FILE as i64);
+
+            let knight_moves_x8 = _mm512_maskz_ternarylogic_epi64(
+                knight_mask,
+                _mm512_ternarylogic_epi64(
+                    _mm512_and_epi64(const_ex_file_h_x8, _mm512_slli_epi64(non_slider_sq_x8, 15)),
+                    _mm512_and_epi64(const_ex_file_a_x8, _mm512_slli_epi64(non_slider_sq_x8, 17)),
+                    _mm512_and_epi64(const_ex_file_gh_x8, _mm512_slli_epi64(non_slider_sq_x8, 6)),
+                    0xFE,
+                ),
+                _mm512_ternarylogic_epi64(
+                    _mm512_and_epi64(const_ex_file_ab_x8, _mm512_srli_epi64(non_slider_sq_x8, 6)),
+                    _mm512_and_epi64(const_ex_file_gh_x8, _mm512_srli_epi64(non_slider_sq_x8, 10)),
+                    _mm512_and_epi64(const_ex_file_a_x8, _mm512_srli_epi64(non_slider_sq_x8, 15)),
+                    0xFE,
+                ),
+                _mm512_or_epi64(
+                    _mm512_and_epi64(const_ex_file_ab_x8, _mm512_slli_epi64(non_slider_sq_x8, 10)),
+                    _mm512_and_epi64(const_ex_file_h_x8, _mm512_srli_epi64(non_slider_sq_x8, 17)),
+                ),
+                0xFE,
+            );
+
+            let king_moves_x8 = _mm512_maskz_ternarylogic_epi64(
+                king_mask,
+                _mm512_and_epi64(
+                    const_ex_file_h_x8,
+                    _mm512_ternarylogic_epi64(
+                        _mm512_srli_epi64(non_slider_sq_x8, 1),
+                        _mm512_srli_epi64(non_slider_sq_x8, 9),
+                        _mm512_slli_epi64(non_slider_sq_x8, 7),
+                        0xFE,
+                    ),
+                ),
+                _mm512_and_epi64(
+                    const_ex_file_a_x8,
+                    _mm512_ternarylogic_epi64(
+                        _mm512_slli_epi64(non_slider_sq_x8, 1),
+                        _mm512_slli_epi64(non_slider_sq_x8, 9),
+                        _mm512_srli_epi64(non_slider_sq_x8, 7),
+                        0xFE,
+                    ),
+                ),
+                _mm512_or_epi64(
+                    _mm512_slli_epi64(non_slider_sq_x8, 8),
+                    _mm512_srli_epi64(non_slider_sq_x8, 8),
+                ),
+                0xFE,
+            );
+
+            let b_move_mask = if b_move { 0xFF } else { 0x00 };
+
+            let pawn_moves_white_x8 = _mm512_maskz_or_epi64(
+                pawn_mask,
+                _mm512_and_epi64(const_ex_file_a_x8, _mm512_slli_epi64(non_slider_sq_x8, 9)),
+                _mm512_and_epi64(const_ex_file_h_x8, _mm512_slli_epi64(non_slider_sq_x8, 7)),
+            );
+
+            let pawn_moves_black_x8 = _mm512_maskz_or_epi64(
+                pawn_mask,
+                _mm512_and_epi64(const_ex_file_h_x8, _mm512_srli_epi64(non_slider_sq_x8, 9)),
+                _mm512_and_epi64(const_ex_file_a_x8, _mm512_srli_epi64(non_slider_sq_x8, 7)),
+            );
+
+            let pawn_moves_x8 =
+                _mm512_mask_blend_epi64(b_move_mask, pawn_moves_white_x8, pawn_moves_black_x8);
+
+            let all_moves_x8 = _mm512_maskz_ternarylogic_epi64(
+                active_mask,
+                knight_moves_x8,
+                king_moves_x8,
+                pawn_moves_x8,
+                0xFE,
+            );
+
+            all_moves_x8
         }
     }
 

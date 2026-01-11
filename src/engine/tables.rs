@@ -60,8 +60,8 @@ macro_rules! ex_mask {
 
 pub const EX_H_FILE: u64 = const { ex_mask!(FileOrRank::File(File::H)) };
 pub const EX_A_FILE: u64 = const { ex_mask!(FileOrRank::File(File::A)) };
-const EX_G_FILE: u64 = const { ex_mask!(FileOrRank::File(File::G)) };
-const EX_B_FILE: u64 = const { ex_mask!(FileOrRank::File(File::B)) };
+pub const EX_G_FILE: u64 = const { ex_mask!(FileOrRank::File(File::G)) };
+pub const EX_B_FILE: u64 = const { ex_mask!(FileOrRank::File(File::B)) };
 const EX_OUTER: u64 = const {
     ex_mask!(FileOrRank::File(File::A))
         & ex_mask!(FileOrRank::File(File::H))

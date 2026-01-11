@@ -356,7 +356,7 @@ impl SelfplayTrainer {
         let mut has_legal_moves = false;
         let mut move_list = [0u16; 256];
 
-        for mv_index in 0..board.gen_moves_avx512::<false>(tables, &mut move_list) {
+        for mv_index in 0..board.gen_moves_avx512::<false>(&mut move_list) {
             let mut board_copy = board.clone();
 
             let is_legal = unsafe { board_copy.make_move(move_list[mv_index], tables) }

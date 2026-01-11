@@ -480,9 +480,7 @@ impl<'a> Search<'a> {
         self.rt
             .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
 
-        let mut move_count = self
-            .chess
-            .gen_moves_avx512::<false>(self.tables, &mut self.move_list);
+        let mut move_count = self.chess.gen_moves_avx512::<false>(&mut self.move_list);
 
         std::hint::likely(move_count > 8 && move_count < 64);
 
@@ -847,9 +845,7 @@ impl<'a> Search<'a> {
 
         let mut alpha = alpha;
 
-        let move_count = self
-            .chess
-            .gen_moves_avx512::<true>(self.tables, &mut self.move_list);
+        let move_count = self.chess.gen_moves_avx512::<true>(&mut self.move_list);
 
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
 
@@ -964,9 +960,7 @@ impl<'a> Search<'a> {
 
         let mut alpha = alpha;
 
-        let mut move_count = self
-            .chess
-            .gen_moves_avx512::<false>(self.tables, &mut self.move_list);
+        let mut move_count = self.chess.gen_moves_avx512::<false>(&mut self.move_list);
 
         let mut move_list = [0u32; 256];
         for i in 0..move_count {
@@ -1168,7 +1162,7 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn eval_hc(&self) -> Eval {
+    fn eval_hc(&mut self) -> Eval {
         use std::arch::x86_64::*;
 
         let bitboards = self.chess.bitboards();
@@ -1511,7 +1505,7 @@ impl<'a> Search<'a> {
         let mut board = self.chess.clone();
 
         let mut move_list = [0u16; 256];
-        let move_count = board.gen_moves_avx512::<false>(self.tables, &mut move_list);
+        let move_count = board.gen_moves_avx512::<false>(&mut move_list);
 
         for i in 0..move_count {
             if !unsafe { board.make_move(move_list[i], self.tables) } {

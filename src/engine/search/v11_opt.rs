@@ -323,9 +323,7 @@ impl<'a> Search<'a> {
             }
         }
 
-        let move_count = self
-            .chess
-            .gen_moves_avx512::<false>(self.tables, &mut self.move_list);
+        let move_count = self.chess.gen_moves_avx512::<false>(&mut self.move_list);
 
         std::hint::likely(move_count > 8 && move_count < 64);
 
@@ -550,9 +548,7 @@ impl<'a> Search<'a> {
             alpha = static_eval;
         }
 
-        let move_count = self
-            .chess
-            .gen_moves_avx512::<true>(self.tables, &mut self.move_list);
+        let move_count = self.chess.gen_moves_avx512::<true>(&mut self.move_list);
 
         std::hint::likely(move_count < 64);
 

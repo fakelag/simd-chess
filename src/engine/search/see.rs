@@ -426,7 +426,7 @@ mod tests {
         let mut board_copy = board.clone();
 
         let mut move_list = [0u16; 256];
-        for i in 0..board_copy.gen_moves_avx512::<false>(tables, &mut move_list) {
+        for i in 0..board_copy.gen_moves_avx512::<false>(&mut move_list) {
             if move_list[i] == mv {
                 if !unsafe { board_copy.make_move(mv, tables) }
                     || board_copy.in_check(tables, !board_copy.b_move())
@@ -496,7 +496,7 @@ mod tests {
         loop {
             let mut move_list = [0u16; 256];
 
-            let move_count = board.gen_moves_avx512::<true>(tables, &mut move_list);
+            let move_count = board.gen_moves_avx512::<true>(&mut move_list);
 
             let lva_capture_move = move_list
                 .iter()
@@ -648,7 +648,7 @@ mod tests {
         }
 
         let mut move_list = [0u16; 256];
-        let move_count = board.gen_moves_avx512::<false>(tables, &mut move_list);
+        let move_count = board.gen_moves_avx512::<false>(&mut move_list);
 
         let board_copy = board.clone();
 
