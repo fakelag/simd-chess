@@ -177,7 +177,7 @@ impl SelfplayTrainer {
         let rt = engine::search::repetition_v2::RepetitionTable::new();
 
         let mut search_engine =
-            engine::search::v12_eval_sp::Search::new(search_params, tables, &mut tt, rt);
+            engine::search::search::Search::new(search_params, tables, &mut tt, rt);
 
         let mut training_entries = Vec::new();
 

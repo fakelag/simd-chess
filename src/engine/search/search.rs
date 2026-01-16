@@ -23,7 +23,7 @@ use crate::{
 
 macro_rules! net_path {
     () => {
-        "../../../nnue/w1-10M-512-b8.bin"
+        "../../../nnue/w2-10M-512-b8.bin"
     };
 }
 

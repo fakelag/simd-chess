@@ -1,8 +1,5 @@
 use crate::{
-    engine::{
-        chess,
-        tables::{self, Tables},
-    },
+    engine::tables::{self, Tables},
     nnue::nnue::{self, UpdatableNnue},
     pop_ls1b,
     util::{self},
@@ -2264,45 +2261,45 @@ impl ChessGame {
         }
     }
 
-    pub fn from_v1(value: chess::ChessGame, tables: &Tables) -> Self {
-        let mut v2 = ChessGame::new();
+    // pub fn from_v1(value: chess::ChessGame, tables: &Tables) -> Self {
+    //     let mut v2 = ChessGame::new();
 
-        v2.pawn_key = tables.zobrist_hash_keys.no_pawn_key;
+    //     v2.pawn_key = tables.zobrist_hash_keys.no_pawn_key;
 
-        for piece_id in util::PieceId::WhiteKing as usize..=util::PieceId::BlackPawn as usize {
-            let piece_id = util::PieceId::from(piece_id);
-            let piece_index: PieceIndex = piece_id.into();
+    //     for piece_id in util::PieceId::WhiteKing as usize..=util::PieceId::BlackPawn as usize {
+    //         let piece_id = util::PieceId::from(piece_id);
+    //         let piece_index: PieceIndex = piece_id.into();
 
-            v2.board.bitboards[piece_index as usize] = value.board.bitboards[piece_id as usize];
-        }
+    //         v2.board.bitboards[piece_index as usize] = value.board.bitboards[piece_id as usize];
+    //     }
 
-        v2.b_move = value.b_move;
-        v2.castles = value.castles;
-        v2.en_passant = value.en_passant.unwrap_or(0);
-        v2.half_moves = value.half_moves;
-        v2.full_moves = value.full_moves as u16;
-        v2.zobrist_key = value.zobrist_key;
-        v2.material[0] = value.material[0];
-        v2.material[1] = value.material[1];
+    //     v2.b_move = value.b_move;
+    //     v2.castles = value.castles;
+    //     v2.en_passant = value.en_passant.unwrap_or(0);
+    //     v2.half_moves = value.half_moves;
+    //     v2.full_moves = value.full_moves as u16;
+    //     v2.zobrist_key = value.zobrist_key;
+    //     v2.material[0] = value.material[0];
+    //     v2.material[1] = value.material[1];
 
-        for sq in 0..64 {
-            if value.spt[sq] == 0 {
-                continue;
-            }
-            let piece_index = PieceIndex::from(util::PieceId::from(value.spt[sq] as usize - 1));
-            v2.spt[sq] = piece_index as u8;
+    //     for sq in 0..64 {
+    //         if value.spt[sq] == 0 {
+    //             continue;
+    //         }
+    //         let piece_index = PieceIndex::from(util::PieceId::from(value.spt[sq] as usize - 1));
+    //         v2.spt[sq] = piece_index as u8;
 
-            match piece_index {
-                PieceIndex::WhitePawn | PieceIndex::BlackPawn => {
-                    v2.pawn_key ^=
-                        tables.zobrist_hash_keys.hash_piece_squares_new[piece_index as usize][sq];
-                }
-                _ => {}
-            }
-        }
+    //         match piece_index {
+    //             PieceIndex::WhitePawn | PieceIndex::BlackPawn => {
+    //                 v2.pawn_key ^=
+    //                     tables.zobrist_hash_keys.hash_piece_squares_new[piece_index as usize][sq];
+    //             }
+    //             _ => {}
+    //         }
+    //     }
 
-        v2
-    }
+    //     v2
+    // }
 }
 
 mod tests {

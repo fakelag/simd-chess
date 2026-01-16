@@ -4,7 +4,7 @@ use crossbeam::channel;
 
 use crate::{
     engine::{
-        chess,
+        chess_v2,
         search::{self, AbortSignal, SigAbort, search_params},
         tables,
     },
@@ -40,7 +40,7 @@ pub fn create_context() -> UciContext<UciOptions> {
 pub struct GoCommand {
     pub start_time: std::time::Instant,
     pub params: search_params::SearchParams,
-    pub chess: chess::ChessGame,
+    pub chess: chess_v2::ChessGame,
     pub sig: AbortSignal,
     pub repetition_table: search::repetition_v2::RepetitionTable,
 }
@@ -58,7 +58,7 @@ pub fn chess_uci(
 ) -> anyhow::Result<()> {
     let mut debug_enabled = true;
 
-    let mut game_board: Option<chess::ChessGame> = None;
+    let mut game_board: Option<chess_v2::ChessGame> = None;
     let mut repetition_table: Option<search::repetition_v2::RepetitionTable> = None;
 
     struct GoContext {
@@ -108,7 +108,7 @@ pub fn chess_uci(
             Some("stop") => abort_search_uci(debug_enabled, &mut context),
             Some("isready") => println!("readyok"),
             Some("position") => {
-                let mut board = chess::ChessGame::new();
+                let mut board = chess_v2::ChessGame::new();
                 let mut rep_table = search::repetition_v2::RepetitionTable::new();
 
                 let position_start_index = input
@@ -152,13 +152,13 @@ pub fn chess_uci(
 
                 let infinite = search_params.infinite;
                 let movetime = search_params.movetime;
-                // let movestogo = search_params.movestogo;
-                let time = if chess.b_move {
+
+                let time = if chess.b_move() {
                     search_params.btime
                 } else {
                     search_params.wtime
                 };
-                let inc = if chess.b_move {
+                let inc = if chess.b_move() {
                     search_params.binc
                 } else {
                     search_params.winc

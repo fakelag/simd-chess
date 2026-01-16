@@ -77,7 +77,7 @@ fn search_thread(
 ) {
     let tt = unsafe { &mut *transposition_table.get() };
 
-    let mut search_engine = search::v12_eval_sp::Search::new(
+    let mut search_engine = search::search::Search::new(
         SearchParams::new(),
         tables,
         tt,
@@ -91,13 +91,13 @@ fn search_thread(
             Ok(UciCommand::Go(go)) => {
                 let debug = go.params.debug;
 
-                let chess = chess_v2::ChessGame::from_v1(go.chess, tables);
+                let chess = &go.chess;
 
                 let (board_key, pawn_key) = chess.calc_initial_zobrist_key(tables);
                 assert!(chess.zobrist_key() == board_key);
                 assert!(chess.pawn_key() == pawn_key);
 
-                search_engine.load_from_board(&chess);
+                search_engine.load_from_board(chess);
                 search_engine.new_search();
                 search_engine.set_sig(go.sig);
                 search_engine.set_rt(go.repetition_table);

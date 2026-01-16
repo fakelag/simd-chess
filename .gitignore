@@ -2,9 +2,9 @@
 /bin
 /data
 /openings
+/matchcfg
 *.bat
 *.txt
 *.zip
-*.png
 *.bin
 *.binpack

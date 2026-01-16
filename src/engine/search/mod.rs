@@ -9,27 +9,11 @@ pub trait SearchStrategy<'a> {
 }
 
 pub mod eval;
-pub mod repetition;
 pub mod repetition_v2;
+pub mod search;
 pub mod search_params;
 pub mod see;
-pub mod transposition;
 pub mod transposition_v2;
-
-pub mod v10_mvcache;
-pub mod v11_opt;
-pub mod v12_eval;
-pub mod v12_eval_sp;
-// pub mod v13_nnue;
-pub mod v1_negamax;
-pub mod v2_alphabeta;
-pub mod v3_itdep;
-pub mod v4_pv;
-pub mod v5_tt;
-pub mod v6_psquare;
-pub mod v7_mvvlva;
-pub mod v8_quiesc;
-pub mod v9_prune;
 
 #[cfg(test)]
 mod tests {
@@ -70,7 +54,7 @@ mod tests {
             //     v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
 
             let mut search_engine =
-                v12_eval_sp::Search::new(params, &tables, unsafe { &mut *tt.get() }, rt);
+                search::Search::new(params, &tables, unsafe { &mut *tt.get() }, rt);
 
             search_engine.new_game();
             search_engine.load_from_fen(test_fen, &tables).unwrap();

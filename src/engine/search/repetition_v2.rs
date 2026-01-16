@@ -110,13 +110,13 @@ impl PartialEq for RepetitionTable {
 #[cfg(test)]
 mod tests {
     use crate::{
-        engine::{chess, chess_v2, tables},
+        engine::{chess_v2, tables},
         util,
     };
 
     use super::*;
 
-    fn get_legal_moves(board: &mut chess::ChessGame, tables: &tables::Tables) -> Vec<u16> {
+    fn get_legal_moves(board: &mut chess_v2::ChessGame, tables: &tables::Tables) -> Vec<u16> {
         let mut legal_moves = vec![];
         let mut move_list = [0u16; 256];
         let move_count = board.gen_moves_slow(tables, &mut move_list);
@@ -126,7 +126,7 @@ mod tests {
 
             let board_copy = board.clone();
 
-            if !board.make_move_slow(mv, tables) || board.in_check_slow(tables, !board.b_move()) {
+            if !unsafe { board.make_move(mv, tables) } || board.in_check(tables, !board.b_move()) {
                 *board = board_copy;
                 continue;
             }
@@ -140,7 +140,7 @@ mod tests {
 
     // Creates a list of moves with specified length in num_moves_to_play that ends in a repetition
     fn find_moves_with_repetition(
-        board: &mut chess::ChessGame,
+        board: &mut chess_v2::ChessGame,
         tables: &tables::Tables,
         num_moves_to_play: usize,
         moves: &mut Vec<u16>,
@@ -155,7 +155,7 @@ mod tests {
 
             let board_copy = board.clone();
 
-            assert!(board.make_move_slow(mv, tables));
+            assert!(unsafe { board.make_move(mv, tables) });
 
             let is_irreversible =
                 board.half_moves() == 0 || board.castles() != board_copy.castles();
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn test_repetition_table_simple() {
         let tables = tables::Tables::new();
-        let mut board = chess::ChessGame::new();
+        let mut board = chess_v2::ChessGame::new();
 
         assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
 
@@ -220,7 +220,7 @@ mod tests {
 
         for (mv_string, is_repeated) in moves {
             let mv = board.fix_move(util::create_move(mv_string));
-            assert!(board.make_move_slow(mv, &tables));
+            assert!(unsafe { board.make_move(mv, &tables) });
 
             assert_eq!(
                 table.is_repeated(board.zobrist_key()),
@@ -314,7 +314,7 @@ mod tests {
         for offset in 4..128 {
             for i in offset..257 {
                 let mut reptable = RepetitionTable::new();
-                let mut board = chess::ChessGame::new();
+                let mut board = chess_v2::ChessGame::new();
                 assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
 
                 reptable.push_position(board.zobrist_key(), true);
@@ -323,14 +323,15 @@ mod tests {
                 assert!(find_moves_with_repetition(&mut board, &tables, i, moves));
 
                 for mv in moves.iter().take(i - 4) {
-                    assert!(board.make_move_slow(*mv, &tables));
-                    assert!(!board.in_check_slow(&tables, !board.b_move()));
+                    assert!(unsafe { board.make_move(*mv, &tables) });
+                    assert!(!board.in_check(&tables, !board.b_move()));
+
                     reptable.push_position(board.zobrist_key(), board.half_moves() == 0);
                 }
 
                 for (index, mv) in moves.iter().enumerate().skip(i - 4) {
-                    assert!(board.make_move_slow(*mv, &tables));
-                    assert!(!board.in_check_slow(&tables, !board.b_move()));
+                    assert!(unsafe { board.make_move(*mv, &tables) });
+                    assert!(!board.in_check(&tables, !board.b_move()));
                     assert!(reptable.is_repeated(board.zobrist_key()) == (index + 1 == i));
                 }
             }

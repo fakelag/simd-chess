@@ -335,7 +335,7 @@ impl ChessUi {
                                                     continue;
                                                 }
 
-                                                if (curmove & chess::MV_FLAG_PROMOTION) != 0 {
+                                                if (curmove & chess_v2::MV_FLAG_PROMOTION) != 0 {
                                                     self.ask_promotion =
                                                         Some((from_sq as u8, square.sq_bit_index));
                                                     self.from_square = None;
@@ -407,7 +407,7 @@ impl ChessUi {
 
                             match util::parse_position(
                                 &position_str,
-                                &mut chess::ChessGame::new(),
+                                &mut chess_v2::ChessGame::new(),
                                 &self.matchmaking.tables,
                                 None,
                                 Some(&mut moves),
@@ -605,10 +605,10 @@ impl ChessUi {
                     ];
 
                     [
-                        chess::MV_FLAGS_PR_QUEEN,
-                        chess::MV_FLAGS_PR_ROOK,
-                        chess::MV_FLAGS_PR_BISHOP,
-                        chess::MV_FLAGS_PR_KNIGHT,
+                        chess_v2::MV_FLAGS_PR_QUEEN,
+                        chess_v2::MV_FLAGS_PR_ROOK,
+                        chess_v2::MV_FLAGS_PR_BISHOP,
+                        chess_v2::MV_FLAGS_PR_KNIGHT,
                     ]
                     .iter()
                     .enumerate()

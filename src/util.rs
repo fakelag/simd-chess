@@ -1,7 +1,4 @@
-use crate::engine::{
-    chess::{self},
-    chess_v2, search, tables,
-};
+use crate::engine::{chess_v2, search, tables};
 
 pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -217,10 +214,10 @@ pub fn create_move(move_str: &str) -> u16 {
 
     let flag_bits = if move_str.len() > 4 {
         match &move_str[4..] {
-            "b" => chess::MV_FLAGS_PR_BISHOP,
-            "n" => chess::MV_FLAGS_PR_KNIGHT,
-            "r" => chess::MV_FLAGS_PR_ROOK,
-            "q" => chess::MV_FLAGS_PR_QUEEN,
+            "b" => chess_v2::MV_FLAGS_PR_BISHOP,
+            "n" => chess_v2::MV_FLAGS_PR_KNIGHT,
+            "r" => chess_v2::MV_FLAGS_PR_ROOK,
+            "q" => chess_v2::MV_FLAGS_PR_QUEEN,
             _ => panic!("Invalid move flag in move string: {}", move_str),
         }
     } else {
@@ -231,38 +228,38 @@ pub fn create_move(move_str: &str) -> u16 {
 }
 
 pub fn move_flag_name(mv: u16) -> &'static str {
-    match mv & chess::MV_FLAGS_PR_MASK {
-        chess::MV_FLAGS_PR_BISHOP => "b",
-        chess::MV_FLAGS_PR_KNIGHT => "n",
-        chess::MV_FLAGS_PR_ROOK => "r",
-        chess::MV_FLAGS_PR_QUEEN => "q",
+    match mv & chess_v2::MV_FLAGS_PR_MASK {
+        chess_v2::MV_FLAGS_PR_BISHOP => "b",
+        chess_v2::MV_FLAGS_PR_KNIGHT => "n",
+        chess_v2::MV_FLAGS_PR_ROOK => "r",
+        chess_v2::MV_FLAGS_PR_QUEEN => "q",
         _ => "",
     }
 }
 
 pub fn move_flag_name_dbg(mv: u16) -> String {
-    let promotion = match mv & chess::MV_FLAGS_PR_MASK {
-        chess::MV_FLAGS_PR_BISHOP => "+b",
-        chess::MV_FLAGS_PR_KNIGHT => "+n",
-        chess::MV_FLAGS_PR_ROOK => "+r",
-        chess::MV_FLAGS_PR_QUEEN => "+q",
+    let promotion = match mv & chess_v2::MV_FLAGS_PR_MASK {
+        chess_v2::MV_FLAGS_PR_BISHOP => "+b",
+        chess_v2::MV_FLAGS_PR_KNIGHT => "+n",
+        chess_v2::MV_FLAGS_PR_ROOK => "+r",
+        chess_v2::MV_FLAGS_PR_QUEEN => "+q",
         _ => "",
     };
-    let cap = if (mv & chess::MV_FLAGS) == chess::MV_FLAG_EPCAP {
+    let cap = if (mv & chess_v2::MV_FLAGS) == chess_v2::MV_FLAG_EPCAP {
         "+epc"
-    } else if mv & chess::MV_FLAG_CAP != 0 {
+    } else if mv & chess_v2::MV_FLAG_CAP != 0 {
         "+c"
     } else {
         ""
     };
-    let dpp = if (mv & chess::MV_FLAGS) == chess::MV_FLAG_DPP {
+    let dpp = if (mv & chess_v2::MV_FLAGS) == chess_v2::MV_FLAG_DPP {
         "+dpp"
     } else {
         ""
     };
-    let castle = if (mv & chess::MV_FLAGS) == chess::MV_FLAGS_CASTLE_KING {
+    let castle = if (mv & chess_v2::MV_FLAGS) == chess_v2::MV_FLAGS_CASTLE_KING {
         "+kc"
-    } else if (mv & chess::MV_FLAGS) == chess::MV_FLAGS_CASTLE_QUEEN {
+    } else if (mv & chess_v2::MV_FLAGS) == chess_v2::MV_FLAGS_CASTLE_QUEEN {
         "+qc"
     } else {
         ""
@@ -321,7 +318,7 @@ pub fn byte_size_string(bytes: usize) -> String {
 
 pub fn parse_position<'a>(
     position_buf: &'a str,
-    board: &mut chess::ChessGame,
+    board: &mut chess_v2::ChessGame,
     tables: &tables::Tables,
     mut repetition_table: Option<&mut search::repetition_v2::RepetitionTable>,
     mut out_moves: Option<&mut Vec<u16>>,
@@ -378,7 +375,7 @@ pub fn parse_position<'a>(
         while let Some(mv_str) = moves_it.next() {
             let mv = board.fix_move(create_move(mv_str));
 
-            if !board.make_move_slow(mv, &tables) {
+            if !unsafe { board.make_move(mv, &tables) } {
                 return Err(anyhow::anyhow!("Invalid move: {}", mv_str));
             }
 
