@@ -206,11 +206,23 @@ impl TranspositionTable {
             entry.depth() <= depth || entry.generation < self.min_generation
         };
 
+        // let logdbg = hash == 0x00A760E2A3316CAD4D;
+
         if replace {
             let tag_parts = Self::get_hash_part(self.index_bits, hash);
             let t0 = tag_parts as u16;
             let t1 = (tag_parts >> 16) as u8;
             let t2 = (tag_parts >> 24) as u8;
+
+            // if logdbg {
+            //     println!(
+            //         "V2: Storing move {} for hash {:018X}. Depth={},EDepth={}",
+            //         mv,
+            //         hash,
+            //         depth,
+            //         entry.depth()
+            //     );
+            // }
 
             entry.hash_part_0 = t0;
             entry.hash_part_1 = t1;
@@ -224,6 +236,19 @@ impl TranspositionTable {
                 self.hash64[entry_index] = hash;
             }
         }
+        // else {
+        //     if logdbg {
+        //         println!(
+        //             "V2: Skip storing move {} for hash {:018X}\nDepth={},MinGen={}\nEDepth={},EGen={}",
+        //             mv,
+        //             hash,
+        //             depth,
+        //             self.min_generation,
+        //             entry.depth(),
+        //             entry.generation
+        //         );
+        //     }
+        // }
 
         if COLLECT_STATS {
             if replace {

@@ -3,7 +3,7 @@ use std::io::Read;
 use sfbinpack::chess::{coords, r#move, piece};
 
 const DEBUG: bool = false;
-const ANNOTATION_DEPTH: u8 = 8;
+const ANNOTATION_DEPTH: u8 = 14;
 const INSUFFICIENT_MATERIAL_DRAW: bool = true;
 const THREE_FOLD_REPETITION_DRAW: bool = true;
 
@@ -20,18 +20,23 @@ use crate::{
 };
 
 pub struct SelfplayTrainer {
-    binpack_writer: sfbinpack::CompressedTrainingDataEntryWriter,
+    binpack_writer: Option<sfbinpack::CompressedTrainingDataEntryWriter>,
     stats_num_games_cp: usize,
     stats_num_games_total: usize,
     stats_positions_total: usize,
     stats_flushed_at: std::time::Instant,
-    binpack_path: String,
+    binpack_path: Option<String>,
 }
 
 impl SelfplayTrainer {
-    pub fn new(out_binpack_path: &str) -> Self {
-        let binpack_writer =
-            sfbinpack::CompressedTrainingDataEntryWriter::new(out_binpack_path, false).unwrap();
+    pub fn new(out_binpack_path: Option<&str>) -> Self {
+        let binpack_writer = if let Some(out_binpack_path) = out_binpack_path {
+            Some(
+                sfbinpack::CompressedTrainingDataEntryWriter::new(out_binpack_path, false).unwrap(),
+            )
+        } else {
+            None
+        };
 
         Self {
             binpack_writer,
@@ -39,7 +44,7 @@ impl SelfplayTrainer {
             stats_num_games_total: 0,
             stats_positions_total: 0,
             stats_flushed_at: std::time::Instant::now(),
-            binpack_path: out_binpack_path.to_string(),
+            binpack_path: out_binpack_path.map(|s| s.to_string()),
         }
     }
 
@@ -70,11 +75,16 @@ impl SelfplayTrainer {
         feeder.set_max_positions(num_positions_total);
 
         println!(
-            "Starting selfplay with {} threads, depth {} {} total positions ({:.02} per matchmaker)",
+            "Starting selfplay with {} threads, depth {} {} total positions ({:.02} per matchmaker){}",
             threads,
             ANNOTATION_DEPTH,
             num_positions_total,
-            num_positions_total as f64 / threads as f64
+            num_positions_total as f64 / threads as f64,
+            if self.binpack_writer.is_some() {
+                String::new()
+            } else {
+                " (dryrun)".to_string()
+            }
         );
 
         let tables = tables::Tables::new();
@@ -111,8 +121,10 @@ impl SelfplayTrainer {
                         self.stats_num_games_total += 1;
                         self.stats_positions_total += entries.len();
 
-                        for entry in entries {
-                            self.binpack_writer.write_entry(&entry).unwrap();
+                        if let Some(writer) = &mut self.binpack_writer {
+                            for entry in entries {
+                                writer.write_entry(&entry).unwrap();
+                            }
                         }
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
@@ -172,16 +184,13 @@ impl SelfplayTrainer {
             format!("depth {ANNOTATION_DEPTH}").split_whitespace(),
         );
 
-        // depth 7 -> 2mb, depth 9 -> 4mb
-        let mut tt = engine::search::transposition_v2::TranspositionTable::new(4);
         let rt = engine::search::repetition_v2::RepetitionTable::new();
 
-        let mut search_engine =
-            engine::search::search::Search::new(search_params, tables, &mut tt, rt);
+        let mut search_engine = engine::search::search::Search::new(search_params, tables, 4, rt);
 
         let mut training_entries = Vec::new();
 
-        let mut dbg_tt_hitrates = Vec::new();
+        // let mut dbg_tt_hitrates = Vec::new();
 
         loop {
             let position = match feeder.next_position() {
@@ -304,19 +313,19 @@ impl SelfplayTrainer {
             };
 
             if DEBUG {
-                let stats = search_engine.get_tt_mut().calc_stats();
-                dbg_tt_hitrates
-                    .push(stats.probe_hit as f64 / (stats.probe_hit + stats.probe_miss) as f64);
-                println!(
-                    "[Thread {}] Game finished with result {} after {} plies. TT usage: {:.02}%, probe hit rate: {:.02}%, store hit rate: {:.02}%. Collisions: {}",
-                    thread_id,
-                    result,
-                    search_engine.get_board_mut().ply(),
-                    stats.fill_percentage * 100.0,
-                    stats.probe_hit as f64 / (stats.probe_hit + stats.probe_miss) as f64 * 100.0,
-                    stats.store_hit as f64 / (stats.store_hit + stats.store_miss) as f64 * 100.0,
-                    stats.collisions,
-                );
+                // let stats = search_engine.get_tt_mut().calc_stats();
+                // dbg_tt_hitrates
+                //     .push(stats.probe_hit as f64 / (stats.probe_hit + stats.probe_miss) as f64);
+                // println!(
+                //     "[Thread {}] Game finished with result {} after {} plies. TT usage: {:.02}%, probe hit rate: {:.02}%, store hit rate: {:.02}%. Collisions: {}",
+                //     thread_id,
+                //     result,
+                //     search_engine.get_board_mut().ply(),
+                //     stats.fill_percentage * 100.0,
+                //     stats.probe_hit as f64 / (stats.probe_hit + stats.probe_miss) as f64 * 100.0,
+                //     stats.store_hit as f64 / (stats.store_hit + stats.store_miss) as f64 * 100.0,
+                //     stats.collisions,
+                // );
             }
 
             // alternate with initia_b_move
@@ -333,17 +342,17 @@ impl SelfplayTrainer {
         }
 
         if DEBUG {
-            dbg_tt_hitrates.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            // dbg_tt_hitrates.sort_by(|a, b| b.partial_cmp(a).unwrap());
 
-            let avg_tt_hitrate: f64 =
-                dbg_tt_hitrates.iter().sum::<f64>() / dbg_tt_hitrates.len() as f64;
-            let median_tt_hitrate: f64 = dbg_tt_hitrates[dbg_tt_hitrates.len() / 2];
-            println!(
-                "[Thread {}] Finished annotated selfplay. Avg TT probe hit rate: {:.02}%, median: {:.02}%",
-                thread_id,
-                avg_tt_hitrate * 100.0,
-                median_tt_hitrate * 100.0
-            );
+            // let avg_tt_hitrate: f64 =
+            //     dbg_tt_hitrates.iter().sum::<f64>() / dbg_tt_hitrates.len() as f64;
+            // let median_tt_hitrate: f64 = dbg_tt_hitrates[dbg_tt_hitrates.len() / 2];
+            // println!(
+            //     "[Thread {}] Finished annotated selfplay. Avg TT probe hit rate: {:.02}%, median: {:.02}%",
+            //     thread_id,
+            //     avg_tt_hitrate * 100.0,
+            //     median_tt_hitrate * 100.0
+            // );
         }
 
         Ok(())
@@ -433,9 +442,10 @@ impl SelfplayTrainer {
     }
 
     fn binpack_size_bytes(&self) -> usize {
-        std::fs::metadata(&self.binpack_path)
-            .map(|m| m.len())
-            .unwrap_or(0) as usize
+        match self.binpack_path {
+            Some(ref path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) as usize,
+            None => 0,
+        }
     }
 }
 

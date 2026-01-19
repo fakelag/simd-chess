@@ -73,14 +73,11 @@ fn search_thread(
     uci_context: uci::context::UciContext<uci::uci::UciOptions>,
     rx_search: channel::Receiver<UciCommand>,
     tables: &tables::Tables,
-    transposition_table: &SyncUnsafeCell<transposition_v2::TranspositionTable>,
 ) {
-    let tt = unsafe { &mut *transposition_table.get() };
-
     let mut search_engine = search::search::Search::new(
         SearchParams::new(),
         tables,
-        tt,
+        1,
         repetition_v2::RepetitionTable::new(),
     );
 
@@ -214,7 +211,6 @@ fn main() {
             let mut threads = None;
             let mut out_path = None;
             let mut positions_path = None;
-            let mut annotated = false;
 
             loop {
                 let arg = match arg_it.next() {
@@ -227,22 +223,15 @@ fn main() {
                     "--count" => count = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--positions" => positions_path = Some(arg_it.next().unwrap()),
-                    "--annotated" => annotated = true,
                     "--out" => out_path = Some(arg_it.next().unwrap()),
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
 
-            let mut selfplay = matchmaking::selfplay::SelfplayTrainer::new(
-                &out_path.expect("Expected output path"),
-            );
+            let mut selfplay = matchmaking::selfplay::SelfplayTrainer::new(out_path.as_deref());
 
-            if annotated {
-                let positions_file_path = positions_path.expect("Expected positions path");
-                selfplay.play_annotated(threads.unwrap_or(1), &positions_file_path, from, count)
-            } else {
-                todo!("Unannotated selfplay not implemented");
-            }
+            let positions_file_path = positions_path.expect("Expected positions path");
+            selfplay.play_annotated(threads.unwrap_or(1), &positions_file_path, from, count)
         }
         "train" => {
             let mut arg_it = std::env::args().skip(2);
@@ -398,12 +387,6 @@ fn main() {
 
             let uci_context = uci::uci::create_context();
 
-            // Safety: TranspositionTable is Send+Sync, it is up to the table implementation itself to
-            // implement thread safety correctly. This has a few benefits:
-            // 1. TranspositionTable can be accessed without runtime costs such as locks or refcounters
-            // 2. The table can potentially be shared between threads efficiently, even unsoundly if races are deemed to be acceptable
-            let tt = SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(1));
-
             let result = std::thread::scope(|s| {
                 let st = s.spawn(|| {
                     if let Some(core_id) = pin_core_id {
@@ -411,7 +394,7 @@ fn main() {
                         println!("Pinned search thread to core {}", core_id);
                     }
 
-                    search_thread(uci_context.clone(), rx_search, &tables, &tt);
+                    search_thread(uci_context.clone(), rx_search, &tables);
                 });
 
                 let result = chess_uci(uci_context.clone(), tx_search, &tables);

@@ -1,4 +1,4 @@
-use std::cell::OnceCell;
+use std::{arch::x86_64::*, cell::OnceCell};
 
 use crossbeam::channel;
 
@@ -11,14 +11,14 @@ use crate::{
             eval::*,
             repetition_v2::RepetitionTable,
             search_params::SearchParams,
-            see,
-            transposition_v2::{BoundType, TranspositionTable},
+            transposition_v2,
+            transposition_v3::{self, BoundType},
         },
         sorting,
         tables::{self},
     },
     nnue::nnue::{self, UpdatableNnue},
-    nnue_load,
+    nnue_load, util,
 };
 
 macro_rules! net_path {
@@ -28,6 +28,7 @@ macro_rules! net_path {
 }
 
 const EVAL_NNUE: bool = true;
+const EVAL_CACHE: bool = false;
 const NNUE_HSIZE: usize = 512;
 const NNUE_OSIZE: usize = 8;
 
@@ -108,7 +109,8 @@ pub struct Search<'a> {
 
     move_list: [u16; 256],
 
-    tt: &'a mut TranspositionTable,
+    tt: transposition_v3::TranspositionTable,
+    // tt_v2: transposition_v2::TranspositionTable,
     rt: RepetitionTable,
     et: EvalTable,
     history_moves: Box<[[i16; 64]; 16]>,
@@ -183,7 +185,7 @@ impl<'a> Search<'a> {
     pub fn new(
         params: SearchParams,
         tables: &'a tables::Tables,
-        tt: &'a mut TranspositionTable,
+        tt_size_hint_mb: usize,
         rt: RepetitionTable,
     ) -> Search<'a> {
         let nnue = nnue_load!(net_path!(), NNUE_HSIZE, NNUE_OSIZE);
@@ -216,7 +218,8 @@ impl<'a> Search<'a> {
             history_moves: Box::new([[0; 64]; 16]),
             et: EvalTable::new(1024),
             rt,
-            tt,
+            tt: transposition_v3::TranspositionTable::new(tt_size_hint_mb),
+            //tt_v2: transposition_v2::TranspositionTable::new(tt_size_hint_mb),
             pawn_correction_heuristic: [[0; u16::MAX as usize + 1]; 2],
             // corr_stats: Vec::new(),
         };
@@ -258,6 +261,7 @@ impl<'a> Search<'a> {
         }
 
         self.tt.new_search();
+        // self.tt_v2.new_search();
     }
 
     /// Resets the board & nnue state without clearing the transposition or repetition tables.
@@ -280,6 +284,7 @@ impl<'a> Search<'a> {
     pub fn new_game(&mut self) {
         self.rt.clear();
         self.tt.clear();
+        // self.tt_v2.clear();
         self.et.clear();
 
         for i in 0..2 {
@@ -333,10 +338,6 @@ impl<'a> Search<'a> {
     pub fn get_rt_mut(&mut self) -> &mut RepetitionTable {
         &mut self.rt
     }
-    #[inline(always)]
-    pub fn get_tt_mut(&mut self) -> &mut TranspositionTable {
-        &mut self.tt
-    }
     // #[inline(always)]
     // pub fn get_et(&self) -> &EvalTable {
     //     &self.et
@@ -385,34 +386,49 @@ impl<'a> Search<'a> {
         let apply_pruning = !self.pv_trace && ply > 0;
 
         let mut pv_move = 0; // Null move
-        let mut tt_move = 0; // Null move
+        // let mut tt_move = 0; // Null move
+
+        let mut tt_move_index = 0xFFu8;
         let mut bound_type = BoundType::UpperBound;
         let mut alpha = alpha;
         let mut depth = depth;
 
         // assert!(!(self.pv_trace && tt_move != 0));
 
-        if apply_pruning {
-            if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
-                return 0;
-            }
+        //let mut v2_tt_move = 0;
 
-            let (score, mv) = self.tt.probe(self.chess.zobrist_key(), depth, alpha, beta);
+        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
+        depth += in_check as u8;
 
-            if let Some(score) = score {
-                return score;
-            }
+        let (tt_key, tt_probe) =
+            self.tt
+                .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
 
-            tt_move = mv;
+        // let v2_probe = self
+        //     .tt_v2
+        //     .probe(self.chess.zobrist_key(), depth, alpha, beta);
+
+        if apply_pruning
+            && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
+        {
+            return 0;
         }
+
+        if let Some(probe) = tt_probe {
+            if apply_pruning {
+                if let Some(score) = probe.score {
+                    return score;
+                }
+            }
+
+            tt_move_index = probe.mv_index;
+        }
+        // v2_tt_move = v2_probe.1;
 
         if search_done {
             debug_assert!(!self.pv_trace);
             return self.quiescence(alpha, beta, ply as u32);
         }
-
-        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
-        depth += in_check as u8;
 
         if self.pv_trace {
             self.pv_trace = self.pv_length > (ply + 1);
@@ -480,7 +496,10 @@ impl<'a> Search<'a> {
         self.rt
             .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
 
-        let mut move_count = self.chess.gen_moves_avx512::<false>(&mut self.move_list);
+        let mut original_move_list = [0u16; 256];
+        let mut move_count = self
+            .chess
+            .gen_moves_avx512::<false>(&mut original_move_list);
 
         std::hint::likely(move_count > 8 && move_count < 64);
 
@@ -513,17 +532,66 @@ impl<'a> Search<'a> {
         //     .enumerate()
         //     .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
 
+        // tt_move = self.move_list[tt_move_index as usize];
+
         let mut move_list = [0u32; 256];
+
         for i in 0..move_count {
-            move_list[i] = self.score_move_desc32(self.move_list[i], pv_move, tt_move);
+            let mv = original_move_list[i];
+            let is_tt_move = i as u8 == tt_move_index;
+
+            // if v2_probe.0.is_some() {
+            //     assert!(
+            //         is_tt_move == (mv == v2_tt_move),
+            //         "TT move mismatch between V2 and V3: V3 move {}, V2 move {}. is_tt_move={}, mveqv2={}, moves={}",
+            //         util::move_string_dbg(original_move_list[tt_move_index as usize]),
+            //         util::move_string_dbg(v2_tt_move),
+            //         is_tt_move,
+            //         (mv == v2_tt_move),
+            //         move_count,
+            //     );
+            // }
+
+            move_list[i] = self.score_move_desc32(mv, pv_move, is_tt_move);
+
+            if (mv & MV_FLAGS_PR_MASK) == MV_FLAGS_PR_QUEEN {
+                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+
+                let mv_k = mv_unpromoted | MV_FLAGS_PR_KNIGHT;
+                let mv_b = mv_unpromoted | MV_FLAGS_PR_BISHOP;
+                let mv_r = mv_unpromoted | MV_FLAGS_PR_ROOK;
+
+                macro_rules! add_move {
+                    ($move:expr) => {
+                        original_move_list[move_count] = $move;
+                        move_list[move_count] = self.score_move_desc32(
+                            $move,
+                            pv_move,
+                            move_count as u8 == tt_move_index,
+                        );
+                        move_count += 1;
+                    };
+                }
+
+                add_move!(mv_k);
+                add_move!(mv_b);
+                add_move!(mv_r);
+            }
         }
+
+        unsafe {
+            // Safety: move_count is guaranteed to be less than 256
+            debug_assert!(move_count < 256);
+            std::hint::assert_unchecked(move_count < 256);
+        }
+
         sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
         debug_assert!(
-            tt_move == 0
+            move_list[tt_move_index as usize] == 0
                 || !move_list[0..move_count]
                     .iter()
-                    .any(|mv| *mv as u16 == tt_move)
-                || (move_list[0] as u16) == tt_move
+                    .any(|mv| *mv as u16 == move_list[tt_move_index as usize] as u16)
+                || (move_list[0] as u16) == move_list[tt_move_index as usize] as u16
         );
         debug_assert!(pv_move == 0 || move_list[0] as u16 == pv_move);
 
@@ -533,38 +601,8 @@ impl<'a> Search<'a> {
 
         let board_copy = self.chess.clone();
 
-        let mut i = 0;
-        while i < move_count {
-            let mv_index = i;
+        for mv_index in 0..move_count {
             let mv = move_list[mv_index] as u16;
-            i += 1;
-
-            unsafe {
-                // Safety: i is guaranteed to be less than 256 from the loop condition,
-                // i -= 1 guarantees i < 256
-                debug_assert!(i < 256);
-                std::hint::assert_unchecked(i < 256);
-            }
-
-            if (mv & MV_FLAGS_PR_MASK) == MV_FLAGS_PR_QUEEN {
-                i -= 1;
-
-                let mv_unpromoted = (mv & !MV_FLAGS_PR_MASK) as u32;
-                unsafe {
-                    // Second promotion to check, override current slot
-                    *move_list.get_unchecked_mut(i) = mv_unpromoted | MV_FLAGS_PR_KNIGHT as u32;
-
-                    // Third promotion to check, append to the end of the list
-                    *move_list.get_unchecked_mut(move_count) =
-                        mv_unpromoted | MV_FLAGS_PR_BISHOP as u32;
-                    move_count += 1;
-
-                    // Fourth promotion to check, append to the end of the list
-                    *move_list.get_unchecked_mut(move_count) =
-                        mv_unpromoted | MV_FLAGS_PR_ROOK as u32;
-                    move_count += 1;
-                }
-            }
 
             let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be valid
@@ -756,20 +794,33 @@ impl<'a> Search<'a> {
                     }
                 }
 
+                let static_eval = *static_eval.get_or_init(|| self.evaluate());
+
                 if !in_check && best_move & MV_FLAG_CAP == 0 {
-                    let static_eval = *static_eval.get_or_init(|| self.evaluate());
                     if score >= static_eval {
                         self.update_correction_heuristics(score - static_eval, depth as Eval);
                     }
                 }
 
+                // Find original mv_index from original_move_list with avx512
+                let original_mv_index = Self::find_index_fast_avx512(mv, &original_move_list);
+
                 self.tt.store(
+                    tt_key,
                     self.chess.zobrist_key(),
                     score,
+                    static_eval,
                     depth,
-                    mv,
+                    original_mv_index,
                     BoundType::LowerBound,
                 );
+                // self.tt_v2.store(
+                //     self.chess.zobrist_key(),
+                //     score,
+                //     depth,
+                //     mv,
+                //     transposition_v2::BoundType::LowerBound,
+                // );
                 self.rt.pop_position();
                 self.b_cut_count += 1;
                 return score;
@@ -801,13 +852,33 @@ impl<'a> Search<'a> {
             return 0;
         }
 
+        let static_eval = *static_eval.get_or_init(|| self.evaluate());
+
+        let original_mv_index = Self::find_index_fast_avx512(best_move, &original_move_list);
+
         self.tt.store(
+            tt_key,
             self.chess.zobrist_key(),
             best_score,
+            static_eval,
             depth,
-            best_move,
+            original_mv_index,
             bound_type,
         );
+
+        // self.tt_v2.store(
+        //     self.chess.zobrist_key(),
+        //     best_score,
+        //     depth,
+        //     best_move,
+        //     if bound_type == BoundType::Exact {
+        //         transposition_v2::BoundType::Exact
+        //     } else if bound_type == BoundType::UpperBound {
+        //         transposition_v2::BoundType::UpperBound
+        //     } else {
+        //         panic!();
+        //     },
+        // );
 
         best_score
     }
@@ -1129,6 +1200,48 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
+    fn find_index_fast_avx512(mv: u16, move_list: &[u16; 256]) -> u8 {
+        unsafe {
+            let mv_list_ptr = move_list.as_ptr() as *const __m512i;
+            let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
+            let p1_x32 = _mm512_loadu_si512(mv_list_ptr.add(1));
+            let p2_x32 = _mm512_loadu_si512(mv_list_ptr.add(2));
+            let p3_x32 = _mm512_loadu_si512(mv_list_ptr.add(3));
+
+            let mv_x32 = _mm512_set1_epi16(mv as i16);
+
+            let cmp_mask_0 = _mm512_cmpeq_epi16_mask(p0_x32, mv_x32) as u128;
+            let cmp_mask_1 = _mm512_cmpeq_epi16_mask(p1_x32, mv_x32) as u128;
+            let cmp_mask_2 = _mm512_cmpeq_epi16_mask(p2_x32, mv_x32) as u128;
+            let cmp_mask_3 = _mm512_cmpeq_epi16_mask(p3_x32, mv_x32) as u128;
+
+            let lower_mask: u128 =
+                cmp_mask_0 | ((cmp_mask_1) << 32) | ((cmp_mask_2) << 64) | ((cmp_mask_3) << 96);
+
+            // println!(
+            //     "Scanned for move {} ({}), at index {} in array {:?}",
+            //     mv,
+            //     util::move_string_dbg(mv),
+            //     lower_mask.trailing_zeros(),
+            //     move_list
+            // );
+            // println!(
+            //     "Masks: {:032b} {:032b} {:032b} {:032b}",
+            //     cmp_mask_0, cmp_mask_1, cmp_mask_2, cmp_mask_3
+            // );
+
+            debug_assert!(lower_mask != 0, "Move {:04x} not found in move list", mv);
+            debug_assert!(
+                lower_mask.trailing_zeros() < 256,
+                "Move {:04x} index overflow",
+                mv
+            );
+
+            lower_mask.trailing_zeros() as u8
+        }
+    }
+
+    #[inline(always)]
     fn output_bucket(&self) -> u8 {
         if NNUE_OSIZE == 1 {
             return 0;
@@ -1142,23 +1255,24 @@ impl<'a> Search<'a> {
 
     #[inline(always)]
     pub fn evaluate(&mut self) -> Eval {
-        if EVAL_NNUE {
-            // if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
-            //     return eval;
-            // }
-            let final_score =
-                self.nnue
-                    .evaluate(self.chess.b_move(), self.output_bucket()) as Eval;
-            // self.et.store(self.chess.zobrist_key(), final_score);
-            return final_score;
-        } else {
+        if EVAL_CACHE {
             if let Some(eval) = self.et.probe(self.chess.zobrist_key()) {
                 return eval;
             }
-            let final_score = self.eval_hc();
-            self.et.store(self.chess.zobrist_key(), final_score);
-            return final_score;
         }
+
+        let score = if EVAL_NNUE {
+            self.nnue
+                .evaluate(self.chess.b_move(), self.output_bucket()) as Eval
+        } else {
+            self.eval_hc()
+        };
+
+        if EVAL_CACHE {
+            self.et.store(self.chess.zobrist_key(), score);
+        }
+
+        score
     }
 
     #[inline(always)]
@@ -1395,7 +1509,7 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn score_move_desc32(&self, mv: u16, pv_move: u16, tt_move: u16) -> u32 {
+    fn score_move_desc32(&self, mv: u16, pv_move: u16, is_tt_move: bool) -> u32 {
         macro_rules! score {
             ($score:expr) => {
                 (mv as u32) | (($score as u32) << 16)
@@ -1406,7 +1520,7 @@ impl<'a> Search<'a> {
             return score!(SORT_PVTT_BASE + 1);
         }
 
-        if mv == tt_move {
+        if is_tt_move {
             return score!(SORT_PVTT_BASE);
         }
 
