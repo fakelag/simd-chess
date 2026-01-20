@@ -1,3 +1,5 @@
+use crate::util;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundType {
     Empty = 0,
@@ -182,6 +184,18 @@ impl TranspositionTable {
             }
         }
 
+        // if util::should_log(hash) {
+        //     println!(
+        //         "TT Probe for hash {:018X}: can_use_entry={}, depth={}, EDepth={}, EBtype={:?}, EScore={}",
+        //         hash,
+        //         can_use_entry,
+        //         depth,
+        //         entry.depth(),
+        //         entry.bound_type(),
+        //         entry.score
+        //     );
+        // }
+
         if can_use_entry == 0 {
             return (None, entry.mv);
         }
@@ -206,15 +220,13 @@ impl TranspositionTable {
             entry.depth() <= depth || entry.generation < self.min_generation
         };
 
-        // let logdbg = hash == 0x00A760E2A3316CAD4D;
-
         if replace {
             let tag_parts = Self::get_hash_part(self.index_bits, hash);
             let t0 = tag_parts as u16;
             let t1 = (tag_parts >> 16) as u8;
             let t2 = (tag_parts >> 24) as u8;
 
-            // if logdbg {
+            // if util::should_log(hash) {
             //     println!(
             //         "V2: Storing move {} for hash {:018X}. Depth={},EDepth={}",
             //         mv,
@@ -237,7 +249,7 @@ impl TranspositionTable {
             }
         }
         // else {
-        //     if logdbg {
+        //     if util::should_log(hash) {
         //         println!(
         //             "V2: Skip storing move {} for hash {:018X}\nDepth={},MinGen={}\nEDepth={},EGen={}",
         //             mv,

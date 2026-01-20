@@ -3,7 +3,7 @@ use std::io::Read;
 use sfbinpack::chess::{coords, r#move, piece};
 
 const DEBUG: bool = false;
-const ANNOTATION_DEPTH: u8 = 14;
+const ANNOTATION_DEPTH: u8 = 8;
 const INSUFFICIENT_MATERIAL_DRAW: bool = true;
 const THREE_FOLD_REPETITION_DRAW: bool = true;
 

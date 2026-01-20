@@ -219,7 +219,7 @@ impl<'a> Search<'a> {
             et: EvalTable::new(1024),
             rt,
             tt: transposition_v3::TranspositionTable::new(tt_size_hint_mb),
-            //tt_v2: transposition_v2::TranspositionTable::new(tt_size_hint_mb),
+            // tt_v2: transposition_v2::TranspositionTable::new(tt_size_hint_mb),
             pawn_correction_heuristic: [[0; u16::MAX as usize + 1]; 2],
             // corr_stats: Vec::new(),
         };
@@ -395,18 +395,13 @@ impl<'a> Search<'a> {
 
         // assert!(!(self.pv_trace && tt_move != 0));
 
-        //let mut v2_tt_move = 0;
-
-        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
-        depth += in_check as u8;
-
         let (tt_key, tt_probe) =
             self.tt
                 .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
 
-        // let v2_probe = self
-        //     .tt_v2
-        //     .probe(self.chess.zobrist_key(), depth, alpha, beta);
+        // @todo - Consider check extension before TT probe
+        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
+        depth += in_check as u8;
 
         if apply_pruning
             && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
@@ -420,10 +415,8 @@ impl<'a> Search<'a> {
                     return score;
                 }
             }
-
             tt_move_index = probe.mv_index;
         }
-        // v2_tt_move = v2_probe.1;
 
         if search_done {
             debug_assert!(!self.pv_trace);
@@ -438,17 +431,6 @@ impl<'a> Search<'a> {
         let static_eval = OnceCell::new();
 
         if apply_pruning && !in_check {
-            // if alpha == beta - 1 {
-            //     let eval_margin = 500 + 300 * depth as Eval * depth as Eval;
-            //     let static_eval = *static_eval.get_or_init(|| self.evaluate());
-
-            //     let eval_corrected = self.eval_with_correction(static_eval);
-
-            //     if eval_corrected < alpha.saturating_sub(eval_margin) {
-            //         return self.quiescence(alpha, beta, self.ply as u32);
-            //     }
-            // }
-
             if alpha == beta - 1 && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
                 let eval_margin = 180 * depth as Eval;
                 let static_eval = *static_eval.get_or_init(|| self.evaluate());
@@ -536,21 +518,10 @@ impl<'a> Search<'a> {
 
         let mut move_list = [0u32; 256];
 
-        for i in 0..move_count {
+        let mut i = 0;
+        while i < move_count {
             let mv = original_move_list[i];
             let is_tt_move = i as u8 == tt_move_index;
-
-            // if v2_probe.0.is_some() {
-            //     assert!(
-            //         is_tt_move == (mv == v2_tt_move),
-            //         "TT move mismatch between V2 and V3: V3 move {}, V2 move {}. is_tt_move={}, mveqv2={}, moves={}",
-            //         util::move_string_dbg(original_move_list[tt_move_index as usize]),
-            //         util::move_string_dbg(v2_tt_move),
-            //         is_tt_move,
-            //         (mv == v2_tt_move),
-            //         move_count,
-            //     );
-            // }
 
             move_list[i] = self.score_move_desc32(mv, pv_move, is_tt_move);
 
@@ -564,11 +535,6 @@ impl<'a> Search<'a> {
                 macro_rules! add_move {
                     ($move:expr) => {
                         original_move_list[move_count] = $move;
-                        move_list[move_count] = self.score_move_desc32(
-                            $move,
-                            pv_move,
-                            move_count as u8 == tt_move_index,
-                        );
                         move_count += 1;
                     };
                 }
@@ -577,6 +543,8 @@ impl<'a> Search<'a> {
                 add_move!(mv_b);
                 add_move!(mv_r);
             }
+
+            i += 1;
         }
 
         unsafe {
@@ -803,7 +771,8 @@ impl<'a> Search<'a> {
                 }
 
                 // Find original mv_index from original_move_list with avx512
-                let original_mv_index = Self::find_index_fast_avx512(mv, &original_move_list);
+                let original_mv_index =
+                    Self::find_index_fast_avx512(self.chess.zobrist_key(), mv, &original_move_list);
 
                 self.tt.store(
                     tt_key,
@@ -854,7 +823,8 @@ impl<'a> Search<'a> {
 
         let static_eval = *static_eval.get_or_init(|| self.evaluate());
 
-        let original_mv_index = Self::find_index_fast_avx512(best_move, &original_move_list);
+        let original_mv_index =
+            Self::find_index_fast_avx512(self.chess.zobrist_key(), best_move, &original_move_list);
 
         self.tt.store(
             tt_key,
@@ -1200,7 +1170,7 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn find_index_fast_avx512(mv: u16, move_list: &[u16; 256]) -> u8 {
+    fn find_index_fast_avx512(_hash: u64, mv: u16, move_list: &[u16; 256]) -> u8 {
         unsafe {
             let mv_list_ptr = move_list.as_ptr() as *const __m512i;
             let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
@@ -1218,17 +1188,19 @@ impl<'a> Search<'a> {
             let lower_mask: u128 =
                 cmp_mask_0 | ((cmp_mask_1) << 32) | ((cmp_mask_2) << 64) | ((cmp_mask_3) << 96);
 
-            // println!(
-            //     "Scanned for move {} ({}), at index {} in array {:?}",
-            //     mv,
-            //     util::move_string_dbg(mv),
-            //     lower_mask.trailing_zeros(),
-            //     move_list
-            // );
-            // println!(
-            //     "Masks: {:032b} {:032b} {:032b} {:032b}",
-            //     cmp_mask_0, cmp_mask_1, cmp_mask_2, cmp_mask_3
-            // );
+            // if util::should_log(hash) {
+            //     println!(
+            //         "Scanned for move {} ({}), at index {} in array {:?}",
+            //         mv,
+            //         util::move_string_dbg(mv),
+            //         lower_mask.trailing_zeros(),
+            //         move_list
+            //     );
+            //     println!(
+            //         "Masks: {:032b} {:032b} {:032b} {:032b}",
+            //         cmp_mask_0, cmp_mask_1, cmp_mask_2, cmp_mask_3
+            //     );
+            // }
 
             debug_assert!(lower_mask != 0, "Move {:04x} not found in move list", mv);
             debug_assert!(

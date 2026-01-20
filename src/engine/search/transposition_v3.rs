@@ -1,6 +1,6 @@
 use std::pin::Pin;
 
-use crate::engine::search::eval::Eval;
+use crate::{engine::search::eval::Eval, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundType {
@@ -71,17 +71,17 @@ impl TtEntry {
 
     #[inline(always)]
     pub fn set_generation(&mut self, generation: u8) {
-        self.keygen = (self.keygen & 0x3FFF_FFFF) | ((generation as u32) << 30);
+        self.keygen = TranspositionTable::key_from_entry(self.keygen) | ((generation as u32) << 30);
     }
 
     #[inline(always)]
-    pub fn set_key(&mut self, hash: u64) {
-        self.keygen = (self.keygen & 0xC000_0000) | ((hash as u32) & 0x3FFF_FFFF);
+    pub fn set_key(&mut self, key: u32) {
+        self.keygen = (self.keygen & 0xC000_0000) | key;
     }
 
     #[inline(always)]
     pub fn key(&self) -> u32 {
-        (self.keygen & 0x3FFF_FFFF) as u32
+        TranspositionTable::key_from_entry(self.keygen)
     }
 
     #[inline(always)]
@@ -160,12 +160,24 @@ impl TranspositionTable {
     pub fn new_search(&mut self) {
         self.generation = (self.generation + 1) & 0b11;
         self.evict_generation = (self.generation + 1) & 0b11;
+    }
 
-        // 0 -> E: 1
-        // 1 -> E: 2
-        // 2 -> E: 3
-        // 3 -> E: 0
-        // 0 ->
+    #[inline(always)]
+    fn bucket_index(&self, hash: u64) -> usize {
+        ((hash as u128) * (self.num_buckets as u128) >> 64) as usize
+        // ((hash as usize) & self.table_size_mask) as usize
+    }
+
+    #[inline(always)]
+    fn bucket_key(&self, hash: u64) -> u32 {
+        (hash as u32) & 0x3FFF_FFFF
+        // let hash_bits = hash >> self.index_bits;
+        // hash_bits as u32 & 0x3FFF_FFFF
+    }
+
+    #[inline(always)]
+    fn key_from_entry(keygen: u32) -> u32 {
+        (keygen as u32) & 0x3FFF_FFFF
     }
 
     #[inline(always)]
@@ -178,28 +190,13 @@ impl TranspositionTable {
         beta: Eval,
     ) -> (Option<TtKey>, Option<TtProbe>) {
         let generation = self.generation;
-        let evict_generation = self.evict_generation;
 
-        // let logdbg = hash == 0x00A760E2A3316CAD4D;
+        let bucket_index = self.bucket_index(hash);
 
-        let bucket_index = ((hash as u128) * (self.num_buckets as u128)) >> 64;
-
-        let key = (hash as u32) & 0x3FFF_FFFF;
+        let key = self.bucket_key(hash);
 
         for entry in &mut self.entries[bucket_index as usize].0 {
             if entry.key() != key || entry.bound_type() == BoundType::Empty {
-                // if logdbg {
-                //     println!(
-                //         "TT Probe MISS for hash {:018X} ({}). EKey={:#x},EBType={:?}, EDepth={},EGen={}.Depth={}",
-                //         hash,
-                //         bucket_index,
-                //         entry.key(),
-                //         entry.bound_type(),
-                //         entry.depth(),
-                //         entry.generation(),
-                //         depth
-                //     );
-                // }
                 continue;
             }
 
@@ -215,8 +212,8 @@ impl TranspositionTable {
                 let hash_debug = *self.hash64.get(&(entry as *const TtEntry)).unwrap();
 
                 if hash != hash_debug {
-                    panic!(
-                        "TT Probe Hit Collision: Hash {:016X} ({:016X} in the slot), Depth {}, Type {:?}, Gen {}, HM: {}",
+                    println!(
+                        "V3 TT Probe Hit Collision: Hash {:016X} ({:016X} in the slot), Depth {}, Type {:?}, Gen {}, HM: {}",
                         hash,
                         hash_debug,
                         entry.depth(),
@@ -238,13 +235,14 @@ impl TranspositionTable {
             // }
 
             return (
-                if entry.should_replace(depth, evict_generation) {
-                    Some(TtKey {
-                        ptr: entry as *mut TtEntry,
-                    })
-                } else {
-                    None
-                },
+                // if entry.should_replace(depth, evict_generation) {
+                //     Some(TtKey {
+                //         ptr: entry as *mut TtEntry,
+                //     })
+                // } else {
+                //     None
+                // },
+                None,
                 Some(TtProbe {
                     score: if usable { Some(entry.score) } else { None },
                     eval: entry.eval,
@@ -253,37 +251,62 @@ impl TranspositionTable {
             );
         }
 
-        self.entries[bucket_index as usize]
-            .0
-            .iter_mut()
-            .find_map(|entry| {
-                if entry.bound_type() == BoundType::Empty
-                    || (entry.should_replace(depth, evict_generation))
-                {
-                    // if logdbg {
-                    //     println!(
-                    //         "Found entry for hash {:018X} ({}) to evict. Depth={},EDepth={},EBt={:?}",
-                    //         hash, bucket_index,
-                    //         depth,
-                    //         entry.depth(),
-                    //         entry.bound_type()
-                    //     );
-                    // }
-                    Some(TtKey {
-                        ptr: entry as *mut TtEntry,
-                    })
-                } else {
-                    None
-                }
-            })
-            .map(|k| (Some(k), None))
-            .unwrap_or((None, None))
+        (None, None)
+
+        // if let Some(free) = self.entries[bucket_index as usize]
+        //     .0
+        //     .iter_mut()
+        //     .find_map(|entry| {
+        //         if entry.bound_type() == BoundType::Empty {
+        //             if util::should_log(hash) {
+        //                 println!(
+        //                     "V3 Found EMPTY entry for hash {:018X} ({}) to evict. Depth={},EDepth={},EBt={:?}",
+        //                     hash, bucket_index,
+        //                     depth,
+        //                     entry.depth(),
+        //                     entry.bound_type()
+        //                 );
+        //             }
+        //             Some(TtKey {
+        //                 ptr: entry as *mut TtEntry,
+        //             })
+        //         } else {
+        //             None
+        //         }
+        //     })
+        // {
+        //     return (Some(free), None);
+        // }
+
+        // self.entries[bucket_index as usize]
+        //     .0
+        //     .iter_mut()
+        //     .find_map(|entry| {
+        //         if entry.should_replace(depth, evict_generation) {
+        //             if util::should_log(hash) {
+        //                 println!(
+        //                     "V3 Found REPLACABLE entry for hash {:018X} ({}) to evict. Depth={},EDepth={},EBt={:?}",
+        //                     hash, bucket_index,
+        //                     depth,
+        //                     entry.depth(),
+        //                     entry.bound_type()
+        //                 );
+        //             }
+        //             Some(TtKey {
+        //                 ptr: entry as *mut TtEntry,
+        //             })
+        //         } else {
+        //             None
+        //         }
+        //     })
+        //     .map(|k| (Some(k), None))
+        //     .unwrap_or((None, None))
     }
 
     #[inline(always)]
     pub fn store(
         &mut self,
-        key: Option<TtKey>,
+        _key: Option<TtKey>,
         hash: u64,
         score: Eval,
         eval: Eval,
@@ -291,14 +314,47 @@ impl TranspositionTable {
         mv_index: u8,
         bound_type: BoundType,
     ) {
-        let key = match key {
-            Some(k) => k,
+        // let key = match key {
+        //     Some(k) => k,
+        //     None => {
+        //         if util::should_log(hash) {
+        //             println!(
+        //                 "V3 TT Store SKIPPED for hash {:018X}. No replacable entry found. Depth={}",
+        //                 hash, depth
+        //             );
+        //         }
+        //         return;
+        //     }
+        // };
+        // let entry: &mut TtEntry = unsafe { &mut *key.ptr };
+
+        let bucket_key = self.bucket_key(hash);
+        let bucket_index = self.bucket_index(hash);
+
+        let mut entry = None;
+
+        for e in &mut self.entries[bucket_index].0 {
+            if e.bound_type() == BoundType::Empty {
+                entry = Some(e);
+                break;
+            }
+            if e.key() == bucket_key {
+                if e.should_replace(depth, self.evict_generation) {
+                    entry = Some(e);
+                }
+                break;
+            }
+            if e.should_replace(depth, self.evict_generation) {
+                entry = Some(e);
+            }
+        }
+
+        let entry = match entry {
+            Some(e) => e,
             None => return,
         };
 
         let generation = self.generation;
-
-        let entry = unsafe { &mut *key.ptr };
 
         if DEBUG {
             // println!("Stored in slot {:p}", entry);
@@ -308,25 +364,12 @@ impl TranspositionTable {
                 .or_insert(hash);
         }
 
-        // let logdbg = hash == 0x00A760E2A3316CAD4D;
-
-        // if logdbg {
-        //     println!(
-        //         "V3 Storing mv index {} for hash {:018X}. Depth={},EDepth={},EBt={:?}",
-        //         mv_index,
-        //         hash,
-        //         depth,
-        //         entry.depth(),
-        //         entry.bound_type(),
-        //     );
-        // }
-
         entry.eval = eval;
         entry.score = score;
         entry.mv_index = mv_index;
         entry.set_generation(generation);
         entry.set_depth_and_type(depth, bound_type);
-        entry.set_key(hash);
+        entry.set_key(bucket_key);
 
         // if logdbg {
         //     println!(
