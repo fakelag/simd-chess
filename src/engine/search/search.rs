@@ -399,10 +399,6 @@ impl<'a> Search<'a> {
             self.tt
                 .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
 
-        // @todo - Consider check extension before TT probe
-        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
-        depth += in_check as u8;
-
         if apply_pruning
             && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
         {
@@ -422,6 +418,10 @@ impl<'a> Search<'a> {
             debug_assert!(!self.pv_trace);
             return self.quiescence(alpha, beta, ply as u32);
         }
+
+        // @todo - Consider check extension before TT probe
+        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
+        depth += in_check as u8;
 
         if self.pv_trace {
             self.pv_trace = self.pv_length > (ply + 1);
@@ -762,9 +762,8 @@ impl<'a> Search<'a> {
                     }
                 }
 
-                let static_eval = *static_eval.get_or_init(|| self.evaluate());
-
                 if !in_check && best_move & MV_FLAG_CAP == 0 {
+                    let static_eval = *static_eval.get_or_init(|| self.evaluate());
                     if score >= static_eval {
                         self.update_correction_heuristics(score - static_eval, depth as Eval);
                     }
@@ -778,7 +777,7 @@ impl<'a> Search<'a> {
                     tt_key,
                     self.chess.zobrist_key(),
                     score,
-                    static_eval,
+                    0,
                     depth,
                     original_mv_index,
                     BoundType::LowerBound,
@@ -821,7 +820,7 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        let static_eval = *static_eval.get_or_init(|| self.evaluate());
+        // let static_eval = *static_eval.get_or_init(|| self.evaluate());
 
         let original_mv_index =
             Self::find_index_fast_avx512(self.chess.zobrist_key(), best_move, &original_move_list);
@@ -830,7 +829,7 @@ impl<'a> Search<'a> {
             tt_key,
             self.chess.zobrist_key(),
             best_score,
-            static_eval,
+            0,
             depth,
             original_mv_index,
             bound_type,

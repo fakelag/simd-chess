@@ -100,8 +100,8 @@ impl TtEntry {
     }
 
     #[inline(always)]
-    pub fn should_replace(&self, depth: u8, evict_generation: u8) -> bool {
-        self.depth() < depth || self.generation() == evict_generation
+    pub fn should_replace(&self, depth: u8, evict: bool) -> bool {
+        self.depth() < depth || evict
     }
 }
 
@@ -112,10 +112,10 @@ pub struct TtBucket([TtEntry; 3]);
 pub struct TranspositionTable {
     entries: Pin<Box<[TtBucket]>>,
     generation: u8,
-    evict_generation: u8,
     table_size_mask: usize,
     index_bits: u32,
     num_buckets: usize,
+    evict_generation: [bool; 4],
 
     hash64: std::collections::BTreeMap<*const TtEntry, u64>,
     stats: Box<TtStats>,
@@ -143,8 +143,8 @@ impl TranspositionTable {
             hash64: std::collections::BTreeMap::new(),
             index_bits,
             num_buckets: table_size,
+            evict_generation: [false; 4],
             generation: 0,
-            evict_generation: 0,
             stats: Box::new(TtStats {
                 probe_hit: 0,
                 probe_miss: 0,
@@ -159,7 +159,10 @@ impl TranspositionTable {
     #[inline(always)]
     pub fn new_search(&mut self) {
         self.generation = (self.generation + 1) & 0b11;
-        self.evict_generation = (self.generation + 1) & 0b11;
+        for i in 0..4 {
+            self.evict_generation[i as usize] =
+                (i == (self.generation + 1) & 0b11) || (i == (self.generation + 2) & 0b11);
+        }
     }
 
     #[inline(always)]
@@ -339,12 +342,12 @@ impl TranspositionTable {
                 break;
             }
             if e.key() == bucket_key {
-                if e.should_replace(depth, self.evict_generation) {
+                if e.should_replace(depth, self.evict_generation[e.generation() as usize]) {
                     entry = Some(e);
                 }
                 break;
             }
-            if e.should_replace(depth, self.evict_generation) {
+            if e.should_replace(depth, self.evict_generation[e.generation() as usize]) {
                 entry = Some(e);
             }
         }
@@ -391,7 +394,9 @@ impl TranspositionTable {
 
     pub fn clear(&mut self) {
         self.generation = 0;
-        self.evict_generation = 0;
+        for i in 0..4 {
+            self.evict_generation[i] = false;
+        }
         for bucket in self.entries.iter_mut() {
             for entry in &mut bucket.0 {
                 entry.depthtype = 0;
