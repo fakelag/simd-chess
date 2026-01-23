@@ -1,6 +1,6 @@
-use std::pin::Pin;
+use std::{arch::x86_64::*, pin::Pin};
 
-use crate::{engine::search::eval::Eval, util};
+use crate::engine::search::eval::Eval;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundType {
@@ -20,16 +20,6 @@ pub enum BoundType {
 }
 
 const DEBUG: bool = false;
-// const TT_EVICT_GENERATIONS: u8 = 1;
-
-pub struct TtStats {
-    pub probe_hit: usize,
-    pub probe_miss: usize,
-    pub store_hit: usize,
-    pub store_miss: usize,
-    pub fill_percentage: f64,
-    pub collisions: usize,
-}
 
 #[derive(Debug)]
 pub struct TtProbe {
@@ -38,18 +28,13 @@ pub struct TtProbe {
     pub mv_index: u8,
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct TtKey {
-    ptr: *mut TtEntry,
-}
-
 #[derive(Debug, Clone, Copy)]
 #[repr(packed)]
 struct TtEntry {
     keygen: u32,
+    depthtype: u8,
     eval: Eval,
     score: Eval,
-    depthtype: u8,
     mv_index: u8,
 }
 
@@ -113,12 +98,13 @@ pub struct TranspositionTable {
     entries: Pin<Box<[TtBucket]>>,
     generation: u8,
     table_size_mask: usize,
-    index_bits: u32,
-    num_buckets: usize,
+    // num_buckets: usize,
     evict_generation: [bool; 4],
 
+    evict_0: __m256i,
+    evict_1: __m256i,
+
     hash64: std::collections::BTreeMap<*const TtEntry, u64>,
-    stats: Box<TtStats>,
 }
 
 // Safety: TranspositionTable must implement thread safety by itself
@@ -133,7 +119,6 @@ impl TranspositionTable {
         let table_size = num_buckets.next_power_of_two();
 
         let table_mask = table_size - 1;
-        let index_bits = table_mask.count_ones();
 
         let entries = vec![TtBucket([TtEntry::new(); 3]); table_size].into_boxed_slice();
 
@@ -141,18 +126,11 @@ impl TranspositionTable {
             table_size_mask: table_mask,
             entries: Pin::from(entries),
             hash64: std::collections::BTreeMap::new(),
-            index_bits,
-            num_buckets: table_size,
+            // num_buckets: table_size,
             evict_generation: [false; 4],
             generation: 0,
-            stats: Box::new(TtStats {
-                probe_hit: 0,
-                probe_miss: 0,
-                store_hit: 0,
-                store_miss: 0,
-                fill_percentage: 0.0,
-                collisions: 0,
-            }),
+            evict_0: unsafe { _mm256_set1_epi32(0) },
+            evict_1: unsafe { _mm256_set1_epi32(0) },
         }
     }
 
@@ -163,19 +141,44 @@ impl TranspositionTable {
             self.evict_generation[i as usize] =
                 (i == (self.generation + 1) & 0b11) || (i == (self.generation + 2) & 0b11);
         }
+
+        let evict_0 = (((self.generation + 1) & 0b11) << 6) as u64;
+        let evict_1 = (((self.generation + 2) & 0b11) << 6) as u64;
+
+        (self.evict_0, self.evict_1) = unsafe {
+            (
+                _mm256_set_epi64x(
+                    0,
+                    (evict_0 << 56) as i64,
+                    (evict_0 << 40) as i64,
+                    (evict_0 << 24) as i64,
+                ),
+                _mm256_set_epi64x(
+                    0,
+                    (evict_1 << 56) as i64,
+                    (evict_1 << 40) as i64,
+                    (evict_1 << 24) as i64,
+                ),
+            )
+        };
     }
 
     #[inline(always)]
     fn bucket_index(&self, hash: u64) -> usize {
-        ((hash as u128) * (self.num_buckets as u128) >> 64) as usize
-        // ((hash as usize) & self.table_size_mask) as usize
+        // let b = ((hash as u128) * (self.num_buckets as u128) >> 64) as usize;
+
+        let b = (((hash >> 30) as usize) & self.table_size_mask) as usize;
+
+        unsafe {
+            std::hint::assert_unchecked(b < self.entries.len());
+        }
+
+        b
     }
 
     #[inline(always)]
     fn bucket_key(&self, hash: u64) -> u32 {
         (hash as u32) & 0x3FFF_FFFF
-        // let hash_bits = hash >> self.index_bits;
-        // hash_bits as u32 & 0x3FFF_FFFF
     }
 
     #[inline(always)]
@@ -191,7 +194,7 @@ impl TranspositionTable {
         depth: u8,
         alpha: Eval,
         beta: Eval,
-    ) -> (Option<TtKey>, Option<TtProbe>) {
+    ) -> Option<TtProbe> {
         let generation = self.generation;
 
         let bucket_index = self.bucket_index(hash);
@@ -199,7 +202,10 @@ impl TranspositionTable {
         let key = self.bucket_key(hash);
 
         for entry in &mut self.entries[bucket_index as usize].0 {
-            if entry.key() != key || entry.bound_type() == BoundType::Empty {
+            let can_use_entry =
+                ((entry.key() == key) as u8) & ((entry.bound_type() != BoundType::Empty) as u8);
+
+            if can_use_entry == 0 {
                 continue;
             }
 
@@ -237,79 +243,99 @@ impl TranspositionTable {
             //     );
             // }
 
-            return (
-                // if entry.should_replace(depth, evict_generation) {
-                //     Some(TtKey {
-                //         ptr: entry as *mut TtEntry,
-                //     })
-                // } else {
-                //     None
-                // },
-                None,
-                Some(TtProbe {
-                    score: if usable { Some(entry.score) } else { None },
-                    eval: entry.eval,
-                    mv_index: entry.mv_index,
-                }),
-            );
+            return Some(TtProbe {
+                score: if usable { Some(entry.score) } else { None },
+                eval: entry.eval,
+                mv_index: entry.mv_index,
+            });
         }
 
-        (None, None)
-
-        // if let Some(free) = self.entries[bucket_index as usize]
-        //     .0
-        //     .iter_mut()
-        //     .find_map(|entry| {
-        //         if entry.bound_type() == BoundType::Empty {
-        //             if util::should_log(hash) {
-        //                 println!(
-        //                     "V3 Found EMPTY entry for hash {:018X} ({}) to evict. Depth={},EDepth={},EBt={:?}",
-        //                     hash, bucket_index,
-        //                     depth,
-        //                     entry.depth(),
-        //                     entry.bound_type()
-        //                 );
-        //             }
-        //             Some(TtKey {
-        //                 ptr: entry as *mut TtEntry,
-        //             })
-        //         } else {
-        //             None
-        //         }
-        //     })
-        // {
-        //     return (Some(free), None);
-        // }
-
-        // self.entries[bucket_index as usize]
-        //     .0
-        //     .iter_mut()
-        //     .find_map(|entry| {
-        //         if entry.should_replace(depth, evict_generation) {
-        //             if util::should_log(hash) {
-        //                 println!(
-        //                     "V3 Found REPLACABLE entry for hash {:018X} ({}) to evict. Depth={},EDepth={},EBt={:?}",
-        //                     hash, bucket_index,
-        //                     depth,
-        //                     entry.depth(),
-        //                     entry.bound_type()
-        //                 );
-        //             }
-        //             Some(TtKey {
-        //                 ptr: entry as *mut TtEntry,
-        //             })
-        //         } else {
-        //             None
-        //         }
-        //     })
-        //     .map(|k| (Some(k), None))
-        //     .unwrap_or((None, None))
+        None
     }
+
+    // #[inline(always)]
+    // fn match_entries_late_generation_avx2(&self, bucket_vec: &__m256i) -> __mmask32 {
+    //     unsafe {
+    //         const SLOT_MASK: i8 = 0xC0 as u8 as i8;
+
+    //         let gen_mask_vec = _mm256_set1_epi8(SLOT_MASK);
+    //         let gen_vec = _mm256_and_si256(*bucket_vec, gen_mask_vec);
+
+    //         let evict_a = _mm256_cmpeq_epi8_mask(gen_vec, self.evict_0);
+    //         let evict_b = _mm256_cmpeq_epi8_mask(gen_vec, self.evict_1);
+
+    //         evict_a | evict_b
+    //     }
+    // }
+
+    // #[inline(always)]
+    // fn match_entries_depth_avx2(&self, bucket_vec: &__m256i, depth_lt: u8) -> __mmask32 {
+    //     unsafe {
+    //         let result = _mm256_cmplt_epi8_mask(
+    //             _mm256_srai_epi16(*bucket_vec, 2),
+    //             _mm256_set1_epi8(depth_lt as i8),
+    //         );
+
+    //         result >> 1
+    //     }
+    // }
+
+    // #[inline(always)]
+    // fn match_entries_replace_avx2(&self, bucket_vec: &__m256i, depth: u8) -> __mmask32 {
+    //     let depth_mask = self.match_entries_depth_avx2(bucket_vec, depth);
+    //     let generation_mask = self.match_entries_late_generation_avx2(bucket_vec);
+
+    //     // unsafe { _pext_u32(generation_mask | depth_mask, 0b100000000010000000001000) as __mmask8 }
+    //     ((generation_mask | depth_mask) & 0b100000000010000000001000) << 1
+    // }
+
+    // #[inline(always)]
+    // fn match_entries_empty_avx2(&self, bucket_vec: &__m256i) -> __mmask32 {
+    //     unsafe {
+    //         const SLOT_MASK: i8 = 0b11 as u8 as i8;
+
+    //         let test_vec = _mm256_set1_epi8(BoundType::Empty as u8 as i8);
+
+    //         let bt_mask_vec = _mm256_set1_epi8(SLOT_MASK);
+
+    //         let result =
+    //             _mm256_cmpeq_epi8_mask(_mm256_and_si256(*bucket_vec, bt_mask_vec), test_vec);
+
+    //         // _pext_u32(result, 0b1000000000100000000010000) as __mmask8
+    //         result & 0b1000000000100000000010000
+    //     }
+    // }
+
+    // #[inline(always)]
+    // fn match_entries_key_avx2(&self, bucket_vec: &__m256i, key: u32) -> __mmask32 {
+    //     unsafe {
+    //         let key_vec = _mm256_set1_epi32(key as i32);
+
+    //         let bucket_aligned_vec = _mm256_permutexvar_epi8(
+    //             _mm256_set_epi8(
+    //                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+    //                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+    //                 23, 22, 21, 20, //
+    //                 13, 12, 11, 10, //
+    //                 3, 2, 1, 0, //
+    //             ),
+    //             *bucket_vec,
+    //         );
+
+    //         let key_mask_vec = _mm256_set1_epi32(0x3FFF_FFFF as i32);
+
+    //         let result = _mm256_cmpeq_epi32_mask(
+    //             _mm256_and_si256(bucket_aligned_vec, key_mask_vec),
+    //             key_vec,
+    //         ) as u32;
+
+    //         ((result & 1) << 4) | ((result & 2) << 13) | ((result & 4) << 22)
+    //     }
+    // }
 
     #[inline(always)]
     pub fn store(
         &mut self,
-        _key: Option<TtKey>,
         hash: u64,
         score: Eval,
         eval: Eval,
@@ -317,22 +343,38 @@ impl TranspositionTable {
         mv_index: u8,
         bound_type: BoundType,
     ) {
-        // let key = match key {
-        //     Some(k) => k,
-        //     None => {
-        //         if util::should_log(hash) {
-        //             println!(
-        //                 "V3 TT Store SKIPPED for hash {:018X}. No replacable entry found. Depth={}",
-        //                 hash, depth
-        //             );
-        //         }
-        //         return;
-        //     }
-        // };
-        // let entry: &mut TtEntry = unsafe { &mut *key.ptr };
-
         let bucket_key = self.bucket_key(hash);
         let bucket_index = self.bucket_index(hash);
+
+        // let entry_mask = unsafe {
+        //     let bucket_vec =
+        //         _mm256_load_si256(self.entries.as_ptr().add(bucket_index) as *const __m256i);
+
+        //     let replace_mask = self.match_entries_replace_avx2(&bucket_vec, depth);
+        //     let empty_mask = self.match_entries_empty_avx2(&bucket_vec);
+        //     let key_mask = self.match_entries_key_avx2(&bucket_vec, bucket_key) & !empty_mask;
+
+        //     let replace_key_mask = key_mask & replace_mask;
+
+        //     let no_key_mask = ((key_mask != 0) as u32).wrapping_sub(1);
+        //     let no_empty_mask = ((empty_mask != 0) as u32).wrapping_sub(1);
+
+        //     let entry_mask = replace_key_mask
+        //         | (empty_mask & no_key_mask)
+        //         | (replace_mask & no_key_mask & no_empty_mask);
+
+        //     ((entry_mask >> 4) & 1) | ((entry_mask >> 13) & 2) | ((entry_mask >> 22) & 4)
+        // };
+
+        // let entry_index = entry_mask.trailing_zeros();
+
+        // let entry = match entry_index {
+        //     0..3 => &mut self.entries[bucket_index].0[entry_index as usize],
+        //     _ => return,
+        // };
+
+        // 14912215
+        // 16323453
 
         let mut entry = None;
 
@@ -340,14 +382,17 @@ impl TranspositionTable {
             if e.bound_type() == BoundType::Empty {
                 entry = Some(e);
                 break;
-            }
-            if e.key() == bucket_key {
+            } else if e.key() == bucket_key {
                 if e.should_replace(depth, self.evict_generation[e.generation() as usize]) {
                     entry = Some(e);
+                } else {
+                    entry = None;
                 }
                 break;
             }
-            if e.should_replace(depth, self.evict_generation[e.generation() as usize]) {
+            if e.should_replace(depth, self.evict_generation[e.generation() as usize])
+                && entry.is_none()
+            {
                 entry = Some(e);
             }
         }
@@ -360,7 +405,6 @@ impl TranspositionTable {
         let generation = self.generation;
 
         if DEBUG {
-            // println!("Stored in slot {:p}", entry);
             self.hash64
                 .entry(entry as *const TtEntry)
                 .and_modify(|h| *h = hash)
@@ -403,16 +447,5 @@ impl TranspositionTable {
                 entry.mv_index = 0xFF;
             }
         }
-    }
-
-    pub fn calc_stats(&self) -> TtStats {
-        return TtStats {
-            fill_percentage: 0.0,
-            probe_hit: 0,
-            probe_miss: 0,
-            store_hit: 0,
-            store_miss: 0,
-            collisions: 0,
-        };
     }
 }

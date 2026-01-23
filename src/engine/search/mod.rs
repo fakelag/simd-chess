@@ -39,7 +39,6 @@ mod tests {
         // let test_fen = "8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1";
 
         let bench = || {
-            let tt = std::cell::SyncUnsafeCell::new(transposition_v2::TranspositionTable::new(4));
             let rt = repetition_v2::RepetitionTable::new();
             // let mut chess = chess_v2::ChessGame::new();
             // assert!(
@@ -120,8 +119,6 @@ mod tests {
             //     }
             // }
 
-            let tt_stats = unsafe { &mut *tt.get() }.calc_stats();
-
             println!(
                 "Nodes searched: {} ({} quiescence / {:.02}%)",
                 search_engine.num_nodes_searched(),
@@ -134,19 +131,19 @@ mod tests {
             println!("α-raise count: {}", search_engine.a_raise_count());
             println!("depth: {}", search_engine.get_depth());
             println!("q-depth: {}", search_engine.get_quiet_depth());
-            println!("TT usage: {:.02}%", tt_stats.fill_percentage * 100.0);
-            println!(
-                "TT probe hit rate: {:.02}%",
-                tt_stats.probe_hit as f64
-                    / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
-                    * 100.0
-            );
-            println!(
-                "TT store hit rate: {:.02}%",
-                tt_stats.store_hit as f64
-                    / (tt_stats.store_hit as f64 + tt_stats.store_miss as f64)
-                    * 100.0
-            );
+            // println!("TT usage: {:.02}%", tt_stats.fill_percentage * 100.0);
+            // println!(
+            //     "TT probe hit rate: {:.02}%",
+            //     tt_stats.probe_hit as f64
+            //         / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
+            //         * 100.0
+            // );
+            // println!(
+            //     "TT store hit rate: {:.02}%",
+            //     tt_stats.store_hit as f64
+            //         / (tt_stats.store_hit as f64 + tt_stats.store_miss as f64)
+            //         * 100.0
+            // );
 
             // let et_stats = search_engine.get_et().calc_stats();
             // println!(

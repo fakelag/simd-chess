@@ -395,9 +395,9 @@ impl<'a> Search<'a> {
 
         // assert!(!(self.pv_trace && tt_move != 0));
 
-        let (tt_key, tt_probe) =
-            self.tt
-                .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
+        let tt_probe = self
+            .tt
+            .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
 
         if apply_pruning
             && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
@@ -774,7 +774,6 @@ impl<'a> Search<'a> {
                     Self::find_index_fast_avx512(self.chess.zobrist_key(), mv, &original_move_list);
 
                 self.tt.store(
-                    tt_key,
                     self.chess.zobrist_key(),
                     score,
                     0,
@@ -826,7 +825,6 @@ impl<'a> Search<'a> {
             Self::find_index_fast_avx512(self.chess.zobrist_key(), best_move, &original_move_list);
 
         self.tt.store(
-            tt_key,
             self.chess.zobrist_key(),
             best_score,
             0,
