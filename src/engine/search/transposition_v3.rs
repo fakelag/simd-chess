@@ -291,11 +291,25 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    fn match_entries_replace_avx512(&self, bucket_vec: &__m512i, depth: u8) -> __mmask8 {
+    fn match_entries_replace_avx512(
+        &self,
+        bucket_vec: &__m512i,
+        bt_vec: &__m512i,
+        depth: u8,
+        bound_type: BoundType,
+    ) -> __mmask8 {
         let depth_mask = self.match_entries_depth_avx512(bucket_vec, depth);
         let generation_mask = self.match_entries_late_generation_avx512(bucket_vec);
 
-        let result = (generation_mask | depth_mask) & 0x20080200802008;
+        // Always replace non-exact entries with exact
+        let bt_mask = unsafe {
+            let test_vec = _mm512_set1_epi8(BoundType::Exact as u8 as i8);
+            let bt_nonexact_mask = _mm512_cmpgt_epi8_mask(*bt_vec, test_vec);
+
+            (bt_nonexact_mask >> 1) & ((bound_type != BoundType::Exact) as u64).wrapping_sub(1)
+        };
+
+        let result = (generation_mask | depth_mask | bt_mask) & 0x20080200802008;
 
         ((result >> 3)
             | (result >> 12)
@@ -306,17 +320,10 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    fn match_entries_empty_avx512(&self, bucket_vec: &__m512i) -> __mmask8 {
+    fn match_entries_empty_avx512(&self, bt_vec: &__m512i) -> __mmask8 {
         unsafe {
-            const SLOT_MASK: i8 = 0b11 as u8 as i8;
-
             let test_vec = _mm512_set1_epi8(BoundType::Empty as u8 as i8);
-
-            let bt_mask_vec = _mm512_set1_epi8(SLOT_MASK);
-
-            let result =
-                _mm512_cmpeq_epi8_mask(_mm512_and_si512(*bucket_vec, bt_mask_vec), test_vec)
-                    & 0x40100401004010;
+            let result = _mm512_cmpeq_epi8_mask(*bt_vec, test_vec) & 0x40100401004010;
 
             ((result >> 4)
                 | (result >> 13)
@@ -333,18 +340,15 @@ impl TranspositionTable {
             let key_vec = _mm512_set1_epi32(key as i32);
 
             let bucket_aligned_vec = _mm512_permutexvar_epi8(
-                _mm512_set_epi8(
-                    0, 0, 0, 0, 0, 0, 0, 0, //
-                    0, 0, 0, 0, 0, 0, 0, 0, //
-                    0, 0, 0, 0, 0, 0, 0, 0, //
-                    0, 0, 0, 0, 0, 0, 0, 0, //
-                    0, 0, 0, 0, 0, 0, 0, 0, //
-                    53, 52, 51, 50, //
-                    43, 42, 41, 40, //
-                    33, 32, 31, 30, //
-                    23, 22, 21, 20, //
-                    13, 12, 11, 10, //
-                    3, 2, 1, 0, //
+                _mm512_set_epi64(
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0x35343332_2B2A2928,
+                    0x21201F1E_17161514,
+                    0x0D0C0B0A_03020100,
                 ),
                 *bucket_vec,
             );
@@ -380,8 +384,12 @@ impl TranspositionTable {
             let bucket_vec =
                 _mm512_load_si512(self.entries.as_ptr().add(bucket_index) as *const __m512i);
 
-            let replace_mask = self.match_entries_replace_avx512(&bucket_vec, depth);
-            let empty_mask = self.match_entries_empty_avx512(&bucket_vec);
+            let bt_mask_vec = _mm512_set1_epi8(0b11 as u8 as i8);
+            let bt_vec = _mm512_and_si512(bucket_vec, bt_mask_vec);
+
+            let replace_mask =
+                self.match_entries_replace_avx512(&bucket_vec, &bt_vec, depth, bound_type);
+            let empty_mask = self.match_entries_empty_avx512(&bt_vec);
             let key_mask = key_mask & !empty_mask;
 
             let replace_key_mask = key_mask & replace_mask;
