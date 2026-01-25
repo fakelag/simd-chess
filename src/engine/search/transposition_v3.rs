@@ -279,14 +279,10 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    fn match_entries_depth_avx512(&self, bucket_vec: &__m512i, depth_lt: u8) -> __mmask64 {
+    fn match_entries_depth_avx512(&self, bucket_vec: &__m512i, depth: u8) -> __mmask64 {
         unsafe {
-            // let result = _mm512_cmple_epi8_mask(
-            //     _mm512_srai_epi16(*bucket_vec, 2),
-            //     _mm512_set1_epi8(depth_lt as i8),
-            // );
             let result =
-                _mm512_cmple_epi8_mask(*bucket_vec, _mm512_set1_epi8((depth_lt << 2) as i8));
+                _mm512_cmple_epi8_mask(*bucket_vec, _mm512_set1_epi8((depth << 2) as i8 | 0b11));
 
             result >> 1
         }
