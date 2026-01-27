@@ -9,18 +9,17 @@ pub trait SearchStrategy<'a> {
 }
 
 pub mod eval;
-pub mod repetition_v2;
+pub mod repetition;
 pub mod search;
 pub mod search_params;
 pub mod see;
-pub mod transposition_v2;
-pub mod transposition_v3;
+pub mod transposition;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        engine::{chess_v2, search::search_params::SearchParams, tables},
+        engine::{search::search_params::SearchParams, tables},
         util,
     };
 
@@ -39,7 +38,7 @@ mod tests {
         // let test_fen = "8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1";
 
         let bench = || {
-            let rt = repetition_v2::RepetitionTable::new();
+            let rt = repetition::RepetitionTable::new();
             // let mut chess = chess_v2::ChessGame::new();
             // assert!(
             //     chess

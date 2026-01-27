@@ -184,7 +184,7 @@ impl SelfplayTrainer {
             format!("depth {ANNOTATION_DEPTH}").split_whitespace(),
         );
 
-        let rt = engine::search::repetition_v2::RepetitionTable::new();
+        let rt = engine::search::repetition::RepetitionTable::new();
 
         let mut search_engine = engine::search::search::Search::new(search_params, tables, 4, rt);
 

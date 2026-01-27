@@ -95,7 +95,7 @@ pub struct Matchmaking {
     pub versus_move_start_time: Option<std::time::Instant>,
     pub versus_autostart: bool,
     pub versus_logging: bool,
-    pub versus_3fr: Option<engine::search::repetition_v2::RepetitionTable>,
+    pub versus_3fr: Option<engine::search::repetition::RepetitionTable>,
 
     pub versus_queue: VecDeque<VersusMatch>,
     pub versus_matches: VecDeque<VersusMatch>,

@@ -7,14 +7,12 @@
 #![feature(adt_const_params)]
 #![feature(generic_const_exprs)]
 
-use std::cell::SyncUnsafeCell;
-
 use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::engine::ownbook::OwnBook;
 use crate::engine::search::search_params::SearchParams;
-use crate::engine::search::{SearchStrategy, repetition_v2, transposition_v2};
+use crate::engine::search::{SearchStrategy, repetition};
 use crate::uci::uci::{UciCommand, chess_uci};
 use crate::{
     engine::{
@@ -78,7 +76,7 @@ fn search_thread(
         SearchParams::new(),
         tables,
         1,
-        repetition_v2::RepetitionTable::new(),
+        repetition::RepetitionTable::new(),
     );
 
     let mut used_book = get_opening_book(&uci_context, tables);

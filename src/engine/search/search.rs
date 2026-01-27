@@ -7,12 +7,8 @@ use crate::{
     engine::{
         chess_v2,
         search::{
-            AbortSignal, SearchStrategy,
-            eval::*,
-            repetition_v2::RepetitionTable,
-            search_params::SearchParams,
-            transposition_v2,
-            transposition_v3::{self, BoundType},
+            AbortSignal, SearchStrategy, eval::*, repetition::RepetitionTable,
+            search_params::SearchParams, transposition::*,
         },
         sorting,
         tables::{self},
@@ -109,8 +105,7 @@ pub struct Search<'a> {
 
     move_list: [u16; 256],
 
-    tt: transposition_v3::TranspositionTable,
-    // tt_v2: transposition_v2::TranspositionTable,
+    tt: TranspositionTable,
     rt: RepetitionTable,
     et: EvalTable,
     history_moves: Box<[[i16; 64]; 16]>,
@@ -218,8 +213,7 @@ impl<'a> Search<'a> {
             history_moves: Box::new([[0; 64]; 16]),
             et: EvalTable::new(1024),
             rt,
-            tt: transposition_v3::TranspositionTable::new(tt_size_hint_mb),
-            // tt_v2: transposition_v2::TranspositionTable::new(tt_size_hint_mb),
+            tt: TranspositionTable::new(tt_size_hint_mb),
             pawn_correction_heuristic: [[0; u16::MAX as usize + 1]; 2],
             // corr_stats: Vec::new(),
         };
@@ -261,7 +255,6 @@ impl<'a> Search<'a> {
         }
 
         self.tt.new_search();
-        // self.tt_v2.new_search();
     }
 
     /// Resets the board & nnue state without clearing the transposition or repetition tables.
@@ -284,7 +277,6 @@ impl<'a> Search<'a> {
     pub fn new_game(&mut self) {
         self.rt.clear();
         self.tt.clear();
-        // self.tt_v2.clear();
         self.et.clear();
 
         for i in 0..2 {
@@ -779,13 +771,6 @@ impl<'a> Search<'a> {
                     original_mv_index,
                     BoundType::LowerBound,
                 );
-                // self.tt_v2.store(
-                //     self.chess.zobrist_key(),
-                //     score,
-                //     depth,
-                //     mv,
-                //     transposition_v2::BoundType::LowerBound,
-                // );
                 self.rt.pop_position();
                 self.b_cut_count += 1;
                 return score;
@@ -829,20 +814,6 @@ impl<'a> Search<'a> {
             original_mv_index,
             bound_type,
         );
-
-        // self.tt_v2.store(
-        //     self.chess.zobrist_key(),
-        //     best_score,
-        //     depth,
-        //     best_move,
-        //     if bound_type == BoundType::Exact {
-        //         transposition_v2::BoundType::Exact
-        //     } else if bound_type == BoundType::UpperBound {
-        //         transposition_v2::BoundType::UpperBound
-        //     } else {
-        //         panic!();
-        //     },
-        // );
 
         best_score
     }

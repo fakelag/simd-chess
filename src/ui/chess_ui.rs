@@ -197,7 +197,7 @@ impl ChessUi {
 
         let mut matchmaking = Matchmaking::new(fen).unwrap();
 
-        matchmaking.versus_3fr = Some(crate::engine::search::repetition_v2::RepetitionTable::new());
+        matchmaking.versus_3fr = Some(crate::engine::search::repetition::RepetitionTable::new());
 
         let mut s = Self {
             matchmaking,

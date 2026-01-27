@@ -42,7 +42,7 @@ pub struct GoCommand {
     pub params: search_params::SearchParams,
     pub chess: chess_v2::ChessGame,
     pub sig: AbortSignal,
-    pub repetition_table: search::repetition_v2::RepetitionTable,
+    pub repetition_table: search::repetition::RepetitionTable,
 }
 
 pub enum UciCommand {
@@ -59,7 +59,7 @@ pub fn chess_uci(
     let mut debug_enabled = true;
 
     let mut game_board: Option<chess_v2::ChessGame> = None;
-    let mut repetition_table: Option<search::repetition_v2::RepetitionTable> = None;
+    let mut repetition_table: Option<search::repetition::RepetitionTable> = None;
 
     struct GoContext {
         tx_abort: channel::Sender<SigAbort>,
@@ -109,7 +109,7 @@ pub fn chess_uci(
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let mut board = chess_v2::ChessGame::new();
-                let mut rep_table = search::repetition_v2::RepetitionTable::new();
+                let mut rep_table = search::repetition::RepetitionTable::new();
 
                 let position_start_index = input
                     .next()
