@@ -32,7 +32,6 @@ const DEBUG: bool = false;
 #[derive(Debug)]
 pub struct TtProbe {
     pub score: Option<Eval>,
-    pub eval: Eval,
     pub mv_index: u8,
 }
 
@@ -41,7 +40,7 @@ pub struct TtProbe {
 struct TtEntry {
     keygen: u32,
     depthtype: u8,
-    eval: Eval,
+    // eval: Eval,
     score: Eval,
     mv_index: u8,
 }
@@ -50,7 +49,7 @@ impl TtEntry {
     pub fn new() -> Self {
         TtEntry {
             keygen: 0,
-            eval: 0,
+            // eval: 0,
             score: 0,
             depthtype: 0,
             mv_index: 0xFF,
@@ -93,14 +92,16 @@ impl TtEntry {
     }
 
     #[inline(always)]
-    pub fn should_replace(&self, depth: u8, evict: bool) -> bool {
-        self.depth() <= depth || evict
+    pub fn should_replace(&self, depth: u8, bt: BoundType, evict: bool) -> bool {
+        self.depth() <= depth
+            || evict
+            || (bt == BoundType::Exact && self.bound_type() != BoundType::Exact)
     }
 }
 
 #[derive(Debug, Copy, Clone)]
 #[repr(align(64))]
-pub struct TtBucket([TtEntry; 6]);
+pub struct TtBucket([TtEntry; 8]);
 
 pub struct TranspositionTable {
     entries: Pin<Box<[TtBucket]>>,
@@ -128,7 +129,7 @@ impl TranspositionTable {
         let table_mask = table_size - 1;
         let index_bits = table_mask.count_ones();
 
-        let entries = vec![TtBucket([TtEntry::new(); 6]); table_size].into_boxed_slice();
+        let entries = vec![TtBucket([TtEntry::new(); 8]); table_size].into_boxed_slice();
 
         TranspositionTable {
             table_size_mask: table_mask,
@@ -156,23 +157,23 @@ impl TranspositionTable {
         (self.evict_0, self.evict_1) = unsafe {
             (
                 _mm512_set_epi64(
-                    0,
-                    (evict_0 << 40) as i64,
                     (evict_0 << 24) as i64,
-                    (evict_0 << 8) as i64,
-                    0,
-                    (evict_0 << 56) as i64,
-                    (evict_0 << 40) as i64,
+                    (evict_0 << 24) as i64,
+                    (evict_0 << 24) as i64,
+                    (evict_0 << 24) as i64,
+                    (evict_0 << 24) as i64,
+                    (evict_0 << 24) as i64,
+                    (evict_0 << 24) as i64,
                     (evict_0 << 24) as i64,
                 ),
                 _mm512_set_epi64(
-                    0,
-                    (evict_1 << 40) as i64,
                     (evict_1 << 24) as i64,
-                    (evict_1 << 8) as i64,
-                    0,
-                    (evict_1 << 56) as i64,
-                    (evict_1 << 40) as i64,
+                    (evict_1 << 24) as i64,
+                    (evict_1 << 24) as i64,
+                    (evict_1 << 24) as i64,
+                    (evict_1 << 24) as i64,
+                    (evict_1 << 24) as i64,
+                    (evict_1 << 24) as i64,
                     (evict_1 << 24) as i64,
                 ),
             )
@@ -208,24 +209,21 @@ impl TranspositionTable {
         depth: u8,
         alpha: Eval,
         beta: Eval,
-    ) -> (u8, Option<TtProbe>) {
+    ) -> Option<TtProbe> {
         let generation = self.generation;
 
         let bucket_index = self.bucket_index(hash);
         let key = self.bucket_key(hash);
 
-        let (entry, key_mask) = unsafe {
+        let entry = unsafe {
             let bucket_vec =
                 _mm512_load_si512(self.entries.as_ptr().add(bucket_index) as *const __m512i);
             let key_mask = self.match_entries_key_avx512(&bucket_vec, key);
 
             let key_index = key_mask.trailing_zeros();
             match key_index {
-                0..6 => (
-                    &mut self.entries[bucket_index as usize].0[key_index as usize],
-                    key_mask,
-                ),
-                _ => return (0, None),
+                0..8 => &mut self.entries[bucket_index as usize].0[key_index as usize],
+                _ => return None,
             }
         };
 
@@ -253,14 +251,10 @@ impl TranspositionTable {
             }
         }
 
-        return (
-            key_mask,
-            Some(TtProbe {
-                score: if usable { Some(entry.score) } else { None },
-                eval: entry.eval,
-                mv_index: entry.mv_index,
-            }),
-        );
+        return Some(TtProbe {
+            score: if usable { Some(entry.score) } else { None },
+            mv_index: entry.mv_index,
+        });
     }
 
     #[inline(always)]
@@ -307,28 +301,44 @@ impl TranspositionTable {
             (bt_nonexact_mask >> 1) & ((bound_type != BoundType::Exact) as u64).wrapping_sub(1)
         };
 
-        let result = (generation_mask | depth_mask | bt_mask) & 0x20080200802008;
+        // 0b0000100000001000000010000000100000001000000010000000100000001000;
 
+        let result = (generation_mask | depth_mask | bt_mask) & 0x808080808080808;
         ((result >> 3)
-            | (result >> 12)
-            | (result >> 21)
-            | (result >> 30)
-            | (result >> 39)
-            | (result >> 48)) as __mmask8
+            | (result >> 10)
+            | (result >> 17)
+            | (result >> 24)
+            | (result >> 31)
+            | (result >> 38)
+            | (result >> 45)
+            | (result >> 52)) as __mmask8
+        // unsafe { _pext_u64(generation_mask | depth_mask | bt_mask, 0x808080808080808) as __mmask8 }
     }
 
     #[inline(always)]
     fn match_entries_empty_avx512(&self, bt_vec: &__m512i) -> __mmask8 {
         unsafe {
             let test_vec = _mm512_set1_epi8(BoundType::Empty as u8 as i8);
-            let result = _mm512_cmpeq_epi8_mask(*bt_vec, test_vec) & 0x40100401004010;
+
+            // 0x40100401004010;
+            // 0b1000000000100000000010000000001000000000100000000010000;
+            // 0b00001000000010000000100000001000000010000000100000001000000010000;
+
+            let result = _mm512_cmpeq_epi8_mask(*bt_vec, test_vec) & 0x1010101010101010;
 
             ((result >> 4)
-                | (result >> 13)
-                | (result >> 22)
-                | (result >> 31)
-                | (result >> 40)
-                | (result >> 49)) as __mmask8
+                | (result >> 11)
+                | (result >> 18)
+                | (result >> 25)
+                | (result >> 32)
+                | (result >> 39)
+                | (result >> 46)
+                | (result >> 53)) as __mmask8
+
+            // _pext_u64(
+            //     _mm512_cmpeq_epi8_mask(*bt_vec, test_vec),
+            //     0x1010101010101010,
+            // ) as __mmask8
         }
     }
 
@@ -343,10 +353,10 @@ impl TranspositionTable {
                     0,
                     0,
                     0,
-                    0,
-                    0x35343332_2B2A2928,
-                    0x21201F1E_17161514,
-                    0x0D0C0B0A_03020100,
+                    0x3B3A3938_33323130,
+                    0x2B2A2928_23222120,
+                    0x1B1A1918_13121110,
+                    0x0B0A0908_03020100,
                 ),
                 *bucket_vec,
             );
@@ -358,17 +368,15 @@ impl TranspositionTable {
                 key_vec,
             );
 
-            (result & 0b00111111) as __mmask8
+            (result & 0xFF) as __mmask8
         }
     }
 
     #[inline(always)]
     pub fn store(
         &mut self,
-        key_mask: u8,
         hash: u64,
         score: Eval,
-        eval: Eval,
         depth: u8,
         mv_index: u8,
         bound_type: BoundType,
@@ -378,12 +386,18 @@ impl TranspositionTable {
 
         let generation = self.generation;
 
+        // println!("Probe TT");
+
+        // let mut dbg = String::new();
+
         let entry_mask = unsafe {
             let bucket_vec =
                 _mm512_load_si512(self.entries.as_ptr().add(bucket_index) as *const __m512i);
 
             let bt_mask_vec = _mm512_set1_epi8(0b11 as u8 as i8);
             let bt_vec = _mm512_and_si512(bucket_vec, bt_mask_vec);
+
+            let key_mask = self.match_entries_key_avx512(&bucket_vec, self.bucket_key(hash));
 
             let replace_mask =
                 self.match_entries_replace_avx512(&bucket_vec, &bt_vec, depth, bound_type);
@@ -399,13 +413,32 @@ impl TranspositionTable {
                 | (empty_mask & no_key_mask)
                 | (replace_mask & no_key_mask & no_empty_mask);
 
+            // dbg.push_str(&format!(
+            //     "{:08b} - replace_mask\n{:08b} - empty_mask\n{:08b} - key_mask\n{:08b} - entry_mask",
+            //     replace_mask, empty_mask, key_mask, entry_mask
+            // ));
+
             entry_mask
         };
 
         let entry_index = entry_mask.trailing_zeros();
 
+        // let debug_res = self.find_store_index_debug(hash, bound_type, depth, key_mask, &mut dbg);
+        // assert!(
+        //     (entry_index < 8 && debug_res.is_some_and(|i| i as u32 == entry_index))
+        //         || entry_index == 8 && debug_res.is_none(),
+        //     "TT Store failed to find a valid index to store the entry. Hash {:016X}, Depth {}, Type {:?}, HM: {}\nfind_result: {:?}, entry_index: {}\ndbg:\n{}",
+        //     hash,
+        //     depth,
+        //     bound_type,
+        //     mv_index,
+        //     debug_res,
+        //     entry_index,
+        //     dbg
+        // );
+
         let entry = match entry_index {
-            0..6 => &mut self.entries[bucket_index].0[entry_index as usize],
+            0..8 => &mut self.entries[bucket_index].0[entry_index as usize],
             _ => return,
         };
 
@@ -416,12 +449,80 @@ impl TranspositionTable {
                 .or_insert(hash);
         }
 
-        entry.eval = eval;
+        // entry.eval = eval;
         entry.score = score;
         entry.mv_index = mv_index;
         entry.set_generation(generation);
         entry.set_depth_and_type(depth, bound_type);
         entry.set_key(bucket_key);
+    }
+
+    fn find_store_index_debug(
+        &self,
+        hash: u64,
+        bt: BoundType,
+        depth: u8,
+        dbg: &mut String,
+    ) -> Option<usize> {
+        let bucket_index = self.bucket_index(hash);
+        let key = self.bucket_key(hash);
+
+        let evict_0 = (self.generation + 1) & 0b11;
+        let evict_1 = (self.generation + 2) & 0b11;
+
+        // println!("Debug probing TT");
+        dbg.push_str("Debug probing TT:\n");
+
+        let mut key_found = false;
+
+        for (i, entry) in self.entries[bucket_index].0.iter().enumerate() {
+            let key_match = entry.key() == key;
+
+            if key_match && entry.bound_type() != BoundType::Empty {
+                key_found = true;
+
+                let should_evict =
+                    entry.generation() == evict_0 as u8 || entry.generation() == evict_1 as u8;
+
+                if !entry.should_replace(depth, bt, should_evict) {
+                    // Search for other key matches
+                    continue;
+                }
+                dbg.push_str("Entry key found and will be replaced\n");
+                //println!("Entry key found and will be replaced");
+                return Some(i);
+            }
+        }
+
+        if key_found {
+            dbg.push_str("No matching key found in TT bucket\n");
+            // println!("No matching key found in TT bucket");
+            return None;
+        }
+
+        for (i, entry) in self.entries[bucket_index].0.iter().enumerate() {
+            if entry.bound_type() == BoundType::Empty {
+                // println!("Found empty entry to store");
+                dbg.push_str("Found empty entry to store\n");
+                return Some(i);
+            }
+        }
+
+        for (i, entry) in self.entries[bucket_index].0.iter().enumerate() {
+            let should_evict =
+                entry.generation() == evict_0 as u8 || entry.generation() == evict_1 as u8;
+
+            if entry.should_replace(depth, bt, should_evict) {
+                // println!("Found entry to evict and replace");
+                dbg.push_str("Found entry to evict and replace\n");
+                return Some(i);
+            }
+        }
+
+        dbg.push_str("No entry found to store\n");
+        // println!("No entry found to store");
+
+        None
     }
 
     pub fn clear(&mut self) {

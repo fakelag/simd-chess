@@ -395,15 +395,18 @@ impl<'a> Search<'a> {
 
         // assert!(!(self.pv_trace && tt_move != 0));
 
-        let (tt_key_mask, tt_probe) =
-            self.tt
-                .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
-
         if apply_pruning
             && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
         {
             return 0;
         }
+
+        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
+        depth += in_check as u8;
+
+        let tt_probe = self
+            .tt
+            .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
 
         if let Some(probe) = tt_probe {
             if apply_pruning {
@@ -418,10 +421,6 @@ impl<'a> Search<'a> {
             debug_assert!(!self.pv_trace);
             return self.quiescence(alpha, beta, ply as u32);
         }
-
-        // @todo - Consider check extension before TT probe
-        let in_check = self.chess.in_check(self.tables, self.chess.b_move());
-        depth += in_check as u8;
 
         if self.pv_trace {
             self.pv_trace = self.pv_length > (ply + 1);
@@ -774,10 +773,8 @@ impl<'a> Search<'a> {
                     Self::find_index_fast_avx512(self.chess.zobrist_key(), mv, &original_move_list);
 
                 self.tt.store(
-                    tt_key_mask,
                     self.chess.zobrist_key(),
                     score,
-                    0,
                     depth,
                     original_mv_index,
                     BoundType::LowerBound,
@@ -826,10 +823,8 @@ impl<'a> Search<'a> {
             Self::find_index_fast_avx512(self.chess.zobrist_key(), best_move, &original_move_list);
 
         self.tt.store(
-            tt_key_mask,
             self.chess.zobrist_key(),
             best_score,
-            0,
             depth,
             original_mv_index,
             bound_type,
