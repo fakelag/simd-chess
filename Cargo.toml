@@ -22,3 +22,5 @@ zstd = "0.13.3"
 
 [profile.release]
 debug = true
+lto = "fat"
+panic = "abort"
