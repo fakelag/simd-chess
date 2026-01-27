@@ -11,6 +11,17 @@ pub const QS: i32 = 400;
 
 type PairFeature = u32;
 
+macro_rules! feature_safety {
+    ($feature_id:expr) => {{
+        let feat_id = $feature_id;
+        debug_assert!(feat_id < 768, "Feature index out of bounds: {}", feat_id);
+        unsafe {
+            std::hint::assert_unchecked(feat_id < 768);
+        }
+        feat_id as usize
+    }};
+}
+
 fn pair_feature_from_piece_square(piece_index: u8, square: u8) -> PairFeature {
     let is_black = (piece_index & 0b1000) != 0;
     let piece_base = (64 * (NNUE_PIECE_INDICES[(piece_index & 7) as usize])) as u16;
@@ -18,6 +29,9 @@ fn pair_feature_from_piece_square(piece_index: u8, square: u8) -> PairFeature {
     let square = square as u16;
     let white_feature = [0, 0x180][is_black as usize] + piece_base + square;
     let black_feature = [0x180, 0][is_black as usize] + piece_base + (square ^ 56);
+
+    feature_safety!(white_feature);
+    feature_safety!(black_feature);
 
     ((white_feature as u32) << 16) | (black_feature as u32)
 }
@@ -254,10 +268,15 @@ where
         sub: PairFeature,
         net: &Network<HS, OB>,
     ) {
-        let white_add = &net.feature_weights[(add >> 16) as usize].vals;
-        let black_add = &net.feature_weights[(add & 0xFFFF) as usize].vals;
-        let white_sub = &net.feature_weights[(sub >> 16) as usize].vals;
-        let black_sub = &net.feature_weights[(sub & 0xFFFF) as usize].vals;
+        let white_add_id = feature_safety!(add >> 16);
+        let black_add_id = feature_safety!(add & 0xFFFF);
+        let white_sub_id = feature_safety!(sub >> 16);
+        let black_sub_id = feature_safety!(sub & 0xFFFF);
+
+        let white_add = &net.feature_weights[white_add_id].vals;
+        let black_add = &net.feature_weights[black_add_id].vals;
+        let white_sub = &net.feature_weights[white_sub_id].vals;
+        let black_sub = &net.feature_weights[black_sub_id].vals;
 
         for i in 0..HS {
             self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub[i];
@@ -274,12 +293,19 @@ where
         sub2: PairFeature,
         net: &Network<HS, OB>,
     ) {
-        let white_add = &net.feature_weights[(add >> 16) as usize].vals;
-        let black_add = &net.feature_weights[(add & 0xFFFF) as usize].vals;
-        let white_sub1 = &net.feature_weights[(sub1 >> 16) as usize].vals;
-        let black_sub1 = &net.feature_weights[(sub1 & 0xFFFF) as usize].vals;
-        let white_sub2 = &net.feature_weights[(sub2 >> 16) as usize].vals;
-        let black_sub2 = &net.feature_weights[(sub2 & 0xFFFF) as usize].vals;
+        let white_add_id = feature_safety!(add >> 16);
+        let black_add_id = feature_safety!(add & 0xFFFF);
+        let white_sub1_id = feature_safety!(sub1 >> 16);
+        let black_sub1_id = feature_safety!(sub1 & 0xFFFF);
+        let white_sub2_id = feature_safety!(sub2 >> 16);
+        let black_sub2_id = feature_safety!(sub2 & 0xFFFF);
+
+        let white_add = &net.feature_weights[white_add_id].vals;
+        let black_add = &net.feature_weights[black_add_id].vals;
+        let white_sub1 = &net.feature_weights[white_sub1_id].vals;
+        let black_sub1 = &net.feature_weights[black_sub1_id].vals;
+        let white_sub2 = &net.feature_weights[white_sub2_id].vals;
+        let black_sub2 = &net.feature_weights[black_sub2_id].vals;
 
         for i in 0..HS {
             self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub1[i] - white_sub2[i];
@@ -297,14 +323,23 @@ where
         sub2: PairFeature,
         net: &Network<HS, OB>,
     ) {
-        let white_add1 = &net.feature_weights[(add1 >> 16) as usize].vals;
-        let black_add1 = &net.feature_weights[(add1 & 0xFFFF) as usize].vals;
-        let white_add2 = &net.feature_weights[(add2 >> 16) as usize].vals;
-        let black_add2 = &net.feature_weights[(add2 & 0xFFFF) as usize].vals;
-        let white_sub1 = &net.feature_weights[(sub1 >> 16) as usize].vals;
-        let black_sub1 = &net.feature_weights[(sub1 & 0xFFFF) as usize].vals;
-        let white_sub2 = &net.feature_weights[(sub2 >> 16) as usize].vals;
-        let black_sub2 = &net.feature_weights[(sub2 & 0xFFFF) as usize].vals;
+        let white_add1 = feature_safety!(add1 >> 16);
+        let black_add1 = feature_safety!(add1 & 0xFFFF);
+        let white_add2 = feature_safety!(add2 >> 16);
+        let black_add2 = feature_safety!(add2 & 0xFFFF);
+        let white_sub1 = feature_safety!(sub1 >> 16);
+        let black_sub1 = feature_safety!(sub1 & 0xFFFF);
+        let white_sub2 = feature_safety!(sub2 >> 16);
+        let black_sub2 = feature_safety!(sub2 & 0xFFFF);
+
+        let white_add1 = &net.feature_weights[white_add1].vals;
+        let black_add1 = &net.feature_weights[black_add1].vals;
+        let white_add2 = &net.feature_weights[white_add2].vals;
+        let black_add2 = &net.feature_weights[black_add2].vals;
+        let white_sub1 = &net.feature_weights[white_sub1].vals;
+        let black_sub1 = &net.feature_weights[black_sub1].vals;
+        let white_sub2 = &net.feature_weights[white_sub2].vals;
+        let black_sub2 = &net.feature_weights[black_sub2].vals;
 
         for i in 0..HS {
             self.white.vals[i] =
@@ -447,12 +482,24 @@ where
         debug_assert!(self.updates.len() < self.accumulators.len());
 
         let ply = self.updates.len().min(self.accumulators.len() - 1);
+
         for i in start + 1..=ply {
             let update = &self.updates[i - 1];
 
             let (prev, acc) = self.accumulators.split_at_mut(i);
 
-            let prev = prev.last().unwrap();
+            debug_assert!(
+                !prev.is_empty(),
+                "No previous accumulator for ply {}, cannot apply update",
+                i
+            );
+            debug_assert!(
+                !acc.is_empty(),
+                "No accumulator allocated for ply {}, cannot apply update",
+                i
+            );
+
+            let prev = unsafe { prev.last().unwrap_unchecked() };
 
             // assert!(
             //     acc.first_mut().is_some(),
@@ -460,7 +507,7 @@ where
             //     i
             // );
 
-            let acc = acc.first_mut().unwrap();
+            let acc = unsafe { acc.first_mut().unwrap_unchecked() };
 
             match update {
                 NnueUpdate::NnueUpdateAddSub((add, sub)) => {
