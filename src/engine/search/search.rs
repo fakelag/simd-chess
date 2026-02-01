@@ -127,6 +127,8 @@ pub struct Search<'a> {
 
 impl<'a> SearchStrategy<'a> for Search<'a> {
     fn search(&mut self) -> u16 {
+        const INITIAL_BOUND_MARGIN: Eval = 17;
+
         let mut node_count = 0;
         let mut quiet_nodes = 0;
 
@@ -144,21 +146,44 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
         }
 
         'outer: for depth in 1..=target_depth {
-            self.ply = 0;
+            let mut margin = INITIAL_BOUND_MARGIN;
 
-            // if self.params.debug {
-            //     println!("Search depth {}", depth);
-            // }
+            let (mut alpha, mut beta) = if depth >= 4 {
+                (
+                    self.score.saturating_sub(INITIAL_BOUND_MARGIN),
+                    self.score.saturating_add(INITIAL_BOUND_MARGIN),
+                )
+            } else {
+                (-Eval::MAX, Eval::MAX)
+            };
 
-            let score = self.go(-Eval::MAX, Eval::MAX, depth);
+            loop {
+                self.ply = 0;
 
-            if self.is_stopping {
-                break 'outer;
+                let score = self.go(alpha, beta, depth);
+
+                if self.is_stopping {
+                    break 'outer;
+                }
+
+                if score <= alpha {
+                    // beta = alpha; // search stability
+                    alpha = score.saturating_sub(margin);
+                    margin += margin / 3;
+                    continue;
+                }
+
+                if score >= beta {
+                    beta = score.saturating_add(margin);
+                    margin += margin / 3;
+                    continue;
+                }
+
+                quiet_nodes = self.quiet_nodes;
+                node_count = self.node_count;
+                self.apply_pv(depth, score);
+                break;
             }
-
-            quiet_nodes = self.quiet_nodes;
-            node_count = self.node_count;
-            self.apply_pv(depth, score);
         }
 
         self.node_count = node_count;
@@ -200,7 +225,7 @@ impl<'a> Search<'a> {
             b_cut_null_count: 0,
             ply: 0,
             is_stopping: false,
-            score: -Eval::MAX,
+            score: -SCORE_INF,
             pv_table: unsafe {
                 let mut pv_table = Box::new_uninit();
                 pv_table.write(PvTable::new());
@@ -233,7 +258,7 @@ impl<'a> Search<'a> {
         self.node_count = 0;
         self.quiet_nodes = 0;
         self.quiet_depth = 0;
-        self.score = -Eval::MAX;
+        self.score = -SCORE_INF;
         self.ply = 0;
         self.b_cut_count = 0;
         self.b_cut_null_count = 0;
@@ -554,7 +579,7 @@ impl<'a> Search<'a> {
         );
         debug_assert!(pv_move == 0 || move_list[0] as u16 == pv_move);
 
-        let mut best_score = -Eval::MAX;
+        let mut best_score = -SCORE_INF;
         let mut best_move = 0;
         let mut num_legal_moves = 0;
 
@@ -828,27 +853,6 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        // @todo - Repetition table for quiescence
-        // if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
-        //     return 0;
-        // }
-
-        // let debug_position = self
-        //     .chess
-        //     .gen_fen()
-        //     .starts_with("r3k2r/p2pqpb1/bp2pnp1/3P4/4P3/2p1BQ1p/PPP1BPPP/R3K2R w");
-
-        // debug_assert_eq!(
-        //     self.nnue.acc,
-        //     {
-        //         let mut expected_pair = nnue::AccumulatorPair::new();
-        //         expected_pair.load(&self.chess, &self.nnue.net);
-        //         expected_pair
-        //     },
-        //     "NNUE accumulator mismatch in q search at ply {}",
-        //     self.ply
-        // );
-
         let mut alpha = alpha;
 
         let move_count = self.chess.gen_moves_avx512::<true>(&mut self.move_list);
@@ -974,7 +978,7 @@ impl<'a> Search<'a> {
         }
         sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
 
-        let mut best_score = -Eval::MAX;
+        let mut best_score = -SCORE_INF;
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
