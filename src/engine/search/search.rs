@@ -7,7 +7,7 @@ use crate::{
     engine::{
         chess_v2,
         search::{
-            AbortSignal, SearchStrategy, eval::*, repetition::RepetitionTable,
+            AbortSignal, SearchStrategy, eval::*, moves::*, repetition::RepetitionTable,
             search_params::SearchParams, transposition::*,
         },
         sorting,
@@ -34,39 +34,8 @@ const CORR_GRAIN: Eval = 2;
 
 const PV_DEPTH: usize = 64;
 
-const SORT_CAPTURE_RANGE: u16 = 32;
-const SORT_QUIET_RANGE: u16 = 65502;
-
-const SORT_QUIET_BASE: u16 = 0;
-const SORT_CAPTURE_BASE: u16 = SORT_QUIET_BASE + SORT_QUIET_RANGE;
-const SORT_PVTT_BASE: u16 = SORT_CAPTURE_BASE + SORT_CAPTURE_RANGE;
-
 const HISTORY_MAX: i16 = i16::MAX - 0_017;
 const HISTORY_MIN: i16 = i16::MIN + 0_017;
-
-const _ASSERT_SORT_RANGE: () = assert!(u16::MAX as usize - 1 == SORT_PVTT_BASE as usize);
-const _ASSERT_SORT_HISTORY_MINMAX_RANGE: () =
-    assert!(SORT_QUIET_RANGE as usize - 1 == HISTORY_MAX as usize + HISTORY_MIN.abs() as usize);
-
-#[cfg_attr(any(), rustfmt::skip)]
-const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
-    /* Ep Cap */      [0, 0, 0, 0, 0, 0, 26, 0, 0, 0, 0, 0, 0, 0, 26, 0],
-    /* WhiteKing */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* WhiteQueen */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 07, 06, 05, 04, 03, 02, 0],
-    /* WhiteRook */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 13, 12, 11, 10, 09, 08, 0],
-    /* WhiteBishop */ [0, 0, 0, 0, 0, 0, 0, 0, 0, 19, 18, 17, 16, 15, 14, 0],
-    /* WhiteKnight */ [0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 24, 23, 22, 21, 20, 0],
-    /* WhitePawn */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 31, 30, 29, 28, 27, 26, 0],
-    /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* Black Null */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackKing */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackQueen */  [0, 07, 06, 05, 04, 03, 02, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackRook */   [0, 13, 12, 11, 10, 09, 08, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackBishop */ [0, 19, 18, 17, 16, 15, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackKnight */ [0, 25, 24, 23, 22, 21, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackPawn */   [0, 31, 30, 29, 28, 27, 26, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-];
 
 #[derive(Debug)]
 pub struct PvTable {
@@ -494,21 +463,6 @@ impl<'a> Search<'a> {
         self.rt
             .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
 
-        let mut original_move_list = [0u16; 256];
-        let mut move_count = self
-            .chess
-            .gen_moves_avx512::<false>(&mut original_move_list);
-
-        std::hint::likely(move_count > 8 && move_count < 64);
-
-        unsafe {
-            // Safety: maximum number of legal moves in any position is 218.
-            // Generated move count is guaranteed to be within bounds of 248 assuming
-            // few possible pseudolegal moves like castling or moving into a check
-            debug_assert!(move_count < 248);
-            std::hint::assert_unchecked(move_count < 248);
-        }
-
         // let black_board = self
         //     .chess
         //     .bitboards()
@@ -530,54 +484,7 @@ impl<'a> Search<'a> {
         //     .enumerate()
         //     .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
 
-        // tt_move = self.move_list[tt_move_index as usize];
-
-        let mut move_list = [0u32; 256];
-
-        let mut i = 0;
-        while i < move_count {
-            let mv = original_move_list[i];
-            let is_tt_move = i as u8 == tt_move_index;
-
-            move_list[i] = self.score_move_desc32(mv, pv_move, is_tt_move);
-
-            if (mv & MV_FLAGS_PR_MASK) == MV_FLAGS_PR_QUEEN {
-                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-
-                let mv_k = mv_unpromoted | MV_FLAGS_PR_KNIGHT;
-                let mv_b = mv_unpromoted | MV_FLAGS_PR_BISHOP;
-                let mv_r = mv_unpromoted | MV_FLAGS_PR_ROOK;
-
-                macro_rules! add_move {
-                    ($move:expr) => {
-                        original_move_list[move_count] = $move;
-                        move_count += 1;
-                    };
-                }
-
-                add_move!(mv_k);
-                add_move!(mv_b);
-                add_move!(mv_r);
-            }
-
-            i += 1;
-        }
-
-        unsafe {
-            // Safety: move_count is guaranteed to be less than 256
-            debug_assert!(move_count < 256);
-            std::hint::assert_unchecked(move_count < 256);
-        }
-
-        sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
-        debug_assert!(
-            move_list[tt_move_index as usize] == 0
-                || !move_list[0..move_count]
-                    .iter()
-                    .any(|mv| *mv as u16 == move_list[tt_move_index as usize] as u16)
-                || (move_list[0] as u16) == move_list[tt_move_index as usize] as u16
-        );
-        debug_assert!(pv_move == 0 || move_list[0] as u16 == pv_move);
+        let mut moves = FastMvvlva::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
 
         let mut best_score = -SCORE_INF;
         let mut best_move = 0;
@@ -585,7 +492,9 @@ impl<'a> Search<'a> {
 
         let board_copy = self.chess.clone();
 
-        for mv_index in 0..move_count {
+        let mut move_list = [0u32; 256];
+
+        for mv_index in 0..moves.gen_moves(&self.chess, &self.history_moves, &mut move_list) {
             let mv = move_list[mv_index] as u16;
 
             let nnue_update = unsafe {
@@ -785,15 +694,11 @@ impl<'a> Search<'a> {
                     }
                 }
 
-                // Find original mv_index from original_move_list with avx512
-                let original_mv_index =
-                    Self::find_index_fast_avx512(self.chess.zobrist_key(), mv, &original_move_list);
-
                 self.tt.store(
                     self.chess.zobrist_key(),
                     score,
                     depth,
-                    original_mv_index,
+                    || moves.find_move_index_avx512(best_move),
                     BoundType::LowerBound,
                 );
                 self.rt.pop_position();
@@ -829,14 +734,11 @@ impl<'a> Search<'a> {
 
         // let static_eval = *static_eval.get_or_init(|| self.evaluate());
 
-        let original_mv_index =
-            Self::find_index_fast_avx512(self.chess.zobrist_key(), best_move, &original_move_list);
-
         self.tt.store(
             self.chess.zobrist_key(),
             best_score,
             depth,
-            original_mv_index,
+            || moves.find_move_index_avx512(best_move),
             bound_type,
         );
 
@@ -854,8 +756,6 @@ impl<'a> Search<'a> {
         }
 
         let mut alpha = alpha;
-
-        let move_count = self.chess.gen_moves_avx512::<true>(&mut self.move_list);
 
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
 
@@ -881,36 +781,14 @@ impl<'a> Search<'a> {
             -SCORE_INF
         };
 
-        std::hint::likely(move_count < 64);
-
-        unsafe {
-            // Safety: move count should not overflow
-            debug_assert!(move_count < 256);
-            std::hint::assert_unchecked(move_count < 256);
-        }
-
-        let mut move_list = [0u32; 256];
-        for i in 0..move_count {
-            move_list[i] = self.score_move_desc32_quiescence(self.move_list[i]);
-        }
-        sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
+        let mut moves = CaptureMvvlva::new();
 
         let mut best_score: Eval = static_eval;
         let board_copy = self.chess.clone();
 
-        let mut i = 0;
-        while i < move_count {
+        let mut move_list = [0u32; 256];
+        for i in 0..moves.gen_moves(&self.chess, &mut move_list) {
             let mv = move_list[i] as u16;
-            i += 1;
-
-            // Quiescence search can't encounter new captures after queen or knight promotions, so
-            // underpromotions to bishop and rook are skipped
-            if (mv & MV_FLAGS_PR_MASK) == MV_FLAGS_PR_QUEEN {
-                i -= 1;
-
-                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = (mv_unpromoted | MV_FLAGS_PR_KNIGHT) as u32; // Second promotion to check
-            }
 
             let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be valid
@@ -970,44 +848,17 @@ impl<'a> Search<'a> {
 
         let mut alpha = alpha;
 
-        let mut move_count = self.chess.gen_moves_avx512::<false>(&mut self.move_list);
-
-        let mut move_list = [0u32; 256];
-        for i in 0..move_count {
-            move_list[i] = self.score_move_desc32_quiescence(self.move_list[i]);
-        }
-        sorting::u32::sort_256u32_desc_avx512(&mut move_list, move_count);
+        let mut moves = FastMvvlva::<HISTORY_MIN, HISTORY_MAX>::new(0, 0xFF);
 
         let mut best_score = -SCORE_INF;
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
 
-        let mut i = 0;
-        while i < move_count {
+        let mut move_list = [0u32; 256];
+        for i in 0..moves.gen_moves(&self.chess, &self.history_moves, &mut move_list) {
             let mv_index = i;
             let mv = move_list[mv_index] as u16;
-            i += 1;
-
-            if (mv & MV_FLAGS_PR_MASK) == MV_FLAGS_PR_QUEEN {
-                i -= 1;
-
-                let mv_unpromoted = (mv & !MV_FLAGS_PR_MASK) as u32;
-                unsafe {
-                    // Second promotion to check, override current slot
-                    *move_list.get_unchecked_mut(i) = mv_unpromoted | MV_FLAGS_PR_KNIGHT as u32;
-
-                    // Third promotion to check, append to the end of the list
-                    *move_list.get_unchecked_mut(move_count) =
-                        mv_unpromoted | MV_FLAGS_PR_BISHOP as u32;
-                    move_count += 1;
-
-                    // Fourth promotion to check, append to the end of the list
-                    *move_list.get_unchecked_mut(move_count) =
-                        mv_unpromoted | MV_FLAGS_PR_ROOK as u32;
-                    move_count += 1;
-                }
-            }
 
             let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be valid
@@ -1136,50 +987,6 @@ impl<'a> Search<'a> {
         (((material[0] + material[1] + MAT_MIN) as f32) / ((MAT_MAX + MAT_MIN) as f32))
             .max(0.0)
             .min(1.0)
-    }
-
-    #[inline(always)]
-    fn find_index_fast_avx512(_hash: u64, mv: u16, move_list: &[u16; 256]) -> u8 {
-        unsafe {
-            let mv_list_ptr = move_list.as_ptr() as *const __m512i;
-            let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
-            let p1_x32 = _mm512_loadu_si512(mv_list_ptr.add(1));
-            let p2_x32 = _mm512_loadu_si512(mv_list_ptr.add(2));
-            let p3_x32 = _mm512_loadu_si512(mv_list_ptr.add(3));
-
-            let mv_x32 = _mm512_set1_epi16(mv as i16);
-
-            let cmp_mask_0 = _mm512_cmpeq_epi16_mask(p0_x32, mv_x32) as u128;
-            let cmp_mask_1 = _mm512_cmpeq_epi16_mask(p1_x32, mv_x32) as u128;
-            let cmp_mask_2 = _mm512_cmpeq_epi16_mask(p2_x32, mv_x32) as u128;
-            let cmp_mask_3 = _mm512_cmpeq_epi16_mask(p3_x32, mv_x32) as u128;
-
-            let lower_mask: u128 =
-                cmp_mask_0 | ((cmp_mask_1) << 32) | ((cmp_mask_2) << 64) | ((cmp_mask_3) << 96);
-
-            // if util::should_log(hash) {
-            //     println!(
-            //         "Scanned for move {} ({}), at index {} in array {:?}",
-            //         mv,
-            //         util::move_string_dbg(mv),
-            //         lower_mask.trailing_zeros(),
-            //         move_list
-            //     );
-            //     println!(
-            //         "Masks: {:032b} {:032b} {:032b} {:032b}",
-            //         cmp_mask_0, cmp_mask_1, cmp_mask_2, cmp_mask_3
-            //     );
-            // }
-
-            debug_assert!(lower_mask != 0, "Move {:04x} not found in move list", mv);
-            debug_assert!(
-                lower_mask.trailing_zeros() < 256,
-                "Move {:04x} index overflow",
-                mv
-            );
-
-            lower_mask.trailing_zeros() as u8
-        }
     }
 
     #[inline(always)]
@@ -1420,117 +1227,6 @@ impl<'a> Search<'a> {
         // );
 
         final_score
-    }
-
-    #[inline(always)]
-    fn score_move_desc32_quiescence(&self, mv: u16) -> u32 {
-        macro_rules! score {
-            ($score:expr) => {
-                (mv as u32) | (($score as u32) << 16)
-            };
-        }
-
-        let src_sq = mv & 0x3F;
-        let dst_sq = (mv >> 6) & 0x3F;
-
-        // MVV-LVA
-        let mvvlva_score = unsafe {
-            let spt = self.chess.spt();
-            let dst_piece = *spt.get_unchecked(dst_sq as usize);
-            let src_piece = *spt.get_unchecked(src_sq as usize);
-
-            let mvvlva_score = *MVV_LVA_SCORES_U8
-                .get_unchecked(dst_piece as usize)
-                .get_unchecked(src_piece as usize) as u16;
-
-            31 - mvvlva_score
-        };
-
-        score!(mvvlva_score)
-    }
-
-    #[inline(always)]
-    fn score_move_desc32(&self, mv: u16, pv_move: u16, is_tt_move: bool) -> u32 {
-        macro_rules! score {
-            ($score:expr) => {
-                (mv as u32) | (($score as u32) << 16)
-            };
-        }
-
-        if mv == pv_move {
-            return score!(SORT_PVTT_BASE + 1);
-        }
-
-        if is_tt_move {
-            return score!(SORT_PVTT_BASE);
-        }
-
-        let spt = self.chess.spt();
-
-        let src_sq = mv & 0x3F;
-        let dst_sq = (mv >> 6) & 0x3F;
-
-        if (mv & MV_FLAG_CAP) == 0 {
-            unsafe {
-                const MAX_HISTORY_SCORE: u16 = SORT_CAPTURE_BASE - 1;
-
-                // Safety:
-                // - src_sq and dst_sq are always < 64
-                // - src_piece is a PieceIndex < 16
-                let src_piece = *spt.get_unchecked(src_sq as usize) as usize;
-
-                let history_score = *self
-                    .history_moves
-                    .get_unchecked(src_piece)
-                    .get_unchecked(dst_sq as usize);
-
-                let history_score =
-                    (history_score as i32 + HISTORY_MIN.abs() as i32) as u16 + SORT_QUIET_BASE;
-
-                debug_assert!(
-                    history_score >= SORT_QUIET_BASE,
-                    "history score = {}, clamped score = {}",
-                    *self
-                        .history_moves
-                        .get_unchecked(src_piece)
-                        .get_unchecked(dst_sq as usize),
-                    history_score
-                );
-                debug_assert!(
-                    history_score <= MAX_HISTORY_SCORE,
-                    "history score = {}, clamped score = {}",
-                    *self
-                        .history_moves
-                        .get_unchecked(src_piece)
-                        .get_unchecked(dst_sq as usize),
-                    history_score
-                );
-
-                return score!(history_score);
-            }
-        }
-
-        // MVV-LVA
-        let mvvlva_score = unsafe {
-            let spt = self.chess.spt();
-            let dst_piece = *spt.get_unchecked(dst_sq as usize);
-            let src_piece = *spt.get_unchecked(src_sq as usize);
-
-            let mvvlva_score = *MVV_LVA_SCORES_U8
-                .get_unchecked(dst_piece as usize)
-                .get_unchecked(src_piece as usize) as u16;
-
-            31 - mvvlva_score
-        };
-
-        debug_assert!(
-            SORT_CAPTURE_BASE + mvvlva_score < SORT_PVTT_BASE,
-            "mvv-lva score = {}, clamped score = {}",
-            mvvlva_score,
-            SORT_CAPTURE_BASE + mvvlva_score
-        );
-
-        score!(SORT_CAPTURE_BASE + mvvlva_score)
     }
 
     #[inline(always)]

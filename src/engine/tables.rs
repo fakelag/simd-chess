@@ -328,6 +328,104 @@ impl Tables {
         shifts
     };
 
+    pub const LT_LINES: [[u64; 64]; 64] = const {
+        let mut result = [[0; 64]; 64];
+        let mut rs0 = 0;
+
+        while rs0 < 64 {
+            let mut rs1 = 0;
+            while rs1 < 64 {
+                let rs0_rank = rs0 / 8;
+                let rs0_file = rs0 % 8;
+                let rs1_rank = rs1 / 8;
+                let rs1_file = rs1 % 8;
+
+                let mut diagonal_mask = 0;
+                let mut line_mask = 0;
+
+                let mut rank_it = rs0_rank;
+                let mut file_it = rs0_file;
+
+                while rank_it < rs1_rank && file_it > rs1_file {
+                    diagonal_mask |= 1 << (rank_it * 8 + file_it);
+                    file_it -= 1;
+                    rank_it += 1;
+                }
+
+                let mut rank_it = rs0_rank;
+                let mut file_it = rs0_file;
+
+                while rank_it < rs1_rank && file_it < rs1_file {
+                    diagonal_mask |= 1 << (rank_it * 8 + file_it);
+                    file_it += 1;
+                    rank_it += 1;
+                }
+
+                let mut rank_it = rs0_rank;
+                let mut file_it = rs0_file;
+
+                while rank_it > rs1_rank && file_it < rs1_file {
+                    diagonal_mask |= 1 << (rank_it * 8 + file_it);
+                    file_it += 1;
+                    rank_it -= 1;
+                }
+
+                let mut rank_it = rs0_rank;
+                let mut file_it = rs0_file;
+
+                while rank_it > rs1_rank && file_it > rs1_file {
+                    diagonal_mask |= 1 << (rank_it * 8 + file_it);
+                    file_it -= 1;
+                    rank_it -= 1;
+                }
+
+                diagonal_mask &= Tables::LT_BISHOP_OCCUPANCY_MASKS[rs1];
+
+                // Rook moves
+                let mut rank_it = rs0_rank;
+
+                while rank_it < rs1_rank {
+                    line_mask |= 1 << (rank_it * 8 + rs0_file);
+                    rank_it += 1;
+                }
+
+                let mut rank_it = rs0_rank;
+
+                while rank_it > rs1_rank {
+                    line_mask |= 1 << (rank_it * 8 + rs0_file);
+                    rank_it -= 1;
+                }
+
+                let mut file_it = rs0_file;
+
+                while file_it < rs1_file {
+                    line_mask |= 1 << (rs0_rank * 8 + file_it);
+                    file_it += 1;
+                }
+
+                let mut file_it = rs0_file;
+
+                while file_it > rs1_file {
+                    line_mask |= 1 << (rs0_rank * 8 + file_it);
+                    file_it -= 1;
+                }
+
+                line_mask &= Tables::LT_ROOK_OCCUPANCY_MASKS[rs1];
+
+                result[rs0][rs1] |= line_mask;
+                result[rs0][rs1] |= diagonal_mask;
+                result[rs0][rs1] |= 1 << rs1;
+                result[rs0][rs1] &= !(1 << rs0);
+                // moves[square] &= !(1 << square);
+
+                rs1 += 1;
+            }
+            rs0 += 1;
+        }
+
+        result
+    };
+
     #[cfg_attr(any(), rustfmt::skip)]
     pub const EVAL_TABLES_INV_I8_OLD: [[i8; 64]; util::PieceId::PieceMax as usize + 2] = const {
         /*
@@ -691,6 +789,8 @@ impl Tables {
                         break;
                     }
                 }
+
+                moves[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index] &= !(1 << square);
             }
         }
 

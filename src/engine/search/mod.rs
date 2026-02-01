@@ -9,6 +9,7 @@ pub trait SearchStrategy<'a> {
 }
 
 pub mod eval;
+mod moves;
 pub mod repetition;
 pub mod search;
 pub mod search_params;

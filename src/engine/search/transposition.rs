@@ -373,14 +373,16 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    pub fn store(
+    pub fn store<F>(
         &mut self,
         hash: u64,
         score: Eval,
         depth: u8,
-        mv_index: u8,
+        mv_index: F,
         bound_type: BoundType,
-    ) {
+    ) where
+        F: Fn() -> u8,
+    {
         let bucket_key = self.bucket_key(hash);
         let bucket_index = self.bucket_index(hash);
 
@@ -451,7 +453,7 @@ impl TranspositionTable {
 
         // entry.eval = eval;
         entry.score = score;
-        entry.mv_index = mv_index;
+        entry.mv_index = mv_index();
         entry.set_generation(generation);
         entry.set_depth_and_type(depth, bound_type);
         entry.set_key(bucket_key);
