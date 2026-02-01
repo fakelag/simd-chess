@@ -23,7 +23,7 @@ The main (and currently only) compilation target of the project is avx512 compat
 
 ### Toolchain
 
-| Feature                                     | Keybind | Notes                                                                                             |
+| Feature                                     | Status | Notes                                                                                             |
 | ------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------- |
 | Interactive UI                              | ✅      | [imgui-rs](https://github.com/imgui-rs/imgui-rs), enabled with gui command `cargo run -r gui`     |
 | Selfplay engine for neural network training | ✅      |                                                                                                   |
