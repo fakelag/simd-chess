@@ -14,6 +14,66 @@ const PIECE_BISHOP: usize = PieceIndex::WhiteBishop as usize;
 const PIECE_PAWN: usize = PieceIndex::WhitePawn as usize;
 const PIECE_KING: usize = PieceIndex::WhiteKing as usize;
 
+pub struct Pinning {
+    pub relations: [u8; 64],
+    pub pinners: u64,
+    pub pinned: u64,
+}
+
+#[inline(always)]
+pub fn calc_pinnings(
+    b_move: bool,
+    board: &ChessGame,
+    black_board: u64,
+    white_board: u64,
+) -> Pinning {
+    let mut pinners = 0u64;
+    let mut pinned = 0u64;
+    let mut relations = [0u8; 64];
+
+    let bitboards = board.bitboards();
+    let occupancy = black_board | white_board;
+
+    let king_sq =
+        bitboards[PieceIndex::WhiteKing as usize + (b_move as usize) * 8].trailing_zeros();
+    let king_lines = &tables::Tables::LT_LINES[king_sq as usize];
+
+    let rook_moves = tables::Tables::LT_ROOK_OCCUPANCY_MASKS[king_sq as usize];
+    let bishop_moves = tables::Tables::LT_BISHOP_OCCUPANCY_MASKS[king_sq as usize];
+
+    let rook_attacks = rook_moves
+        & (bitboards[PieceIndex::WhiteRook as usize + !b_move as usize * 8]
+            | bitboards[PieceIndex::WhiteQueen as usize + !b_move as usize * 8]);
+
+    let bishop_attacks = bishop_moves
+        & (bitboards[PieceIndex::WhiteBishop as usize + !b_move as usize * 8]
+            | bitboards[PieceIndex::WhiteQueen as usize + !b_move as usize * 8]);
+
+    let mut attackers = rook_attacks | bishop_attacks;
+    let attacker_occ = occupancy ^ attackers;
+
+    loop {
+        let attacker_sq = crate::pop_ls1b!(attackers) as usize;
+
+        let path_occupied = king_lines[attacker_sq as usize] & attacker_occ;
+
+        let is_blocker_mask = ((path_occupied.count_ones() != 1) as u64).wrapping_sub(1);
+
+        let blocker_sq = path_occupied.trailing_zeros() as usize;
+        let attacker_sq = attacker_sq as usize;
+
+        relations[attacker_sq] = blocker_sq as u8;
+        pinned |= path_occupied & is_blocker_mask;
+        pinners |= (1u64 << attacker_sq) & is_blocker_mask;
+    }
+
+    Pinning {
+        relations,
+        pinners,
+        pinned,
+    }
+}
+
 #[inline(always)]
 pub fn static_exchange_eval(
     score_table: &[i16; 16],
@@ -75,7 +135,6 @@ pub fn static_exchange_eval(
             to_sq as u8,
         )
     };
-    let mut stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
 
     let lva = |stm_attackers: u64, piece_board: &[u64; 8]| unsafe {
         let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
@@ -95,12 +154,37 @@ pub fn static_exchange_eval(
         (piece_index as u8, attacker_sq_mask.isolate_lowest_one())
     };
 
-    while stm_attackers != 0 {
+    // let mut pinning = [
+    //     calc_pinnings(false, board, black_board, white_board),
+    //     calc_pinnings(true, board, black_board, white_board),
+    // ];
+
+    let mut stm_attackers;
+
+    loop {
+        stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
+        // stm_attackers &= !pinning[b_move as usize].pinned;
+
+        // println!(
+        //     "Pinned pieces: {:064b} (stm={})",
+        //     pinning[b_move as usize].pinned, b_move
+        // );
+
+        if stm_attackers == 0 {
+            break;
+        }
+
         let (attacker_piece, attacker_sq_mask) = lva(stm_attackers, &piece_board);
 
         unsafe {
             std::hint::assert_unchecked(attacker_piece < 8);
         }
+
+        // println!(
+        //     "[SEE] Attacker piece {:?} on square {}",
+        //     PieceIndex::from(attacker_piece as usize),
+        //     util::square_name(attacker_sq_mask.trailing_zeros() as u8),
+        // );
 
         piece_board[last_moved_piece as usize] ^= to_sq_mask;
         piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
@@ -111,6 +195,15 @@ pub fn static_exchange_eval(
             score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
         exchange_index += 1;
         last_moved_piece = attacker_piece;
+
+        // @todo - Update pinned
+        // let is_pinner_mask =
+        //     ((attacker_sq_mask & pinning[!b_move as usize].pinners == 0) as u64).wrapping_sub(1);
+        // pinning[!b_move as usize].pinners &= !attacker_sq_mask;
+        // let pin_removed_mask = (1
+        //     << pinning[!b_move as usize].relations[attacker_sq_mask.trailing_zeros() as usize])
+        //     & is_pinner_mask;
+        // pinning[!b_move as usize].pinned &= !pin_removed_mask;
 
         b_move = !b_move;
 
@@ -156,7 +249,6 @@ pub fn static_exchange_eval(
         }
 
         all_attackers &= !to_sq_mask;
-        stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
     }
 
     while exchange_index > 1 {
@@ -414,7 +506,7 @@ mod tests {
     use crate::{
         engine::{
             chess_v2::{self, MV_FLAG_CAP, MV_FLAG_EPCAP, MV_FLAG_PROMOTION, PieceIndex},
-            search::eval::{Eval, WEIGHT_TABLE_ABS, WEIGHT_TABLE_ABS_I8},
+            search::eval::{Eval, WEIGHT_TABLE_ABS},
             tables,
         },
         util,
@@ -480,9 +572,10 @@ mod tests {
         exchanges[0] = score_table[to_piece as usize];
 
         // println!(
-        //     "[NAIVE] To piece {:?} on square {}",
+        //     "[NAIVE] To piece {:?} on square {}.Mv={}",
         //     PieceIndex::from(to_piece as usize),
-        //     util::square_name(to_sq as u8)
+        //     util::square_name(to_sq as u8),
+        //     util::move_string_dbg(mv),
         // );
 
         if !unsafe { board.make_move(mv, tables) } {
@@ -493,6 +586,8 @@ mod tests {
             return None;
         }
 
+        // let mut banned_moves = std::collections::BTreeSet::new();
+
         loop {
             let mut move_list = [0u16; 256];
 
@@ -502,6 +597,7 @@ mod tests {
                 .iter()
                 .take(move_count)
                 .filter(|&&mv| (mv & MV_FLAG_CAP) != 0 && ((mv >> 6) & 0x3F) as usize == to_sq)
+                // .filter(|&&mv| !banned_moves.contains(&mv))
                 .min_by_key(|&&mv| {
                     let src_sq = (mv & 0x3F) as usize;
                     let mut score = (PIECE_VALUES_LVA[board.spt()[src_sq] as usize] as u64) << 32;
@@ -514,22 +610,37 @@ mod tests {
                 None => break,
             };
 
-            exchanges[exchange_index] =
-                score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
-            exchange_index += 1;
-            last_moved_piece = board.spt()[(lva_capture_move & 0x3F) as usize] & 7;
+            let moved_piece = board.spt()[(lva_capture_move & 0x3F) as usize] & 7;
+
+            // println!(
+            //     "[NAIVE-INNER] Making move {:?}",
+            //     util::move_string_dbg(lva_capture_move)
+            // );
+
+            // let board_copy = board.clone();
 
             if !unsafe { board.make_move(lva_capture_move, tables) } {
                 panic!("Failed to make LVA capture move in SEE");
             }
 
             if board.in_check(tables, !board.b_move()) {
-                if last_moved_piece == PieceIndex::WhiteKing as u8 {
+                if moved_piece == PieceIndex::WhiteKing as u8 {
                     // Revert king capture if there are still attackers left
-                    exchange_index -= 1;
+                    // exchange_index -= 1;
                     break;
                 }
+                // banned_moves.insert(lva_capture_move);
+                // board = board_copy;
+                // println!("[NAIVE-INNER] Move was illegal due to check, reverting.");
+                // continue;
             }
+
+            // banned_moves.clear();
+
+            exchanges[exchange_index] =
+                score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
+            exchange_index += 1;
+            last_moved_piece = moved_piece;
         }
 
         while exchange_index > 1 {
@@ -545,10 +656,6 @@ mod tests {
 
     fn piece_value(piece: u8) -> Eval {
         WEIGHT_TABLE_ABS[piece as usize]
-    }
-
-    fn piece_value_i8(piece: u8) -> i8 {
-        WEIGHT_TABLE_ABS_I8[piece as usize]
     }
 
     fn see_test_threshold(
@@ -626,7 +733,8 @@ mod tests {
 
         assert_eq!(
             real_eval, naive_eval,
-            "Mismatch between real SEE and naive SEE"
+            "Mismatch between real SEE and naive SEE.Fen={}.Mv={}",
+            fen, mv_string
         );
 
         see_test_threshold(
@@ -706,8 +814,13 @@ mod tests {
             match see_naive(&WEIGHT_TABLE_ABS, &tables, &board, mv) {
                 Some(naive_eval) => {
                     assert_eq!(
-                        real_eval, naive_eval,
-                        "Mismatch between real SEE and naive SEE"
+                        real_eval,
+                        naive_eval,
+                        "Mismatch between real SEE and naive SEE. RealEval={}, NaiveEval={}. Position: {}. Move: {}",
+                        real_eval,
+                        naive_eval,
+                        board.gen_fen(),
+                        util::move_string_dbg(mv),
                     );
 
                     see_test_threshold(
@@ -745,13 +858,13 @@ mod tests {
     }
 
     #[test]
-    fn test_see_xxx() {
+    fn test_see_zero() {
         let mv = "a6a5";
         let see_score = see_test(
             "r3k2r/p1ppqpb1/Qn3np1/3pN3/4PB2/2p4p/PPP2PPP/R3K2R w KQkq - 0 4",
             mv,
         );
-        println!("SEE score for {}: {}", mv, see_score);
+        assert_eq!(see_score, 0, "Expected SEE to be 0, got {}", see_score);
     }
 
     #[test]

@@ -1,6 +1,8 @@
-use std::arch::x86_64::*;
-
-use crate::engine::{chess_v2, sorting};
+use crate::engine::{
+    chess_v2,
+    search::{eval, see},
+    sorting, tables,
+};
 
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
@@ -22,13 +24,12 @@ const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
     /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 ];
 
-pub struct FastMvvlva<const HISTORY_MIN: i16, const HISTORY_MAX: i16> {
+pub struct MvvlvaOrdering<const HISTORY_MIN: i16, const HISTORY_MAX: i16> {
     tt_index: u8,
     pv_move: u16,
-    move_list: [u16; 256],
 }
 
-impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> FastMvvlva<HISTORY_MIN, HISTORY_MAX> {
+impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN, HISTORY_MAX> {
     /*
         Default (fast) sort layout:
 
@@ -54,10 +55,12 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> FastMvvlva<HISTORY_MIN, HIS
 
     #[inline(always)]
     pub fn new(pv_move: u16, tt_move_index: u8) -> Self {
+        Self::_ASSERT_RANGE;
+        Self::_ASSERT_SORT_HISTORY_MINMAX_RANGE;
+
         Self {
             pv_move,
             tt_index: tt_move_index,
-            move_list: [0; 256],
         }
     }
 
@@ -66,9 +69,10 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> FastMvvlva<HISTORY_MIN, HIS
         &mut self,
         board: &chess_v2::ChessGame,
         history_moves: &[[i16; 64]; 16],
+        original_move_list: &mut [u16; 256],
         move_list: &mut [u32; 256],
     ) -> usize {
-        let mut move_count = board.gen_moves_avx512::<false>(&mut self.move_list);
+        let mut move_count = board.gen_moves_avx512::<false>(original_move_list);
 
         std::hint::likely(move_count > 8 && move_count < 64);
 
@@ -82,7 +86,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> FastMvvlva<HISTORY_MIN, HIS
 
         let mut i = 0;
         while i < move_count {
-            let mv = self.move_list[i];
+            let mv = original_move_list[i];
 
             move_list[i] = self.score_move(mv, i as u8, board.spt(), history_moves);
 
@@ -95,7 +99,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> FastMvvlva<HISTORY_MIN, HIS
 
                 macro_rules! add_move {
                     ($move:expr) => {
-                        self.move_list[move_count] = $move;
+                        original_move_list[move_count] = $move;
                         move_count += 1;
                     };
                 }
@@ -126,49 +130,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> FastMvvlva<HISTORY_MIN, HIS
         debug_assert!(self.pv_move == 0 || move_list[0] as u16 == self.pv_move);
 
         move_count
-    }
-
-    pub fn find_move_index_avx512(&self, mv: u16) -> u8 {
-        unsafe {
-            let mv_list_ptr = self.move_list.as_ptr() as *const __m512i;
-            let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
-            let p1_x32 = _mm512_loadu_si512(mv_list_ptr.add(1));
-            let p2_x32 = _mm512_loadu_si512(mv_list_ptr.add(2));
-            let p3_x32 = _mm512_loadu_si512(mv_list_ptr.add(3));
-
-            let mv_x32 = _mm512_set1_epi16(mv as i16);
-
-            let cmp_mask_0 = _mm512_cmpeq_epi16_mask(p0_x32, mv_x32) as u128;
-            let cmp_mask_1 = _mm512_cmpeq_epi16_mask(p1_x32, mv_x32) as u128;
-            let cmp_mask_2 = _mm512_cmpeq_epi16_mask(p2_x32, mv_x32) as u128;
-            let cmp_mask_3 = _mm512_cmpeq_epi16_mask(p3_x32, mv_x32) as u128;
-
-            let lower_mask: u128 =
-                cmp_mask_0 | ((cmp_mask_1) << 32) | ((cmp_mask_2) << 64) | ((cmp_mask_3) << 96);
-
-            // if util::should_log(hash) {
-            //     println!(
-            //         "Scanned for move {} ({}), at index {} in array {:?}",
-            //         mv,
-            //         util::move_string_dbg(mv),
-            //         lower_mask.trailing_zeros(),
-            //         move_list
-            //     );
-            //     println!(
-            //         "Masks: {:032b} {:032b} {:032b} {:032b}",
-            //         cmp_mask_0, cmp_mask_1, cmp_mask_2, cmp_mask_3
-            //     );
-            // }
-
-            debug_assert!(lower_mask != 0, "Move {:04x} not found in move list", mv);
-            debug_assert!(
-                lower_mask.trailing_zeros() < 256,
-                "Move {:04x} index overflow",
-                mv
-            );
-
-            lower_mask.trailing_zeros() as u8
-        }
     }
 
     #[inline(always)]
@@ -254,11 +215,11 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> FastMvvlva<HISTORY_MIN, HIS
     }
 }
 
-pub struct CaptureMvvlva {
+pub struct CaptureOrdering {
     move_list: [u16; 256],
 }
 
-impl CaptureMvvlva {
+impl CaptureOrdering {
     #[inline(always)]
     pub fn new() -> Self {
         Self {
@@ -328,5 +289,267 @@ impl CaptureMvvlva {
         };
 
         score!(mvvlva_score)
+    }
+}
+
+pub struct SeeOrdering<const HISTORY_MIN: i16, const HISTORY_MAX: i16> {
+    tt_index: u8,
+    pv_move: u16,
+}
+
+impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HISTORY_MAX> {
+    /*
+        See layout:
+
+        SORT_QUIET_BASE (0)                  SORT_PVTT_BASE+1 (0xFFFF)
+        |                                                            |
+        \/                                                          \/
+        =============================================================
+        | SORT_BAD_CAPTURES | SORT_QUIETS | SORT_GOOD_CAPTURES | TP |
+    */
+
+    const SORT_QUIETS_RANGE: u16 = 65470;
+    const SORT_BAD_CAPTURES_RANGE: u16 = 32;
+    const SORT_GOOD_CAPTURES_RANGE: u16 = 32;
+
+    const SORT_BAD_CAPTURES_BASE: u16 = 0;
+    const SORT_QUIET_BASE: u16 = Self::SORT_BAD_CAPTURES_BASE + Self::SORT_BAD_CAPTURES_RANGE;
+    const SORT_GOOD_CAPTURES_BASE: u16 = Self::SORT_QUIET_BASE + Self::SORT_QUIETS_RANGE;
+    const SORT_PVTT_BASE: u16 = Self::SORT_GOOD_CAPTURES_BASE + Self::SORT_GOOD_CAPTURES_RANGE;
+
+    const _ASSERT_RANGE: () = assert!(u16::MAX as usize - 1 == Self::SORT_PVTT_BASE as usize);
+
+    #[inline(always)]
+    pub fn new(pv_move: u16, tt_move_index: u8) -> Self {
+        Self::_ASSERT_RANGE;
+
+        Self {
+            pv_move,
+            tt_index: tt_move_index,
+        }
+    }
+
+    #[inline(always)]
+    pub fn gen_moves(
+        &mut self,
+        board: &chess_v2::ChessGame,
+        tables: &tables::Tables,
+        history_moves: &[[i16; 64]; 16],
+        original_move_list: &mut [u16; 256],
+        move_list: &mut [u32; 256],
+    ) -> usize {
+        let mut move_count = board.gen_moves_avx512::<false>(original_move_list);
+
+        std::hint::likely(move_count > 8 && move_count < 64);
+
+        unsafe {
+            // Safety: maximum number of legal moves in any position is 218.
+            // Generated move count is guaranteed to be within bounds of 248 assuming
+            // few possible pseudolegal moves like castling or moving into a check
+            debug_assert!(move_count < 248);
+            std::hint::assert_unchecked(move_count < 248);
+        }
+
+        // OG: 22400086 | Average search time over 5 iterations: 7659 Mcycles
+        // V1: 20674345 | Average search time over 5 iterations: 6909 Mcycles | ~1527.33, ~1558.93
+
+        let bitboards = board.bitboards();
+        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
+        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
+        let mut piece_board: [u64; 8] = [0u64; 8];
+        bitboards
+            .iter()
+            .take(8)
+            .zip(bitboards.iter().skip(8))
+            .enumerate()
+            .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+
+        let mut i = 0;
+        while i < move_count {
+            let mv = original_move_list[i];
+
+            let cap_see_threshold = if mv & chess_v2::MV_FLAG_CAP != 0 {
+                see::see_threshold(
+                    &eval::WEIGHT_TABLE_ABS,
+                    tables,
+                    board,
+                    mv,
+                    0,
+                    black_board,
+                    white_board,
+                    piece_board,
+                )
+            } else {
+                false
+            };
+
+            move_list[i] =
+                self.score_move(mv, i as u8, board.spt(), history_moves, cap_see_threshold);
+
+            if (mv & chess_v2::MV_FLAGS_PR_MASK) == chess_v2::MV_FLAGS_PR_QUEEN {
+                let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
+
+                let mv_k = mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
+                let mv_b = mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP;
+                let mv_r = mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK;
+
+                macro_rules! add_move {
+                    ($move:expr) => {
+                        original_move_list[move_count] = $move;
+                        move_count += 1;
+                    };
+                }
+
+                add_move!(mv_k);
+                add_move!(mv_b);
+                add_move!(mv_r);
+            }
+
+            i += 1;
+        }
+
+        unsafe {
+            // Safety: move_count is guaranteed to be less than 256
+            debug_assert!(move_count < 256);
+            std::hint::assert_unchecked(move_count < 256);
+        }
+
+        sorting::u32::sort_256u32_desc_avx512(move_list, move_count);
+
+        debug_assert!(
+            move_list[self.tt_index as usize] == 0
+                || !move_list[0..move_count]
+                    .iter()
+                    .any(|mv| *mv as u16 == move_list[self.tt_index as usize] as u16)
+                || (move_list[0] as u16) == move_list[self.tt_index as usize] as u16
+        );
+        debug_assert!(self.pv_move == 0 || move_list[0] as u16 == self.pv_move);
+
+        move_count
+    }
+
+    #[inline(always)]
+    fn score_move(
+        &self,
+        mv: u16,
+        mv_index: u8,
+        spt: &[u8; 64],
+        history_moves: &[[i16; 64]; 16],
+        cap_see_threshold: bool,
+    ) -> u32 {
+        macro_rules! score {
+            ($score:expr) => {
+                (mv as u32) | (($score as u32) << 16)
+            };
+        }
+
+        if mv == self.pv_move {
+            return score!(Self::SORT_PVTT_BASE + 1);
+        }
+
+        if mv_index == self.tt_index {
+            return score!(Self::SORT_PVTT_BASE);
+        }
+
+        let src_sq = mv & 0x3F;
+        let dst_sq = (mv >> 6) & 0x3F;
+
+        if (mv & chess_v2::MV_FLAG_CAP) == 0 {
+            unsafe {
+                // Safety:
+                // - src_sq and dst_sq are always < 64
+                // - src_piece is a PieceIndex < 16
+                let src_piece = *spt.get_unchecked(src_sq as usize) as usize;
+
+                let history_score = *history_moves
+                    .get_unchecked(src_piece)
+                    .get_unchecked(dst_sq as usize);
+
+                // let history_score_multiplier = (history_score + HISTORY_MIN.abs()) as f64
+                //     / HISTORY_MAX.abs_diff(HISTORY_MIN) as f64;
+
+                // let final_score =
+                //     ((history_score_multiplier * Self::SORT_QUIETS_RANGE as f64) as u16);
+
+                let final_score = ((history_score as i32 + HISTORY_MIN.abs() as i32) as u16
+                    + Self::SORT_QUIET_BASE)
+                    .clamp(
+                        Self::SORT_QUIET_BASE,
+                        Self::SORT_QUIET_BASE + Self::SORT_QUIETS_RANGE - 1,
+                    );
+
+                // debug_assert!(
+                //     see_threshold
+                //         || (final_score >= Self::SORT_BAD_QUIET_BASE
+                //             && final_score < Self::SORT_BAD_QUIET_BASE + Self::SORT_QUIETS_RANGE),
+                //     "history score = {}, clamped score = {}, see_threshold = {}",
+                //     *history_moves
+                //         .get_unchecked(src_piece)
+                //         .get_unchecked(dst_sq as usize),
+                //     final_score,
+                //     see_threshold
+                // );
+                // debug_assert!(
+                //     !see_threshold
+                //         || (final_score >= Self::SORT_GOOD_QUIETS_BASE
+                //             && final_score < Self::SORT_GOOD_QUIETS_BASE + Self::SORT_QUIETS_RANGE),
+                //     "history score = {}, clamped score = {}, see_threshold = {}",
+                //     *history_moves
+                //         .get_unchecked(src_piece)
+                //         .get_unchecked(dst_sq as usize),
+                //     final_score,
+                //     see_threshold
+                // );
+
+                return score!(final_score);
+            }
+        }
+
+        // MVV-LVA
+        let mvvlva_score = unsafe {
+            let dst_piece = *spt.get_unchecked(dst_sq as usize);
+            let src_piece = *spt.get_unchecked(src_sq as usize);
+
+            let mvvlva_score = *MVV_LVA_SCORES_U8
+                .get_unchecked(dst_piece as usize)
+                .get_unchecked(src_piece as usize) as u16;
+
+            31 - mvvlva_score
+        };
+
+        let final_score = if cap_see_threshold {
+            mvvlva_score + Self::SORT_GOOD_CAPTURES_BASE
+        } else {
+            mvvlva_score + Self::SORT_BAD_CAPTURES_BASE
+        };
+
+        // debug_assert!(
+        //     !see_threshold
+        //         || (final_score >= Self::SORT_GOOD_CAPTURES_BASE
+        //             && final_score
+        //                 < Self::SORT_GOOD_CAPTURES_BASE + Self::SORT_GOOD_CAPTURES_RANGE),
+        //     "mvv-lva score = {}, clamped score = {}, see_threshold = {}",
+        //     mvvlva_score,
+        //     final_score,
+        //     see_threshold
+        // );
+        // debug_assert!(
+        //     see_threshold
+        //         || (final_score >= Self::SORT_BAD_CAPTURES_BASE
+        //             && final_score < Self::SORT_BAD_CAPTURES_BASE + Self::SORT_BAD_CAPTURES_RANGE),
+        //     "mvv-lva score = {}, clamped score = {}, see_threshold = {}",
+        //     mvvlva_score,
+        //     final_score,
+        //     see_threshold
+        // );
+
+        // debug_assert!(
+        //     Self::SORT_FAST_CAPTURE_BASE + mvvlva_score < Self::SORT_FAST_PVTT_BASE,
+        //     "mvv-lva score = {}, clamped score = {}",
+        //     mvvlva_score,
+        //     Self::SORT_FAST_CAPTURE_BASE + mvvlva_score
+        // );
+
+        score!(final_score)
     }
 }

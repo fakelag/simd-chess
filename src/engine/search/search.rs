@@ -484,7 +484,37 @@ impl<'a> Search<'a> {
         //     .enumerate()
         //     .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
 
-        let mut moves = FastMvvlva::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
+        // let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
+
+        let mut move_list = [0u32; 256];
+        let mut original_move_list = [0u16; 256];
+
+        let move_count = if depth > 5 {
+            let mut moves = SeeOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
+            moves.gen_moves(
+                &self.chess,
+                self.tables,
+                &self.history_moves,
+                &mut original_move_list,
+                &mut move_list,
+            )
+        } else {
+            let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
+            moves.gen_moves(
+                &self.chess,
+                &self.history_moves,
+                &mut original_move_list,
+                &mut move_list,
+            )
+        };
+
+        // let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
+        // let move_count = moves.gen_moves(
+        //     &self.chess,
+        //     &self.history_moves,
+        //     &mut original_move_list,
+        //     &mut move_list,
+        // );
 
         let mut best_score = -SCORE_INF;
         let mut best_move = 0;
@@ -492,9 +522,7 @@ impl<'a> Search<'a> {
 
         let board_copy = self.chess.clone();
 
-        let mut move_list = [0u32; 256];
-
-        for mv_index in 0..moves.gen_moves(&self.chess, &self.history_moves, &mut move_list) {
+        for mv_index in 0..move_count {
             let mv = move_list[mv_index] as u16;
 
             let nnue_update = unsafe {
@@ -698,7 +726,7 @@ impl<'a> Search<'a> {
                     self.chess.zobrist_key(),
                     score,
                     depth,
-                    || moves.find_move_index_avx512(best_move),
+                    || Self::find_move_index_avx512(best_move, &original_move_list),
                     BoundType::LowerBound,
                 );
                 self.rt.pop_position();
@@ -738,7 +766,7 @@ impl<'a> Search<'a> {
             self.chess.zobrist_key(),
             best_score,
             depth,
-            || moves.find_move_index_avx512(best_move),
+            || Self::find_move_index_avx512(best_move, &original_move_list),
             bound_type,
         );
 
@@ -781,7 +809,7 @@ impl<'a> Search<'a> {
             -SCORE_INF
         };
 
-        let mut moves = CaptureMvvlva::new();
+        let mut moves = CaptureOrdering::new();
 
         let mut best_score: Eval = static_eval;
         let board_copy = self.chess.clone();
@@ -848,7 +876,7 @@ impl<'a> Search<'a> {
 
         let mut alpha = alpha;
 
-        let mut moves = FastMvvlva::<HISTORY_MIN, HISTORY_MAX>::new(0, 0xFF);
+        let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(0, 0xFF);
 
         let mut best_score = -SCORE_INF;
         let mut num_legal_moves = 0;
@@ -856,7 +884,13 @@ impl<'a> Search<'a> {
         let board_copy = self.chess.clone();
 
         let mut move_list = [0u32; 256];
-        for i in 0..moves.gen_moves(&self.chess, &self.history_moves, &mut move_list) {
+        let mut original_move_list = [0u16; 256];
+        for i in 0..moves.gen_moves(
+            &self.chess,
+            &self.history_moves,
+            &mut original_move_list,
+            &mut move_list,
+        ) {
             let mv_index = i;
             let mv = move_list[mv_index] as u16;
 
@@ -1277,5 +1311,48 @@ impl<'a> Search<'a> {
         }
 
         return legal_move;
+    }
+
+    pub fn find_move_index_avx512(mv: u16, move_list: &[u16; 256]) -> u8 {
+        unsafe {
+            let mv_list_ptr = move_list.as_ptr() as *const __m512i;
+            let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
+            let p1_x32 = _mm512_loadu_si512(mv_list_ptr.add(1));
+            let p2_x32 = _mm512_loadu_si512(mv_list_ptr.add(2));
+            let p3_x32 = _mm512_loadu_si512(mv_list_ptr.add(3));
+
+            let mv_x32 = _mm512_set1_epi16(mv as i16);
+
+            let cmp_mask_0 = _mm512_cmpeq_epi16_mask(p0_x32, mv_x32) as u128;
+            let cmp_mask_1 = _mm512_cmpeq_epi16_mask(p1_x32, mv_x32) as u128;
+            let cmp_mask_2 = _mm512_cmpeq_epi16_mask(p2_x32, mv_x32) as u128;
+            let cmp_mask_3 = _mm512_cmpeq_epi16_mask(p3_x32, mv_x32) as u128;
+
+            let lower_mask: u128 =
+                cmp_mask_0 | ((cmp_mask_1) << 32) | ((cmp_mask_2) << 64) | ((cmp_mask_3) << 96);
+
+            // if util::should_log(hash) {
+            //     println!(
+            //         "Scanned for move {} ({}), at index {} in array {:?}",
+            //         mv,
+            //         util::move_string_dbg(mv),
+            //         lower_mask.trailing_zeros(),
+            //         move_list
+            //     );
+            //     println!(
+            //         "Masks: {:032b} {:032b} {:032b} {:032b}",
+            //         cmp_mask_0, cmp_mask_1, cmp_mask_2, cmp_mask_3
+            //     );
+            // }
+
+            debug_assert!(lower_mask != 0, "Move {:04x} not found in move list", mv);
+            debug_assert!(
+                lower_mask.trailing_zeros() < 256,
+                "Move {:04x} index overflow",
+                mv
+            );
+
+            lower_mask.trailing_zeros() as u8
+        }
     }
 }
