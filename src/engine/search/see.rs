@@ -14,10 +14,28 @@ const PIECE_BISHOP: usize = PieceIndex::WhiteBishop as usize;
 const PIECE_PAWN: usize = PieceIndex::WhitePawn as usize;
 const PIECE_KING: usize = PieceIndex::WhiteKing as usize;
 
+#[derive(Clone, Copy, Debug)]
 pub struct Pinning {
     pub relations: [u8; 64],
     pub pinners: u64,
     pub pinned: u64,
+}
+
+impl Pinning {
+    #[inline(always)]
+    pub fn update_pinned_mask(&self, attacker_sq_mask: u64, out_pinned: &mut u64) {
+        let is_pinner_mask = ((attacker_sq_mask & self.pinners == 0) as u64).wrapping_sub(1);
+        println!(
+            "lol {:064b} - {}",
+            is_pinner_mask,
+            self.relations[attacker_sq_mask.trailing_zeros() as usize]
+        );
+        let pin_removed_mask = (1u64
+            .wrapping_shl(self.relations[attacker_sq_mask.trailing_zeros() as usize] as u32))
+            & is_pinner_mask;
+
+        *out_pinned &= !pin_removed_mask
+    }
 }
 
 #[inline(always)]
@@ -79,14 +97,22 @@ pub fn static_exchange_eval(
     score_table: &[i16; 16],
     tables: &tables::Tables,
     board: &ChessGame,
+    mv: u16,
     mut black_board: u64,
     mut white_board: u64,
     mut piece_board: [u64; 8],
-    mv: u16,
+    pins: Option<[Pinning; 2]>,
 ) -> i16 {
+    let mut pinned = if let Some(pins) = &pins {
+        [pins[0].pinned, pins[1].pinned]
+    } else {
+        [0u64; 2]
+    };
+
     let from_sq = (mv & 0x3F) as usize;
     let to_sq = ((mv >> 6) & 0x3F) as usize;
     let to_sq_mask = 1u64 << to_sq;
+    let from_sq_mask = 1u64 << from_sq;
 
     let from_piece = board.spt()[from_sq] & 7;
 
@@ -102,11 +128,22 @@ pub fn static_exchange_eval(
     }
 
     let mut b_move = board.b_move();
-    *[&mut white_board, &mut black_board][b_move as usize] ^= (1u64 << from_sq) | to_sq_mask;
+
+    if let Some(pins) = &pins {
+        pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
+
+        if from_sq_mask & pinned[b_move as usize] != 0 {
+            return 0;
+        }
+
+        pins[!b_move as usize].update_pinned_mask(from_sq_mask, &mut pinned[!b_move as usize]);
+    }
+
+    *[&mut white_board, &mut black_board][b_move as usize] ^= from_sq_mask | to_sq_mask;
     *[&mut white_board, &mut black_board][!b_move as usize] &= !remove_piece_mask;
 
     // Make the move on the bitboards
-    piece_board[from_piece as usize] ^= (1u64 << from_sq) | to_sq_mask;
+    piece_board[from_piece as usize] ^= from_sq_mask | to_sq_mask;
     piece_board[to_piece as usize & 7] ^= remove_piece_mask;
 
     let mut full_board = black_board | white_board;
@@ -154,21 +191,21 @@ pub fn static_exchange_eval(
         (piece_index as u8, attacker_sq_mask.isolate_lowest_one())
     };
 
-    // let mut pinning = [
-    //     calc_pinnings(false, board, black_board, white_board),
-    //     calc_pinnings(true, board, black_board, white_board),
-    // ];
-
     let mut stm_attackers;
 
     loop {
         stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
-        // stm_attackers &= !pinning[b_move as usize].pinned;
 
-        // println!(
-        //     "Pinned pieces: {:064b} (stm={})",
-        //     pinning[b_move as usize].pinned, b_move
-        // );
+        println!(
+            "Pinned pieces: {:064b} (stm={}), stm_attackers: {:064b}",
+            pinned[b_move as usize], b_move, stm_attackers
+        );
+
+        stm_attackers &= !pinned[b_move as usize];
+
+        // if let Some(pins) = &pins {
+        //     stm_attackers &= !pins[b_move as usize].pinned;
+        // }
 
         if stm_attackers == 0 {
             break;
@@ -180,11 +217,11 @@ pub fn static_exchange_eval(
             std::hint::assert_unchecked(attacker_piece < 8);
         }
 
-        // println!(
-        //     "[SEE] Attacker piece {:?} on square {}",
-        //     PieceIndex::from(attacker_piece as usize),
-        //     util::square_name(attacker_sq_mask.trailing_zeros() as u8),
-        // );
+        println!(
+            "[SEE] Attacker piece {:?} on square {}",
+            PieceIndex::from(attacker_piece as usize),
+            util::square_name(attacker_sq_mask.trailing_zeros() as u8),
+        );
 
         piece_board[last_moved_piece as usize] ^= to_sq_mask;
         piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
@@ -196,14 +233,10 @@ pub fn static_exchange_eval(
         exchange_index += 1;
         last_moved_piece = attacker_piece;
 
-        // @todo - Update pinned
-        // let is_pinner_mask =
-        //     ((attacker_sq_mask & pinning[!b_move as usize].pinners == 0) as u64).wrapping_sub(1);
-        // pinning[!b_move as usize].pinners &= !attacker_sq_mask;
-        // let pin_removed_mask = (1
-        //     << pinning[!b_move as usize].relations[attacker_sq_mask.trailing_zeros() as usize])
-        //     & is_pinner_mask;
-        // pinning[!b_move as usize].pinned &= !pin_removed_mask;
+        if let Some(pins) = &pins {
+            pins[!b_move as usize]
+                .update_pinned_mask(attacker_sq_mask, &mut pinned[!b_move as usize]);
+        }
 
         b_move = !b_move;
 
@@ -271,6 +304,7 @@ pub fn see_threshold(
     mut black_board: u64,
     mut white_board: u64,
     mut piece_board: [u64; 8],
+    pins: Option<&[Pinning; 2]>,
 ) -> bool {
     let from_sq = (mv & 0x3F) as usize;
     let to_sq = ((mv >> 6) & 0x3F) as usize;
@@ -685,6 +719,7 @@ mod tests {
                 black_board,
                 white_board,
                 piece_board,
+                None,
             );
 
             assert_eq!(
@@ -693,6 +728,52 @@ mod tests {
                 name, expected, result, real_eval, threshold
             );
         });
+    }
+
+    fn see_eval(fen: &'static str, mv_string: &'static str, check_pins: bool) -> Eval {
+        let tables = tables::Tables::new();
+        let mut board = chess_v2::ChessGame::new();
+
+        assert!(board.load_fen(fen, &tables).is_ok());
+
+        let mv = board.fix_move(util::create_move(mv_string));
+
+        // assert!(mv & MV_FLAG_CAP != 0);
+
+        let bitboards = board.bitboards();
+
+        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
+        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
+
+        let mut piece_board: [u64; 8] = [0u64; 8];
+        bitboards
+            .iter()
+            .take(8)
+            .zip(bitboards.iter().skip(8))
+            .enumerate()
+            .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+
+        let pins = if check_pins {
+            Some([
+                calc_pinnings(false, &board, black_board, white_board),
+                calc_pinnings(true, &board, black_board, white_board),
+            ])
+        } else {
+            None
+        };
+
+        let result = static_exchange_eval(
+            &WEIGHT_TABLE_ABS,
+            &tables,
+            &board,
+            mv,
+            black_board,
+            white_board,
+            piece_board,
+            pins,
+        );
+
+        result
     }
 
     fn see_test(fen: &'static str, mv_string: &'static str) -> Eval {
@@ -723,10 +804,11 @@ mod tests {
             &WEIGHT_TABLE_ABS,
             &tables,
             &board,
+            mv,
             black_board,
             white_board,
             piece_board,
-            mv,
+            None,
         );
 
         let naive_eval = see_naive(&WEIGHT_TABLE_ABS, &tables, &board, mv).unwrap();
@@ -734,6 +816,14 @@ mod tests {
         assert_eq!(
             real_eval, naive_eval,
             "Mismatch between real SEE and naive SEE.Fen={}.Mv={}",
+            fen, mv_string
+        );
+
+        // Check eval with pinning enabled
+        let pin_eval = see_eval(fen, mv_string, true);
+        assert_eq!(
+            real_eval, pin_eval,
+            "Mismatch between real SEE and pinned SEE.Fen={}.Mv={}",
             fen, mv_string
         );
 
@@ -805,10 +895,11 @@ mod tests {
                 &WEIGHT_TABLE_ABS,
                 &tables,
                 &board,
+                mv,
                 black_board,
                 white_board,
                 piece_board,
-                mv,
+                None,
             );
 
             match see_naive(&WEIGHT_TABLE_ABS, &tables, &board, mv) {
@@ -1166,4 +1257,116 @@ mod tests {
             expected, see_score
         );
     }
+
+    #[test]
+    fn test_see_pin_simple() {
+        let mv = "e4e3";
+        let see_score = see_eval("k7/3r4/8/8/3Bp3/8/8/3KB3 b - - 0 4", mv, true);
+        let expected = 0;
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_pin_firstmove() {
+        let mv = "d4e3";
+        let see_score = see_eval("k7/3r4/8/8/3B4/4p3/8/3KB3 w - - 0 4", mv, true);
+        let expected = 0;
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_pin_remove_pinned() {
+        let mv = "c4d3";
+        let see_score = see_eval("k7/3r4/8/8/2B5/3p4/8/3KB3 w - - 0 4", mv, true);
+        let expected =
+            piece_value(PieceIndex::BlackPawn as u8) - piece_value(PieceIndex::WhiteBishop as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_pin_remove_pinned_x2() {
+        let mv = "c3d3";
+        let see_score = see_eval("k7/3r4/8/8/4B3/2Rb4/8/3KB3 w - - 0 4", mv, true);
+        let expected = piece_value(PieceIndex::BlackBishop as u8)
+            - piece_value(PieceIndex::WhiteRook as u8)
+            + piece_value(PieceIndex::BlackRook as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_pin_remove_pinner_firstmove() {
+        let mv = "d5e4";
+        let see_score = see_eval("1k6/8/8/3q4/4B3/3B4/8/3K4 b - - 0 4", mv, true);
+        let expected =
+            piece_value(PieceIndex::WhiteBishop as u8) - piece_value(PieceIndex::BlackQueen as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_pin_remove_self_pinner_firstmove() {
+        let mv = "d5e4";
+        let see_score = see_eval("k7/8/8/3q4/4B3/8/8/4K3 b - - 0 4", mv, true);
+        let expected = piece_value(PieceIndex::WhiteBishop as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_pin_multi_pinned() {
+        let mv = "f7g6";
+        let see_score = see_eval("k7/5q2/r1r3P1/8/R3B3/8/8/4K3 b - - 0 4", mv, true);
+        let expected = piece_value(PieceIndex::WhitePawn as u8)
+            - piece_value(PieceIndex::BlackQueen as u8)
+            + piece_value(PieceIndex::WhiteBishop as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+
+    #[test]
+    fn test_see_pin_multi_pinned_2() {
+        let mv = "f7g6";
+        let see_score = see_eval("k7/1b3q2/r5P1/8/R3B3/8/8/4K3 b - - 0 4", mv, true);
+        let expected =
+            piece_value(PieceIndex::WhitePawn as u8) - piece_value(PieceIndex::BlackQueen as u8);
+
+        assert_eq!(
+            see_score, expected,
+            "Expected SEE to be {}, got {}",
+            expected, see_score
+        );
+    }
+    // @todo - Pins for threshold SEE & more test cases
 }
