@@ -32,6 +32,8 @@ mod tests {
     fn search_bench() {
         let tables = tables::Tables::new();
 
+        core_affinity::set_for_current(core_affinity::CoreId { id: 2 });
+
         // let (tx, rx) = crossbeam::channel::unbounded();
         // let test_fen = "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1"; // EG
         let test_fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"; // MG
