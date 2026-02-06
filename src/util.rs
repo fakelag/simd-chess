@@ -1,3 +1,5 @@
+use std::arch::x86_64::*;
+
 use crate::engine::{chess_v2, search, tables};
 
 pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -397,4 +399,12 @@ pub fn parse_position<'a>(
     }
 
     Ok(())
+}
+
+pub fn print_m512_epi64(a: &__m512i) {
+    let mut arr: [u64; 8] = [0u64; 8];
+    unsafe {
+        _mm512_storeu_si512(arr.as_mut_ptr() as *mut __m512i, *a);
+    }
+    println!("{:x?}", arr);
 }

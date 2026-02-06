@@ -2,7 +2,7 @@ use crate::{
     engine::tables::{self, Tables},
     nnue::nnue::{self, UpdatableNnue},
     pop_ls1b,
-    util::{self},
+    util::{self, print_m512_epi64},
 };
 use std::arch::x86_64::*;
 
@@ -357,14 +357,6 @@ impl ChessGame {
                     ROOK_LANES & active_pieces_slider_mask,
                     BISHOP_LANES & active_pieces_slider_mask,
                 );
-
-                // let print_m512 = |label: &str, a: &__m512i| {
-                //     let mut arr: [u64; 8] = [0u64; 8];
-                //     unsafe {
-                //         _mm512_storeu_si512(arr.as_mut_ptr() as *mut __m512i, *a);
-                //     }
-                //     println!("{}: {:#x?}", label, arr);
-                // };
 
                 // print_m512("slider_moves_x8", &slider_moves_x8);
 
@@ -1089,20 +1081,22 @@ impl ChessGame {
 
         let nnue_update = match move_flags {
             MV_FLAGS_CASTLE_KING | MV_FLAGS_CASTLE_QUEEN => {
-                const CASTLING_OFFSETS: [[i8; 4]; 4] = [
-                    [0, 0, 0, 0],
-                    [0, 0, 0, 0],
-                    [1, 2, 1, -1],   // king
-                    [-1, -2, -2, 1], // queen
+                const CASTLING_OFFSETS: [[i8; 3]; 4] = [
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    [1, 1, -1],  // king
+                    [-1, -2, 1], // queen
                 ];
 
                 let square_offsets =
                     unsafe { *CASTLING_OFFSETS.get_unchecked((move_flags >> 12) as usize) };
 
+                // assert!(from_sq.wrapping_add(square_offsets[1] as u8) == to_sq);
+
                 if [
                     from_sq,
                     from_sq.wrapping_add(square_offsets[0] as u8),
-                    from_sq.wrapping_add(square_offsets[1] as u8),
+                    to_sq,
                 ]
                 .iter()
                 .any(|&square| self.is_king_square_attacked(square, self.b_move, tables))
@@ -1121,8 +1115,8 @@ impl ChessGame {
                     return None;
                 }
 
-                let rook_from_sq = (to_sq as usize).wrapping_add(square_offsets[2] as usize);
-                let rook_to_sq = (to_sq as usize).wrapping_add(square_offsets[3] as usize);
+                let rook_from_sq = (to_sq as usize).wrapping_add(square_offsets[1] as usize);
+                let rook_to_sq = (to_sq as usize).wrapping_add(square_offsets[2] as usize);
 
                 let rook_from_bit = 1 << rook_from_sq;
                 let rook_to_bit = 1 << rook_to_sq;
@@ -2018,6 +2012,45 @@ impl ChessGame {
     }
 
     #[inline(always)]
+    fn byteswap_epi64_x8(input_x8: __m512i) -> __m512i {
+        unsafe {
+            let swap_x8 = _mm512_set_epi64(
+                0x38393a3b3c3d3e3f,
+                0x3031323334353637,
+                0x28292a2b2c2d2e2f,
+                0x2021222324252627,
+                0x18191a1b1c1d1e1f,
+                0x1011121314151617,
+                0x8090a0b0c0d0e0f,
+                0x1020304050607,
+            );
+
+            _mm512_shuffle_epi8(input_x8, swap_x8)
+        }
+    }
+
+    fn ray_moves_with_occ_x8(
+        active_mask: u8,
+        forward_x8: __m512i,
+        line_mask_x8: __m512i,
+        sq_mask_x8: __m512i,
+        sq_mask_bswap_x8: __m512i,
+    ) -> __m512i {
+        unsafe {
+            let mut forward_x8 = forward_x8;
+            let mut reverse_x8 = Self::byteswap_epi64_x8(forward_x8);
+
+            forward_x8 = _mm512_sub_epi64(forward_x8, sq_mask_x8);
+            reverse_x8 = _mm512_sub_epi64(reverse_x8, sq_mask_bswap_x8);
+
+            forward_x8 = _mm512_xor_epi64(forward_x8, Self::byteswap_epi64_x8(reverse_x8));
+            forward_x8 = _mm512_maskz_and_epi64(active_mask, forward_x8, line_mask_x8);
+
+            forward_x8
+        }
+    }
+
+    #[inline(always)]
     fn calc_slider_moves_avx512_x8(
         full_board_x8: __m512i,
         one_of_each_index_x8: __m512i,
@@ -2030,41 +2063,8 @@ impl ChessGame {
             const RAY_A1_H8: u64 = 0x8040201008040201u64;
             const RAY_A8_H1: u64 = 0x0102040810204080u64;
 
-            let byteswap_epi64_x8 = |input_x8: __m512i| -> __m512i {
-                let swap_x8 = _mm512_set_epi64(
-                    0x38393a3b3c3d3e3f,
-                    0x3031323334353637,
-                    0x28292a2b2c2d2e2f,
-                    0x2021222324252627,
-                    0x18191a1b1c1d1e1f,
-                    0x1011121314151617,
-                    0x8090a0b0c0d0e0f,
-                    0x1020304050607,
-                );
-
-                _mm512_shuffle_epi8(input_x8, swap_x8)
-            };
-
-            let ray_moves_with_occ_x8 = |active_mask: u8,
-                                         forward_x8: __m512i,
-                                         line_mask_x8: __m512i,
-                                         sq_mask_x8: __m512i,
-                                         sq_mask_bswap_x8: __m512i|
-             -> __m512i {
-                let mut forward_x8 = forward_x8;
-                let mut reverse_x8 = byteswap_epi64_x8(forward_x8);
-
-                forward_x8 = _mm512_sub_epi64(forward_x8, sq_mask_x8);
-                reverse_x8 = _mm512_sub_epi64(reverse_x8, sq_mask_bswap_x8);
-
-                forward_x8 = _mm512_xor_epi64(forward_x8, byteswap_epi64_x8(reverse_x8));
-                forward_x8 = _mm512_maskz_and_epi64(active_mask, forward_x8, line_mask_x8);
-
-                forward_x8
-            };
-
             let slider_sq_x8 = _mm512_sllv_epi64(_mm512_set1_epi64(1), one_of_each_index_x8);
-            let slider_sq_bswap_x8 = byteswap_epi64_x8(slider_sq_x8);
+            let slider_sq_bswap_x8 = Self::byteswap_epi64_x8(slider_sq_x8);
 
             let line_mask_x8 =
                 _mm512_rolv_epi64(_mm512_set1_epi64(RAY_A2_A8 as i64), one_of_each_index_x8);
@@ -2099,21 +2099,21 @@ impl ChessGame {
 
             let full_board_without_sq_x8 = _mm512_andnot_epi64(slider_sq_x8, full_board_x8);
 
-            let moves_file_x8 = ray_moves_with_occ_x8(
+            let moves_file_x8 = Self::ray_moves_with_occ_x8(
                 rook_mask,
                 _mm512_and_epi64(full_board_without_sq_x8, line_mask_x8),
                 line_mask_x8,
                 slider_sq_x8,
                 slider_sq_bswap_x8,
             );
-            let moves_diag_x8 = ray_moves_with_occ_x8(
+            let moves_diag_x8 = Self::ray_moves_with_occ_x8(
                 bish_mask,
                 _mm512_and_epi64(full_board_without_sq_x8, diagonal_mask_x8),
                 diagonal_mask_x8,
                 slider_sq_x8,
                 slider_sq_bswap_x8,
             );
-            let moves_anti_x8 = ray_moves_with_occ_x8(
+            let moves_anti_x8 = Self::ray_moves_with_occ_x8(
                 bish_mask,
                 _mm512_and_epi64(full_board_without_sq_x8, antidiag_mask_x8),
                 antidiag_mask_x8,
@@ -2137,12 +2137,12 @@ impl ChessGame {
                 _mm512_set1_epi64(RAY_A1_A8 as i64),
             );
 
-            let diagonal_rank_moves_x8 = ray_moves_with_occ_x8(
+            let diagonal_rank_moves_x8 = Self::ray_moves_with_occ_x8(
                 rook_mask,
                 _mm512_and_epi64(occ_propagate_x8, _mm512_set1_epi64(RAY_A1_H8 as i64)),
                 _mm512_set1_epi64(RAY_A1_H8 as i64),
                 sq_propagate_x8,
-                byteswap_epi64_x8(sq_propagate_x8),
+                Self::byteswap_epi64_x8(sq_propagate_x8),
             );
 
             let moves_rank_x8 = _mm512_maskz_sllv_epi64(
@@ -2168,6 +2168,91 @@ impl ChessGame {
     }
 
     #[inline(always)]
+    fn calc_non_slider_attack_bitboards_avx512(
+        from_sq_x8: __m512i,
+        knight_mask: u8,
+        king_mask: u8,
+        white_pawn_mask: u8,
+        black_pawn_mask: u8,
+    ) -> (__m512i, __m512i, __m512i, __m512i) {
+        unsafe {
+            let const_ex_file_a_x8 = _mm512_set1_epi64(tables::EX_A_FILE as i64);
+            let const_ex_file_ab_x8 =
+                _mm512_set1_epi64(tables::EX_A_FILE as i64 & tables::EX_B_FILE as i64);
+            let const_ex_file_gh_x8 =
+                _mm512_set1_epi64(tables::EX_G_FILE as i64 & tables::EX_H_FILE as i64);
+            let const_ex_file_h_x8 = _mm512_set1_epi64(tables::EX_H_FILE as i64);
+
+            let knight_squares_x8 = _mm512_maskz_ternarylogic_epi64(
+                knight_mask,
+                _mm512_ternarylogic_epi64(
+                    _mm512_and_epi64(const_ex_file_h_x8, _mm512_slli_epi64(from_sq_x8, 15)),
+                    _mm512_and_epi64(const_ex_file_a_x8, _mm512_slli_epi64(from_sq_x8, 17)),
+                    _mm512_and_epi64(const_ex_file_gh_x8, _mm512_slli_epi64(from_sq_x8, 6)),
+                    0xFE,
+                ),
+                _mm512_ternarylogic_epi64(
+                    _mm512_and_epi64(const_ex_file_ab_x8, _mm512_srli_epi64(from_sq_x8, 6)),
+                    _mm512_and_epi64(const_ex_file_gh_x8, _mm512_srli_epi64(from_sq_x8, 10)),
+                    _mm512_and_epi64(const_ex_file_a_x8, _mm512_srli_epi64(from_sq_x8, 15)),
+                    0xFE,
+                ),
+                _mm512_or_epi64(
+                    _mm512_and_epi64(const_ex_file_ab_x8, _mm512_slli_epi64(from_sq_x8, 10)),
+                    _mm512_and_epi64(const_ex_file_h_x8, _mm512_srli_epi64(from_sq_x8, 17)),
+                ),
+                0xFE,
+            );
+
+            let king_squares_x8 = _mm512_maskz_ternarylogic_epi64(
+                king_mask,
+                _mm512_and_epi64(
+                    const_ex_file_h_x8,
+                    _mm512_ternarylogic_epi64(
+                        _mm512_srli_epi64(from_sq_x8, 1),
+                        _mm512_srli_epi64(from_sq_x8, 9),
+                        _mm512_slli_epi64(from_sq_x8, 7),
+                        0xFE,
+                    ),
+                ),
+                _mm512_and_epi64(
+                    const_ex_file_a_x8,
+                    _mm512_ternarylogic_epi64(
+                        _mm512_slli_epi64(from_sq_x8, 1),
+                        _mm512_slli_epi64(from_sq_x8, 9),
+                        _mm512_srli_epi64(from_sq_x8, 7),
+                        0xFE,
+                    ),
+                ),
+                _mm512_or_epi64(
+                    _mm512_slli_epi64(from_sq_x8, 8),
+                    _mm512_srli_epi64(from_sq_x8, 8),
+                ),
+                0xFE,
+            );
+
+            let pawn_squares_white_x8 = _mm512_maskz_or_epi64(
+                white_pawn_mask,
+                _mm512_and_epi64(const_ex_file_a_x8, _mm512_slli_epi64(from_sq_x8, 9)),
+                _mm512_and_epi64(const_ex_file_h_x8, _mm512_slli_epi64(from_sq_x8, 7)),
+            );
+
+            let pawn_squares_black_x8 = _mm512_maskz_or_epi64(
+                black_pawn_mask,
+                _mm512_and_epi64(const_ex_file_h_x8, _mm512_srli_epi64(from_sq_x8, 9)),
+                _mm512_and_epi64(const_ex_file_a_x8, _mm512_srli_epi64(from_sq_x8, 7)),
+            );
+
+            (
+                knight_squares_x8,
+                king_squares_x8,
+                pawn_squares_white_x8,
+                pawn_squares_black_x8,
+            )
+        }
+    }
+
+    #[inline(always)]
     fn calc_non_slider_moves_avx512_x8(
         b_move: bool,
         non_slider_sq_x8: __m512i,
@@ -2177,74 +2262,16 @@ impl ChessGame {
         active_mask: u8,
     ) -> __m512i {
         unsafe {
-            let const_ex_file_a_x8 = _mm512_set1_epi64(tables::EX_A_FILE as i64);
-            let const_ex_file_ab_x8 =
-                _mm512_set1_epi64(tables::EX_A_FILE as i64 & tables::EX_B_FILE as i64);
-            let const_ex_file_gh_x8 =
-                _mm512_set1_epi64(tables::EX_G_FILE as i64 & tables::EX_H_FILE as i64);
-            let const_ex_file_h_x8 = _mm512_set1_epi64(tables::EX_H_FILE as i64);
-
-            let knight_moves_x8 = _mm512_maskz_ternarylogic_epi64(
-                knight_mask,
-                _mm512_ternarylogic_epi64(
-                    _mm512_and_epi64(const_ex_file_h_x8, _mm512_slli_epi64(non_slider_sq_x8, 15)),
-                    _mm512_and_epi64(const_ex_file_a_x8, _mm512_slli_epi64(non_slider_sq_x8, 17)),
-                    _mm512_and_epi64(const_ex_file_gh_x8, _mm512_slli_epi64(non_slider_sq_x8, 6)),
-                    0xFE,
-                ),
-                _mm512_ternarylogic_epi64(
-                    _mm512_and_epi64(const_ex_file_ab_x8, _mm512_srli_epi64(non_slider_sq_x8, 6)),
-                    _mm512_and_epi64(const_ex_file_gh_x8, _mm512_srli_epi64(non_slider_sq_x8, 10)),
-                    _mm512_and_epi64(const_ex_file_a_x8, _mm512_srli_epi64(non_slider_sq_x8, 15)),
-                    0xFE,
-                ),
-                _mm512_or_epi64(
-                    _mm512_and_epi64(const_ex_file_ab_x8, _mm512_slli_epi64(non_slider_sq_x8, 10)),
-                    _mm512_and_epi64(const_ex_file_h_x8, _mm512_srli_epi64(non_slider_sq_x8, 17)),
-                ),
-                0xFE,
-            );
-
-            let king_moves_x8 = _mm512_maskz_ternarylogic_epi64(
-                king_mask,
-                _mm512_and_epi64(
-                    const_ex_file_h_x8,
-                    _mm512_ternarylogic_epi64(
-                        _mm512_srli_epi64(non_slider_sq_x8, 1),
-                        _mm512_srli_epi64(non_slider_sq_x8, 9),
-                        _mm512_slli_epi64(non_slider_sq_x8, 7),
-                        0xFE,
-                    ),
-                ),
-                _mm512_and_epi64(
-                    const_ex_file_a_x8,
-                    _mm512_ternarylogic_epi64(
-                        _mm512_slli_epi64(non_slider_sq_x8, 1),
-                        _mm512_slli_epi64(non_slider_sq_x8, 9),
-                        _mm512_srli_epi64(non_slider_sq_x8, 7),
-                        0xFE,
-                    ),
-                ),
-                _mm512_or_epi64(
-                    _mm512_slli_epi64(non_slider_sq_x8, 8),
-                    _mm512_srli_epi64(non_slider_sq_x8, 8),
-                ),
-                0xFE,
-            );
+            let (knight_moves_x8, king_moves_x8, pawn_moves_white_x8, pawn_moves_black_x8) =
+                Self::calc_non_slider_attack_bitboards_avx512(
+                    non_slider_sq_x8,
+                    knight_mask,
+                    king_mask,
+                    pawn_mask,
+                    pawn_mask,
+                );
 
             let b_move_mask = if b_move { 0xFF } else { 0x00 };
-
-            let pawn_moves_white_x8 = _mm512_maskz_or_epi64(
-                pawn_mask,
-                _mm512_and_epi64(const_ex_file_a_x8, _mm512_slli_epi64(non_slider_sq_x8, 9)),
-                _mm512_and_epi64(const_ex_file_h_x8, _mm512_slli_epi64(non_slider_sq_x8, 7)),
-            );
-
-            let pawn_moves_black_x8 = _mm512_maskz_or_epi64(
-                pawn_mask,
-                _mm512_and_epi64(const_ex_file_h_x8, _mm512_srli_epi64(non_slider_sq_x8, 9)),
-                _mm512_and_epi64(const_ex_file_a_x8, _mm512_srli_epi64(non_slider_sq_x8, 7)),
-            );
 
             let pawn_moves_x8 =
                 _mm512_mask_blend_epi64(b_move_mask, pawn_moves_white_x8, pawn_moves_black_x8);
@@ -2261,45 +2288,230 @@ impl ChessGame {
         }
     }
 
-    // pub fn from_v1(value: chess::ChessGame, tables: &Tables) -> Self {
-    //     let mut v2 = ChessGame::new();
+    #[inline(always)]
+    pub fn in_check_avx512(
+        king_sq_index_0: u8,
+        king_sq_index_1: u8,
+        bitboards: &[u64; 16],
+    ) -> (u64, u64) {
+        unsafe {
+            const RAY_A2_A8: u64 = 0x101010101010100u64;
+            const RAY_A1_A8: u64 = 0x0101010101010101u64;
+            const RAY_A1_H8: u64 = 0x8040201008040201u64;
+            const RAY_A8_H1: u64 = 0x0102040810204080u64;
 
-    //     v2.pawn_key = tables.zobrist_hash_keys.no_pawn_key;
+            let occupancy = bitboards.iter().fold(0u64, |acc, &bb| acc | bb);
 
-    //     for piece_id in util::PieceId::WhiteKing as usize..=util::PieceId::BlackPawn as usize {
-    //         let piece_id = util::PieceId::from(piece_id);
-    //         let piece_index: PieceIndex = piece_id.into();
+            let king_sq_x8 = _mm512_set_epi64(
+                1 << king_sq_index_0, // Diagonal
+                1 << king_sq_index_0, // Anti-Diag
+                1 << king_sq_index_0, // Line
+                1 << king_sq_index_0, // Rank
+                1 << king_sq_index_1, // Diagonal
+                1 << king_sq_index_1, // Anti-Diag
+                1 << king_sq_index_1, // Line
+                1 << king_sq_index_1, // Rank
+            );
 
-    //         v2.board.bitboards[piece_index as usize] = value.board.bitboards[piece_id as usize];
-    //     }
+            let slider_checkers_x8 = {
+                let king_sq_index_x8 = _mm512_set_epi64(
+                    king_sq_index_0 as i64,
+                    king_sq_index_0 as i64,
+                    king_sq_index_0 as i64,
+                    king_sq_index_0 as i64,
+                    king_sq_index_1 as i64,
+                    king_sq_index_1 as i64,
+                    king_sq_index_1 as i64,
+                    king_sq_index_1 as i64,
+                );
 
-    //     v2.b_move = value.b_move;
-    //     v2.castles = value.castles;
-    //     v2.en_passant = value.en_passant.unwrap_or(0);
-    //     v2.half_moves = value.half_moves;
-    //     v2.full_moves = value.full_moves as u16;
-    //     v2.zobrist_key = value.zobrist_key;
-    //     v2.material[0] = value.material[0];
-    //     v2.material[1] = value.material[1];
+                let king_sq_file_x8 = _mm512_and_epi64(king_sq_index_x8, _mm512_set1_epi64(7));
+                let king_sq_rank_x8 = _mm512_and_epi64(king_sq_index_x8, _mm512_set1_epi64(56));
 
-    //     for sq in 0..64 {
-    //         if value.spt[sq] == 0 {
-    //             continue;
-    //         }
-    //         let piece_index = PieceIndex::from(util::PieceId::from(value.spt[sq] as usize - 1));
-    //         v2.spt[sq] = piece_index as u8;
+                let king_diag_rank_x8 = _mm512_slli_epi64(king_sq_file_x8, 3);
 
-    //         match piece_index {
-    //             PieceIndex::WhitePawn | PieceIndex::BlackPawn => {
-    //                 v2.pawn_key ^=
-    //                     tables.zobrist_hash_keys.hash_piece_squares_new[piece_index as usize][sq];
-    //             }
-    //             _ => {}
-    //         }
-    //     }
+                let diagonal_mask_x8 = {
+                    let diag_x8 = _mm512_sub_epi64(king_diag_rank_x8, king_sq_rank_x8);
+                    let diag_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), diag_x8);
+                    let top_x8 = _mm512_and_epi64(diag_neg_x8, _mm512_srai_epi64(diag_x8, 31));
+                    let bot_x8 = _mm512_and_epi64(diag_x8, _mm512_srai_epi64(diag_neg_x8, 31));
 
-    //     v2
-    // }
+                    let base_mask = _mm512_set1_epi64(RAY_A1_H8 as i64);
+                    _mm512_maskz_sllv_epi64(
+                        0b00010001,
+                        _mm512_srlv_epi64(base_mask, bot_x8),
+                        top_x8,
+                    )
+                };
+
+                let antidiag_mask_x8 = {
+                    let antid_x8 = _mm512_sub_epi64(
+                        _mm512_sub_epi64(_mm512_set1_epi64(56), king_diag_rank_x8),
+                        king_sq_rank_x8,
+                    );
+                    let antid_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), antid_x8);
+                    let top_x8 = _mm512_and_epi64(antid_neg_x8, _mm512_srai_epi64(antid_x8, 31));
+                    let bot_x8 = _mm512_and_epi64(antid_x8, _mm512_srai_epi64(antid_neg_x8, 31));
+
+                    let base_mask = _mm512_set1_epi64(RAY_A8_H1 as i64);
+                    _mm512_maskz_sllv_epi64(
+                        0b00100010,
+                        _mm512_srlv_epi64(base_mask, bot_x8),
+                        top_x8,
+                    )
+                };
+
+                let line_mask_x8 = _mm512_maskz_rolv_epi64(
+                    0b01000100,
+                    _mm512_set1_epi64(RAY_A2_A8 as i64),
+                    king_sq_index_x8,
+                );
+
+                let occupancy_x8 =
+                    _mm512_andnot_epi64(king_sq_x8, _mm512_set1_epi64(occupancy as i64));
+
+                // Calculate rank mask by translating via a1-h1 diagonal
+                let king_sq_propagate_x8 = _mm512_mask_and_epi64(
+                    king_sq_x8,
+                    0b10001000,
+                    _mm512_sllv_epi64(_mm512_set1_epi64(0xFFu64 as i64), king_diag_rank_x8),
+                    _mm512_set1_epi64(RAY_A1_H8 as i64),
+                );
+
+                let occ_propagate_x8 = _mm512_mask_mullo_epi64(
+                    occupancy_x8,
+                    0b10001000,
+                    _mm512_and_epi64(
+                        _mm512_srlv_epi64(occupancy_x8, king_sq_rank_x8),
+                        _mm512_set1_epi64(0xFFu64 as i64),
+                    ),
+                    _mm512_set1_epi64(RAY_A1_A8 as i64),
+                );
+
+                let occupancy_mask_x8 = _mm512_mask_set1_epi64(
+                    _mm512_ternarylogic_epi64(
+                        diagonal_mask_x8,
+                        antidiag_mask_x8,
+                        line_mask_x8,
+                        0xFE,
+                    ),
+                    0b10001000,
+                    RAY_A1_H8 as i64,
+                );
+
+                let ray_results_x8 = Self::ray_moves_with_occ_x8(
+                    0xFF,
+                    _mm512_and_epi64(occ_propagate_x8, occupancy_mask_x8),
+                    occupancy_mask_x8,
+                    king_sq_propagate_x8,
+                    Self::byteswap_epi64_x8(king_sq_propagate_x8),
+                );
+
+                let threat_squares_x8 = _mm512_mask_sllv_epi64(
+                    ray_results_x8,
+                    0b10001000,
+                    _mm512_srlv_epi64(
+                        _mm512_mullo_epi64(ray_results_x8, _mm512_set1_epi64(RAY_A1_A8 as i64)),
+                        _mm512_set1_epi64(56),
+                    ),
+                    king_sq_rank_x8,
+                );
+
+                let queen_bitboards = (bitboards[PieceIndex::WhiteQueen as usize]
+                    | bitboards[PieceIndex::BlackQueen as usize])
+                    as i64;
+                let rook_bitboards = (bitboards[PieceIndex::WhiteRook as usize]
+                    | bitboards[PieceIndex::BlackRook as usize])
+                    as i64;
+                let bishop_bitboards = (bitboards[PieceIndex::WhiteBishop as usize]
+                    | bitboards[PieceIndex::BlackBishop as usize])
+                    as i64;
+
+                let sliders_x8 = _mm512_set_epi64(
+                    queen_bitboards | rook_bitboards,
+                    queen_bitboards | rook_bitboards,
+                    queen_bitboards | bishop_bitboards,
+                    queen_bitboards | bishop_bitboards,
+                    queen_bitboards | rook_bitboards,
+                    queen_bitboards | rook_bitboards,
+                    queen_bitboards | bishop_bitboards,
+                    queen_bitboards | bishop_bitboards,
+                );
+
+                _mm512_and_epi64(threat_squares_x8, sliders_x8)
+            };
+            let non_slider_checkers_x8 = {
+                let (
+                    knight_squares_x8,
+                    king_squares_x8,
+                    pawn_squares_white_x8,
+                    pawn_squares_black_x8,
+                ) = Self::calc_non_slider_attack_bitboards_avx512(
+                    king_sq_x8, //
+                    0b00010001, //
+                    0b00100010, //
+                    0b01000100, //
+                    0b10001000, //
+                );
+
+                let white_pawns_x8 =
+                    _mm512_set1_epi64(bitboards[PieceIndex::WhitePawn as usize] as i64);
+                let black_pawns_x8 =
+                    _mm512_set1_epi64(bitboards[PieceIndex::BlackPawn as usize] as i64);
+
+                // Switch pawn boards for attack patterns
+                let pawn_black_x8 = _mm512_and_epi64(pawn_squares_white_x8, black_pawns_x8);
+                let pawn_white_x8 = _mm512_and_epi64(pawn_squares_black_x8, white_pawns_x8);
+
+                let threat_squares_x8 = _mm512_ternarylogic_epi64(
+                    knight_squares_x8,
+                    king_squares_x8,
+                    _mm512_or_si512(pawn_white_x8, pawn_black_x8),
+                    0xFE,
+                );
+
+                let knight_bitboards = (bitboards[PieceIndex::WhiteKnight as usize]
+                    | bitboards[PieceIndex::BlackKnight as usize])
+                    as i64;
+                let king_bitboards = (bitboards[PieceIndex::WhiteKing as usize]
+                    | bitboards[PieceIndex::BlackKing as usize])
+                    as i64;
+
+                let non_sliders_x8 = _mm512_set_epi64(
+                    0xFFFFFFFF_FFFFFFFFu64 as i64,
+                    0xFFFFFFFF_FFFFFFFFu64 as i64,
+                    king_bitboards,
+                    knight_bitboards,
+                    0xFFFFFFFF_FFFFFFFFu64 as i64,
+                    0xFFFFFFFF_FFFFFFFFu64 as i64,
+                    king_bitboards,
+                    knight_bitboards,
+                );
+
+                _mm512_and_epi64(threat_squares_x8, non_sliders_x8)
+            };
+
+            let all_checkers_x8 = _mm512_or_epi64(slider_checkers_x8, non_slider_checkers_x8);
+
+            let p0 = _mm512_castpd_si512(_mm512_permute_pd(
+                _mm512_castsi512_pd(all_checkers_x8),
+                0b0101_0101,
+            ));
+
+            let checkers_overlap_01_23_x8 = _mm512_or_epi64(all_checkers_x8, p0);
+
+            let all_checkers_low = _mm512_or_epi64(
+                checkers_overlap_01_23_x8,
+                _mm512_permutex_epi64(checkers_overlap_01_23_x8, 0b0010_0010),
+            );
+
+            let checkers_sq_1 = _mm_cvtsi128_si64(_mm512_castsi512_si128(all_checkers_low)) as u64;
+            let checkers_sq_0 =
+                _mm_cvtsi128_si64(_mm512_extracti64x2_epi64(all_checkers_low, 2)) as u64;
+
+            (checkers_sq_0, checkers_sq_1)
+        }
+    }
 }
 
 mod tests {
