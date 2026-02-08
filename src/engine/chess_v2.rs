@@ -2493,12 +2493,13 @@ impl ChessGame {
 
             let all_checkers_x8 = _mm512_or_epi64(slider_checkers_x8, non_slider_checkers_x8);
 
-            let p0 = _mm512_castpd_si512(_mm512_permute_pd(
-                _mm512_castsi512_pd(all_checkers_x8),
-                0b0101_0101,
-            ));
-
-            let checkers_overlap_01_23_x8 = _mm512_or_epi64(all_checkers_x8, p0);
+            let checkers_overlap_01_23_x8 = _mm512_or_epi64(
+                all_checkers_x8,
+                _mm512_castpd_si512(_mm512_permute_pd(
+                    _mm512_castsi512_pd(all_checkers_x8),
+                    0b0101_0101,
+                )),
+            );
 
             let all_checkers_low = _mm512_or_epi64(
                 checkers_overlap_01_23_x8,
