@@ -2313,7 +2313,6 @@ impl ChessGame {
                 1 << king_sq_index_1, // Rank
             );
 
-            let slider_checkers_x8 = {
                 let king_sq_index_x8 = _mm512_set_epi64(
                     king_sq_index_0 as i64,
                     king_sq_index_0 as i64,
@@ -2330,45 +2329,142 @@ impl ChessGame {
 
                 let king_diag_rank_x8 = _mm512_slli_epi64(king_sq_file_x8, 3);
 
-                let diagonal_mask_x8 = {
-                    let diag_x8 = _mm512_sub_epi64(king_diag_rank_x8, king_sq_rank_x8);
-                    let diag_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), diag_x8);
-                    let top_x8 = _mm512_and_epi64(diag_neg_x8, _mm512_srai_epi64(diag_x8, 31));
-                    let bot_x8 = _mm512_and_epi64(diag_x8, _mm512_srai_epi64(diag_neg_x8, 31));
+            // let diagonal_mask_x8 = {
+            //     let diag_x8 = _mm512_sub_epi64(king_diag_rank_x8, king_sq_rank_x8);
+            //     let diag_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), diag_x8);
+            //     let top_x8 = _mm512_and_epi64(diag_neg_x8, _mm512_srai_epi64(diag_x8, 31));
+            //     let bot_x8 = _mm512_and_epi64(diag_x8, _mm512_srai_epi64(diag_neg_x8, 31));
 
-                    let base_mask = _mm512_set1_epi64(RAY_A1_H8 as i64);
-                    _mm512_maskz_sllv_epi64(
-                        0b00010001,
-                        _mm512_srlv_epi64(base_mask, bot_x8),
-                        top_x8,
-                    )
-                };
+            //     let base_mask = _mm512_set1_epi64(RAY_A1_H8 as i64);
+            //     _mm512_maskz_sllv_epi64(
+            //         0b00010001,
+            //         _mm512_srlv_epi64(base_mask, bot_x8),
+            //         top_x8,
+            //     )
+            // };
 
-                let antidiag_mask_x8 = {
-                    let antid_x8 = _mm512_sub_epi64(
-                        _mm512_sub_epi64(_mm512_set1_epi64(56), king_diag_rank_x8),
-                        king_sq_rank_x8,
-                    );
-                    let antid_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), antid_x8);
-                    let top_x8 = _mm512_and_epi64(antid_neg_x8, _mm512_srai_epi64(antid_x8, 31));
-                    let bot_x8 = _mm512_and_epi64(antid_x8, _mm512_srai_epi64(antid_neg_x8, 31));
+            // let antidiag_mask_x8 = {
+            //     let antid_x8 = _mm512_sub_epi64(
+            //         _mm512_sub_epi64(_mm512_set1_epi64(56), king_diag_rank_x8),
+            //         king_sq_rank_x8,
+            //     );
+            //     let antid_neg_x8 = _mm512_sub_epi64(_mm512_setzero_si512(), antid_x8);
+            //     let top_x8 = _mm512_and_epi64(antid_neg_x8, _mm512_srai_epi64(antid_x8, 31));
+            //     let bot_x8 = _mm512_and_epi64(antid_x8, _mm512_srai_epi64(antid_neg_x8, 31));
 
-                    let base_mask = _mm512_set1_epi64(RAY_A8_H1 as i64);
-                    _mm512_maskz_sllv_epi64(
-                        0b00100010,
-                        _mm512_srlv_epi64(base_mask, bot_x8),
-                        top_x8,
-                    )
-                };
+            //     let base_mask = _mm512_set1_epi64(RAY_A8_H1 as i64);
+            //     _mm512_maskz_sllv_epi64(
+            //         0b00100010,
+            //         _mm512_srlv_epi64(base_mask, bot_x8),
+            //         top_x8,
+            //     )
+            // };
 
-                let line_mask_x8 = _mm512_maskz_rolv_epi64(
-                    0b01000100,
-                    _mm512_set1_epi64(RAY_A2_A8 as i64),
-                    king_sq_index_x8,
-                );
+            // let diagonal_mask_x8 = _mm512_set_epi64(
+            //     0,
+            //     0,
+            //     0,
+            //     diagonal_mask_0 as i64,
+            //     0,
+            //     0,
+            //     0,
+            //     diagonal_mask_1 as i64,
+            // );
 
-                let occupancy_x8 =
-                    _mm512_andnot_epi64(king_sq_x8, _mm512_set1_epi64(occupancy as i64));
+            // let antidiag_mask_x8 = _mm512_set_epi64(
+            //     0,
+            //     0,
+            //     antidiag_mask_0 as i64,
+            //     0,
+            //     0,
+            //     0,
+            //     antidiag_mask_1 as i64,
+            //     0,
+            // );
+
+            // let line_mask_x8 = _mm512_maskz_rolv_epi64(
+            //     0b01000100,
+            //     _mm512_set1_epi64(RAY_A2_A8 as i64),
+            //     king_sq_index_x8,
+            // );
+
+            // let occupancy_mask_x8 = _mm512_mask_set1_epi64(
+            //     _mm512_ternarylogic_epi64(
+            //         diagonal_mask_x8,
+            //         antidiag_mask_x8,
+            //         line_mask_x8,
+            //         0xFE,
+            //     ),
+            //     0b10001000,
+            //     RAY_A1_H8 as i64,
+            // );
+
+            let king_sq_rank_0 = king_sq_index_0 & 56;
+            let king_sq_rank_1 = king_sq_index_1 & 56;
+            let king_sq_file_0 = king_sq_index_0 & 7;
+            let king_sq_file_1 = king_sq_index_1 & 7;
+
+            let diag_rank_0 = (king_sq_file_0 as i64) << 3;
+            let diag_rank_1 = (king_sq_file_1 as i64) << 3;
+
+            let (diagonal_mask_0, diagonal_mask_1) = {
+                let diag_0 = diag_rank_0 as i64 - king_sq_rank_0 as i64;
+                let diag_neg_0 = -diag_0;
+                let diag_0 = diag_0 as u64;
+                let diag_neg_0 = diag_neg_0 as u64;
+                let top_0 = diag_neg_0 & (diag_0 >> 31);
+                let bot_0 = diag_0 & (diag_neg_0 >> 31);
+
+                let diag_1 = diag_rank_1 as i64 - king_sq_rank_1 as i64;
+                let diag_neg_1 = -diag_1;
+                let diag_1 = diag_1 as u64;
+                let diag_neg_1 = diag_neg_1 as u64;
+                let top_1 = diag_neg_1 & (diag_1 >> 31);
+                let bot_1 = diag_1 & (diag_neg_1 >> 31);
+
+                let base_mask = RAY_A1_H8 as u64;
+
+                ((base_mask >> bot_0) << top_0, (base_mask >> bot_1) << top_1)
+            };
+
+            let (antidiag_mask_0, antidiag_mask_1) = {
+                let antidiag_0 = (56u64.wrapping_sub(diag_rank_0 as u64))
+                    .wrapping_sub(king_sq_rank_0 as u64) as i64;
+                let antidiag_1 = (56u64.wrapping_sub(diag_rank_1 as u64))
+                    .wrapping_sub(king_sq_rank_1 as u64) as i64;
+
+                let antidiag_neg_0 = (-antidiag_0) as u64;
+                let antidiag_neg_1 = (-antidiag_1) as u64;
+
+                let antidiag_0 = antidiag_0 as u64;
+                let antidiag_1 = antidiag_1 as u64;
+
+                let top_0 = antidiag_neg_0 & (antidiag_0 >> 31);
+                let bot_0 = antidiag_0 & (antidiag_neg_0 >> 31);
+
+                let top_1 = antidiag_neg_1 & (antidiag_1 >> 31);
+                let bot_1 = antidiag_1 & (antidiag_neg_1 >> 31);
+
+                let base_mask = RAY_A8_H1 as u64;
+
+                ((base_mask >> bot_0) << top_0, (base_mask >> bot_1) << top_1)
+            };
+
+            let line_mask_0 = RAY_A2_A8.rotate_left(king_sq_index_0 as u32);
+            let line_mask_1 = RAY_A2_A8.rotate_left(king_sq_index_1 as u32);
+
+            let occupancy_mask_x8 = _mm512_set_epi64(
+                RAY_A1_H8 as i64,
+                line_mask_0 as i64,
+                antidiag_mask_0 as i64,
+                diagonal_mask_0 as i64,
+                RAY_A1_H8 as i64,
+                line_mask_1 as i64,
+                antidiag_mask_1 as i64,
+                diagonal_mask_1 as i64,
+            );
+
+            let occupancy_x8 = _mm512_andnot_epi64(king_sq_x8, _mm512_set1_epi64(occupancy as i64));
 
                 // Calculate rank mask by translating via a1-h1 diagonal
                 let king_sq_propagate_x8 = _mm512_mask_and_epi64(
@@ -2386,17 +2482,6 @@ impl ChessGame {
                         _mm512_set1_epi64(0xFFu64 as i64),
                     ),
                     _mm512_set1_epi64(RAY_A1_A8 as i64),
-                );
-
-                let occupancy_mask_x8 = _mm512_mask_set1_epi64(
-                    _mm512_ternarylogic_epi64(
-                        diagonal_mask_x8,
-                        antidiag_mask_x8,
-                        line_mask_x8,
-                        0xFE,
-                    ),
-                    0b10001000,
-                    RAY_A1_H8 as i64,
                 );
 
                 let ray_results_x8 = Self::ray_moves_with_occ_x8(
@@ -2438,15 +2523,10 @@ impl ChessGame {
                     queen_bitboards | bishop_bitboards,
                 );
 
-                _mm512_and_epi64(threat_squares_x8, sliders_x8)
-            };
-            let non_slider_checkers_x8 = {
-                let (
-                    knight_squares_x8,
-                    king_squares_x8,
-                    pawn_squares_white_x8,
-                    pawn_squares_black_x8,
-                ) = Self::calc_non_slider_attack_bitboards_avx512(
+            let slider_checkers_x8 = _mm512_and_epi64(threat_squares_x8, sliders_x8);
+
+            let (knight_squares_x8, king_squares_x8, pawn_squares_white_x8, pawn_squares_black_x8) =
+                Self::calc_non_slider_attack_bitboards_avx512(
                     king_sq_x8, //
                     0b00010001, //
                     0b00100010, //
@@ -2488,8 +2568,7 @@ impl ChessGame {
                     knight_bitboards,
                 );
 
-                _mm512_and_epi64(threat_squares_x8, non_sliders_x8)
-            };
+            let non_slider_checkers_x8 = _mm512_and_epi64(threat_squares_x8, non_sliders_x8);
 
             let all_checkers_x8 = _mm512_or_epi64(slider_checkers_x8, non_slider_checkers_x8);
 
