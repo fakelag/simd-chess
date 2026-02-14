@@ -55,7 +55,7 @@ mod tests {
             // let mut search_engine =
             //     v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
 
-            let mut search_engine = search::Search::new(params, &tables, 4, rt);
+            let mut search_engine = search::Search::new(params, &tables, 16, rt);
 
             search_engine.new_game();
             search_engine.load_from_fen(test_fen, &tables).unwrap();
