@@ -720,115 +720,113 @@ impl ChessGame {
         self.is_king_square_attacked(king_sq, b_move, tables)
     }
 
-    #[inline(always)]
-    fn get_rook_and_bishop_moves(sq_index: u8, occupancy: u64, tables: &Tables) -> (u64, u64) {
-        unsafe {
-            let rook_occupancy_mask =
-                *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
-            let rook_blockers = occupancy & rook_occupancy_mask;
-            let rook_moves =
-                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers);
+    // #[inline(always)]
+    // fn get_rook_and_bishop_moves(sq_index: u8, occupancy: u64, tables: &Tables) -> (u64, u64) {
+    //     unsafe {
+    //         let rook_occupancy_mask =
+    //             *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+    //         let rook_blockers = occupancy & rook_occupancy_mask;
+    //         let rook_moves =
+    //             tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers);
 
-            let bishop_occupancy_mask =
-                *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
-            let bishop_blockers = occupancy & bishop_occupancy_mask;
-            let bishop_moves =
-                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers);
+    //         let bishop_occupancy_mask =
+    //             *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+    //         let bishop_blockers = occupancy & bishop_occupancy_mask;
+    //         let bishop_moves =
+    //             tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers);
 
-            return (rook_moves, bishop_moves);
-        }
+    //         return (rook_moves, bishop_moves);
+    //     }
 
-        let ray_moves_with_occ =
-            |forward: u64, line_mask: u64, sq_mask: u64, sq_mask_bswap: u64| -> u64 {
-                let mut forward = forward;
-                let mut reverse = forward.swap_bytes();
+    //     let ray_moves_with_occ =
+    //         |forward: u64, line_mask: u64, sq_mask: u64, sq_mask_bswap: u64| -> u64 {
+    //             let mut forward = forward;
+    //             let mut reverse = forward.swap_bytes();
 
-                forward = forward.wrapping_sub(sq_mask);
-                reverse = reverse.wrapping_sub(sq_mask_bswap);
+    //             forward = forward.wrapping_sub(sq_mask);
+    //             reverse = reverse.wrapping_sub(sq_mask_bswap);
 
-                forward ^= reverse.swap_bytes();
-                forward &= line_mask;
+    //             forward ^= reverse.swap_bytes();
+    //             forward &= line_mask;
 
-                forward
-            };
+    //             forward
+    //         };
 
-        const RAY_A2_A8: u64 = 0x101010101010100u64;
-        const RAY_A1_A8: u64 = 0x0101010101010101u64;
-        const RAY_A1_H8: u64 = 0x8040201008040201u64;
-        const RAY_A8_H1: u64 = 0x0102040810204080u64;
+    //     const RAY_A2_A8: u64 = 0x101010101010100u64;
+    //     const RAY_A1_A8: u64 = 0x0101010101010101u64;
+    //     const RAY_A1_H8: u64 = 0x8040201008040201u64;
+    //     const RAY_A8_H1: u64 = 0x0102040810204080u64;
 
-        let sq_rank = sq_index & 56;
-        let sq_file = sq_index & 7;
-        let sq_mask = 1u64 << sq_index;
-        let occupancy = occupancy & !sq_mask;
+    //     let sq_rank = sq_index & 56;
+    //     let sq_file = sq_index & 7;
+    //     let sq_mask = 1u64 << sq_index;
+    //     let occupancy = occupancy & !sq_mask;
 
-        let diag_rank = (sq_file as i64) << 3;
+    //     let diag_rank = (sq_file as i64) << 3;
 
-        let diagonal_mask = {
-            let diag_0 = diag_rank as i64 - sq_rank as i64;
-            let diag_neg_0 = -diag_0;
-            let diag_0 = diag_0 as u64;
-            let diag_neg_0 = diag_neg_0 as u64;
-            let top_0 = diag_neg_0 & (diag_0 >> 31);
-            let bot_0 = diag_0 & (diag_neg_0 >> 31);
+    //     let diagonal_mask = {
+    //         let diag_0 = diag_rank as i64 - sq_rank as i64;
+    //         let diag_neg_0 = -diag_0;
+    //         let diag_0 = diag_0 as u64;
+    //         let diag_neg_0 = diag_neg_0 as u64;
+    //         let top_0 = diag_neg_0 & (diag_0 >> 31);
+    //         let bot_0 = diag_0 & (diag_neg_0 >> 31);
 
-            let base_mask = RAY_A1_H8 as u64;
+    //         let base_mask = RAY_A1_H8 as u64;
 
-            (base_mask >> bot_0) << top_0
-        };
+    //         (base_mask >> bot_0) << top_0
+    //     };
 
-        let antidiag_mask = {
-            let antidiag_0 =
-                (56u64.wrapping_sub(diag_rank as u64)).wrapping_sub(sq_rank as u64) as i64;
+    //     let antidiag_mask = {
+    //         let antidiag_0 =
+    //             (56u64.wrapping_sub(diag_rank as u64)).wrapping_sub(sq_rank as u64) as i64;
 
-            let antidiag_neg_0 = (-antidiag_0) as u64;
+    //         let antidiag_neg_0 = (-antidiag_0) as u64;
 
-            let antidiag_0 = antidiag_0 as u64;
+    //         let antidiag_0 = antidiag_0 as u64;
 
-            let top_0 = antidiag_neg_0 & (antidiag_0 >> 31);
-            let bot_0 = antidiag_0 & (antidiag_neg_0 >> 31);
+    //         let top_0 = antidiag_neg_0 & (antidiag_0 >> 31);
+    //         let bot_0 = antidiag_0 & (antidiag_neg_0 >> 31);
 
-            let base_mask = RAY_A8_H1 as u64;
+    //         let base_mask = RAY_A8_H1 as u64;
 
-            (base_mask >> bot_0) << top_0
-        };
+    //         (base_mask >> bot_0) << top_0
+    //     };
 
-        let line_mask = RAY_A2_A8.rotate_left(sq_index as u32);
+    //     let file_mask = RAY_A2_A8.rotate_left(sq_index as u32);
 
-        // Calculate rank mask by translating via a1-h1 diagonal
-        let sq_propagate = (0xFFu64 << diag_rank) & RAY_A1_H8;
+    //     // Calculate rank mask by translating via a1-h1 diagonal
+    //     let sq_propagate = (0xFFu64 << diag_rank) & RAY_A1_H8;
+    //     let occ_propagate = ((occupancy >> sq_rank) & 0xFFu64).wrapping_mul(RAY_A1_A8);
+    //     let results_rank_diag = ray_moves_with_occ(
+    //         occ_propagate & RAY_A1_H8,
+    //         RAY_A1_H8,
+    //         sq_propagate,
+    //         sq_propagate.swap_bytes(),
+    //     );
+    //     let results_rank = ((results_rank_diag.wrapping_mul(RAY_A1_A8)) >> 56) << sq_rank;
 
-        let occ_propagate = ((occupancy >> sq_rank) & 0xFFu64).wrapping_mul(RAY_A1_A8);
+    //     let sq_mask_bswap = sq_mask.swap_bytes();
 
-        let results_rank_diag = ray_moves_with_occ(
-            occ_propagate & RAY_A1_H8,
-            RAY_A1_H8,
-            sq_propagate,
-            sq_propagate.swap_bytes(),
-        );
-        let results_rank = ((results_rank_diag.wrapping_mul(RAY_A1_A8)) >> 56) << sq_rank;
+    //     let results_file =
+    //         ray_moves_with_occ(occupancy & file_mask, file_mask, sq_mask, sq_mask_bswap);
 
-        let sq_mask_bswap = sq_mask.swap_bytes();
+    //     let results_diag = ray_moves_with_occ(
+    //         occupancy & diagonal_mask,
+    //         diagonal_mask,
+    //         sq_mask,
+    //         sq_mask_bswap,
+    //     );
 
-        let results_file =
-            ray_moves_with_occ(occupancy & line_mask, line_mask, sq_mask, sq_mask_bswap);
+    //     let results_antidiag = ray_moves_with_occ(
+    //         occupancy & antidiag_mask,
+    //         antidiag_mask,
+    //         sq_mask,
+    //         sq_mask_bswap,
+    //     );
 
-        let results_diag = ray_moves_with_occ(
-            occupancy & diagonal_mask,
-            diagonal_mask,
-            sq_mask,
-            sq_mask_bswap,
-        );
-
-        let results_antidiag = ray_moves_with_occ(
-            occupancy & antidiag_mask,
-            antidiag_mask,
-            sq_mask,
-            sq_mask_bswap,
-        );
-
-        (results_rank | results_file, results_diag | results_antidiag)
-    }
+    //     (results_rank | results_file, results_diag | results_antidiag)
+    // }
 
     #[inline(always)]
     pub fn is_king_square_attacked(&self, sq_index: u8, b_move: bool, tables: &Tables) -> bool {
@@ -853,15 +851,24 @@ impl ChessGame {
             is_attacked |=
                 ntm_bitboards.get_unchecked(PieceIndex::WhiteKing as usize) & king_attack_mask;
 
-            let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+            let occupancy = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
 
             let opponent_rook_board = ntm_bitboards.get_unchecked(PieceIndex::WhiteRook as usize);
             let opponent_bishop_board =
                 ntm_bitboards.get_unchecked(PieceIndex::WhiteBishop as usize);
             let opponent_queen_board = ntm_bitboards.get_unchecked(PieceIndex::WhiteQueen as usize);
 
-            let (rook_moves, bishop_moves) =
-                Self::get_rook_and_bishop_moves(sq_index, full_board, tables);
+            let rook_occupancy_mask =
+                *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+            let rook_blockers = occupancy & rook_occupancy_mask;
+            let rook_moves =
+                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers);
+
+            let bishop_occupancy_mask =
+                *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
+            let bishop_blockers = occupancy & bishop_occupancy_mask;
+            let bishop_moves =
+                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers);
 
             is_attacked |= (opponent_rook_board | opponent_queen_board) & rook_moves;
             is_attacked |= (opponent_bishop_board | opponent_queen_board) & bishop_moves;
