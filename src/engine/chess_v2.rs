@@ -1155,6 +1155,42 @@ impl ChessGame {
     }
 
     #[inline(always)]
+    pub fn piece_at_side_avx512(&self, sq_mask: u64, b_move: bool) -> usize {
+        unsafe {
+            let bitboard_ptr = self.board.bitboards.as_ptr() as *const __m512i;
+            let bitboards_x8 = _mm512_load_si512(bitboard_ptr.add(b_move as usize));
+
+            let sq_bit_x8 = _mm512_set1_epi64(sq_mask as i64);
+
+            let cmp_mask = _mm512_test_epi64_mask(sq_bit_x8, bitboards_x8);
+
+            let has_mask = ((cmp_mask == 0) as u32).wrapping_sub(1);
+
+            ((cmp_mask.trailing_zeros() + ((b_move as u32) << 3)) & has_mask) as usize
+        }
+    }
+
+    #[inline(always)]
+    pub fn piece_at_avx512(&self, sq_mask: u64) -> usize {
+        unsafe {
+            let bitboard_ptr = self.board.bitboards.as_ptr() as *const __m512i;
+            let bitboards_white_x8 = _mm512_load_si512(bitboard_ptr);
+            let bitboards_black_x8 = _mm512_load_si512(bitboard_ptr.add(1));
+
+            let sq_bit_x8 = _mm512_set1_epi64(sq_mask as i64);
+
+            let white_cmp_mask = _mm512_test_epi64_mask(sq_bit_x8, bitboards_white_x8);
+            let black_cmp_mask = _mm512_test_epi64_mask(sq_bit_x8, bitboards_black_x8);
+
+            let has_white_mask = ((white_cmp_mask == 0) as u32).wrapping_sub(1);
+            let has_black_mask = ((black_cmp_mask == 0) as u32).wrapping_sub(1);
+
+            ((white_cmp_mask.trailing_zeros() & has_white_mask)
+                | ((black_cmp_mask.trailing_zeros() + 8) & has_black_mask)) as usize
+        }
+    }
+
+    #[inline(always)]
     pub fn piece_at(&self, sq_index: u8) -> usize {
         unsafe { *self.spt.get_unchecked(sq_index as usize) as usize }
     }
@@ -1539,6 +1575,28 @@ impl ChessGame {
                     "Spt mismatch after move {}",
                     util::move_string_dbg(mv),
                 );
+                for i in 0..64 {
+                    let sq_mask = 1u64 << i;
+                    let piece_id = self.piece_at_slow(sq_mask);
+
+                    let piece_at_side_avx512 = self
+                        .piece_at_side_avx512(sq_mask, piece_id > PieceIndex::WhitePawn as usize);
+                    let piece_at_avx512 = self.piece_at_avx512(sq_mask);
+                    assert!(
+                        piece_at_side_avx512 == piece_id,
+                        "Piece at mismatch after move {}: expected {}, got {}",
+                        util::move_string_dbg(mv),
+                        piece_id,
+                        piece_at_side_avx512
+                    );
+                    assert!(
+                        piece_at_avx512 == piece_id,
+                        "Piece at mismatch after move {}: expected {}, got {}",
+                        util::move_string_dbg(mv),
+                        piece_id,
+                        piece_at_avx512
+                    );
+                }
                 assert!(
                     self.material == self.calc_material(),
                     "Material mismatch after move {}: {:?} vs {:?}",

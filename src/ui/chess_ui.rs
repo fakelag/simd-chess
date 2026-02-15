@@ -1,5 +1,5 @@
 use crate::{
-    engine::*,
+    engine::{tables::Tables, *},
     matchmaking::{
         self,
         matchmaking::{Matchmaking, NEXT_MATCH_DELAY_SECONDS, VersusState},
@@ -233,6 +233,10 @@ impl ChessUi {
             input_use_opening_book: true,
         };
 
+        s.matchmaking
+            .load_fen("k7/3r4/8/8/3B4/8/8/3KB1q1 b - - 0 4")
+            .unwrap();
+
         s.matchmaking.set_go_params(&s.input_goparams.buf);
 
         s
@@ -376,15 +380,31 @@ impl ChessUi {
 
                                 let hover_mask = if let Some(hovering_sq_index) = hovering_sq_index
                                 {
-                                    // let file = (0x101010101010101 << 8) << hovering_sq_index;
-                                    // let file_left = (file >> 1) & tables::EX_H_FILE;
-                                    // let file_right = (file << 1) & tables::EX_A_FILE;
-                                    // file | file_left | file_right
-                                    let file = (0x101010101010101u64)
-                                        .wrapping_shr((64 - hovering_sq_index) as u32);
-                                    let file_left = (file >> 1) & tables::EX_H_FILE;
-                                    let file_right = (file << 1) & tables::EX_A_FILE;
-                                    file | file_left | file_right
+                                    let bitboards = self.matchmaking.board.bitboards();
+
+                                    let black_board =
+                                        bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
+                                    let white_board =
+                                        bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
+
+                                    let p = crate::search::see::calc_pinnings(
+                                        self.matchmaking.board.b_move(),
+                                        &self.matchmaking.board,
+                                        black_board,
+                                        white_board,
+                                    );
+
+                                    println!("pinned: {:064b}", p.pinned);
+                                    for sq in 0..64 {
+                                        if p.pinners & (1 << sq) != 0 {
+                                            println!(
+                                                "Square {} pinned piece sq: {}",
+                                                sq, p.relations[sq]
+                                            );
+                                        }
+                                    }
+
+                                    p.pinners
                                 } else {
                                     0
                                 };
@@ -394,9 +414,9 @@ impl ChessUi {
                                         let square = &self.squares[rank * 8 + file];
                                         square.draw_highlights(ui, &ctx.textures);
 
-                                        // if (1 << square.sq_bit_index) & hover_mask != 0 {
-                                        //     square.draw_move_indicator(ui);
-                                        // }
+                                        if (1 << square.sq_bit_index) & hover_mask != 0 {
+                                            square.draw_move_indicator(ui);
+                                        }
                                     }
                                 }
                             });

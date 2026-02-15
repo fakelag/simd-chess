@@ -100,7 +100,7 @@ impl SquareUi {
         self.reset_moving();
         self.mouse_xy = ui.io().mouse_pos;
 
-        self.sq_piece = chess_v2::PieceIndex::from(board.piece_at(self.sq_bit_index));
+        self.sq_piece = chess_v2::PieceIndex::from(board.piece_at_avx512(1 << self.sq_bit_index));
 
         self.is_hovering = ui.is_mouse_hovering_rect(self.sq_min, self.sq_max);
 

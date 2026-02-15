@@ -383,12 +383,13 @@ impl<'a> PgnParser<'a> {
 
                         if is_capture
                             && (mv & chess_v2::MV_FLAGS) != chess_v2::MV_FLAG_EPCAP
-                            && self.board.piece_at(dst_sq) == PieceIndex::WhiteNullPiece as usize
+                            && self.board.piece_at_avx512(1 << dst_sq)
+                                == PieceIndex::WhiteNullPiece as usize
                         {
                             continue;
                         }
 
-                        let sq_piece = self.board.piece_at(src_sq);
+                        let sq_piece = self.board.piece_at_avx512(1 << src_sq);
 
                         if sq_piece != piece as usize {
                             continue;
