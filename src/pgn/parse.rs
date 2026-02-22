@@ -2,7 +2,7 @@ use std::io::Read;
 
 use crate::{
     engine::{chess_v2::ChessGame, tables},
-    pgn::moves,
+    pgn::parsemoves,
 };
 
 pub const CHUNK_SIZE: usize = 1024 * 1024 * 4; // 4 MB
@@ -154,7 +154,7 @@ impl PgnGame {
 
         // println!("Parsing moves: {}", moves_str);
 
-        let result = moves::parse_moves(moves_str, &mut board.clone(), tables, moves);
+        let result = parsemoves::parse_moves(moves_str, &mut board.clone(), tables, moves);
         Some(result)
     }
 }

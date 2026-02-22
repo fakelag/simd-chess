@@ -350,9 +350,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
             std::hint::assert_unchecked(move_count < 248);
         }
 
-        // OG: 22400086 | Average search time over 5 iterations: 7659 Mcycles | ~1563.70, ~1537.74
-        // V1: 20674345 | Average search time over 5 iterations: 6909 Mcycles | ~1527.33, ~1558.93 | Elo vs OG: 13.47 +/- 8.78
-
         let bitboards = board.bitboards();
         let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
         let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
@@ -383,39 +380,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
             } else {
                 false
             };
-
-            // const WEIGHT_TABLE_ABS_SMALL: [i16; PieceIndex::PieceIndexMax as usize] = [
-            //     0,
-            //     WEIGHT_KING_I8 as i16,
-            //     WEIGHT_QUEEN_I8 as i16,
-            //     WEIGHT_ROOK_I8 as i16,
-            //     WEIGHT_BISHOP_I8 as i16,
-            //     WEIGHT_KNIGHT_I8 as i16,
-            //     WEIGHT_PAWN_I8 as i16,
-            //     0,
-            //     0,
-            //     WEIGHT_KING_I8 as i16,
-            //     WEIGHT_QUEEN_I8 as i16,
-            //     WEIGHT_ROOK_I8 as i16,
-            //     WEIGHT_BISHOP_I8 as i16,
-            //     WEIGHT_KNIGHT_I8 as i16,
-            //     WEIGHT_PAWN_I8 as i16,
-            //     0,
-            // ];
-
-            // let see_score = if mv & chess_v2::MV_FLAG_CAP != 0 {
-            //     see::static_exchange_eval(
-            //         &WEIGHT_TABLE_ABS_SMALL,
-            //         tables,
-            //         board,
-            //         black_board,
-            //         white_board,
-            //         piece_board,
-            //         mv,
-            //     )
-            // } else {
-            //     0
-            // };
 
             move_list[i] =
                 self.score_move(mv, i as u8, board.spt(), history_moves, cap_see_threshold);
@@ -469,7 +433,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         mv_index: u8,
         spt: &[u8; 64],
         history_moves: &[[i16; 64]; 16],
-        // see_score: eval::Eval,
         cap_see_threshold: bool,
     ) -> u32 {
         macro_rules! score {
@@ -528,14 +491,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         } else {
             mvvlva_score + Self::SORT_BAD_CAPTURES_BASE
         };
-
-        // let final_score = if see_score >= 0 {
-        //     Self::SORT_GOOD_CAPTURES_BASE
-        //         + (see_score as u16).min(Self::SORT_GOOD_CAPTURES_RANGE - 1)
-        // } else {
-        //     Self::SORT_BAD_CAPTURES_BASE
-        //         + ((31 + see_score) as u16).min(Self::SORT_BAD_CAPTURES_RANGE - 1)
-        // };
 
         score!(final_score)
     }

@@ -3,7 +3,7 @@ use std::io::BufRead;
 use crate::{
     engine::{chess_v2, tables},
     matchmaking::matchmaking::PositionFeeder,
-    pgn::moves::parse_moves,
+    pgn::parsemoves::parse_moves,
     util,
 };
 

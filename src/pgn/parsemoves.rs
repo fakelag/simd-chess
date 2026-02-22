@@ -494,7 +494,7 @@ pub fn parse_moves<'a>(
 mod tests {
     use crate::{
         engine::{chess_v2, tables},
-        pgn::moves::parse_moves,
+        pgn::parsemoves::parse_moves,
         util,
     };
 
