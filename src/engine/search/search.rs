@@ -72,8 +72,6 @@ pub struct Search<'a> {
     pv_length: usize,
     pv_trace: bool,
 
-    move_list: [u16; 256],
-
     tt: TranspositionTable,
     rt: RepetitionTable,
     et: EvalTable,
@@ -82,9 +80,6 @@ pub struct Search<'a> {
     params: Box<SearchParams>,
 
     score: Eval,
-    b_cut_count: u64,
-    b_cut_null_count: u64,
-    a_raise_count: u64,
     node_count: u64,
     quiet_nodes: u64,
     quiet_depth: u32,
@@ -183,15 +178,11 @@ impl<'a> Search<'a> {
             nnue,
             sig: None,
             chess: chess_v2::ChessGame::new(),
-            move_list: [0; 256],
             params: Box::new(params),
             tables,
             quiet_nodes: 0,
             quiet_depth: 0,
             node_count: 0,
-            a_raise_count: 0,
-            b_cut_count: 0,
-            b_cut_null_count: 0,
             ply: 0,
             is_stopping: false,
             score: -SCORE_INF,
@@ -229,9 +220,6 @@ impl<'a> Search<'a> {
         self.quiet_depth = 0;
         self.score = -SCORE_INF;
         self.ply = 0;
-        self.b_cut_count = 0;
-        self.b_cut_null_count = 0;
-        self.a_raise_count = 0;
         self.depth = 0;
 
         for i in 0..PV_DEPTH {
@@ -293,18 +281,6 @@ impl<'a> Search<'a> {
         &self.pv[0..self.pv_length]
     }
     #[inline(always)]
-    pub fn b_cut_count(&self) -> u64 {
-        self.b_cut_count
-    }
-    #[inline(always)]
-    pub fn b_cut_null_count(&self) -> u64 {
-        self.b_cut_null_count
-    }
-    #[inline(always)]
-    pub fn a_raise_count(&self) -> u64 {
-        self.a_raise_count
-    }
-    #[inline(always)]
     pub fn get_depth(&self) -> u8 {
         self.depth
     }
@@ -354,25 +330,12 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        // debug_assert_eq!(
-        //     self.nnue.acc,
-        //     {
-        //         let mut expected_pair = nnue::AccumulatorPair::new();
-        //         expected_pair.load(&self.chess, &self.nnue.net);
-        //         expected_pair
-        //     },
-        //     "NNUE accumulator mismatch at depth {}, ply {}",
-        //     depth,
-        //     self.ply
-        // );
-
         // Cut 2 plys before max PV depth since the previous call
         // can't copy over PV moves beyond this point
         let search_done = self.ply >= PV_DEPTH as u8 - 2 || depth == 0;
         let apply_pruning = !self.pv_trace && ply > 0;
 
         let mut pv_move = 0; // Null move
-        // let mut tt_move = 0; // Null move
 
         let mut tt_move_index = 0xFFu8;
         let mut bound_type = BoundType::UpperBound;
@@ -428,7 +391,7 @@ impl<'a> Search<'a> {
             }
 
             // Null move pruning
-            if depth >= 3 && !self.is_endgame() {
+            if depth >= 3 && self.chess.non_pawn_mat()[self.chess.b_move() as usize] > 0 {
                 let ep_square = self.chess.make_null_move(self.tables);
 
                 let r = 2 + depth / 3;
@@ -439,22 +402,11 @@ impl<'a> Search<'a> {
 
                 self.chess.rollback_null_move(ep_square, self.tables);
 
-                // debug_assert_eq!(
-                //     self.nnue.acc,
-                //     {
-                //         let mut expected_pair = nnue::AccumulatorPair::new();
-                //         expected_pair.load(&self.chess, &self.nnue.net);
-                //         expected_pair
-                //     },
-                //     "NNUE accumulator mismatch after null move",
-                // );
-
                 if self.is_stopping {
                     return 0;
                 }
 
                 if score >= beta {
-                    self.b_cut_null_count += 1;
                     return score;
                 }
             }
@@ -462,29 +414,6 @@ impl<'a> Search<'a> {
 
         self.rt
             .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
-
-        // let black_board = self
-        //     .chess
-        //     .bitboards()
-        //     .iter()
-        //     .skip(8)
-        //     .fold(0, |acc, &bb| acc | bb);
-        // let white_board = self
-        //     .chess
-        //     .bitboards()
-        //     .iter()
-        //     .take(8)
-        //     .fold(0, |acc, &bb| acc | bb);
-        // let mut piece_board: [u64; 8] = [0u64; 8];
-        // self.chess
-        //     .bitboards()
-        //     .iter()
-        //     .take(8)
-        //     .zip(self.chess.bitboards().iter().skip(8))
-        //     .enumerate()
-        //     .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
-
-        // let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
 
         let mut move_list = [0u32; 256];
         let mut original_move_list = [0u16; 256];
@@ -507,14 +436,6 @@ impl<'a> Search<'a> {
                 &mut move_list,
             )
         };
-
-        // let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
-        // let move_count = moves.gen_moves(
-        //     &self.chess,
-        //     &self.history_moves,
-        //     &mut original_move_list,
-        //     &mut move_list,
-        // );
 
         let mut best_score = -SCORE_INF;
         let mut best_move = 0;
@@ -625,7 +546,6 @@ impl<'a> Search<'a> {
                 continue;
             }
 
-            self.a_raise_count += 1;
             bound_type = BoundType::Exact;
             alpha = score;
 
@@ -730,7 +650,6 @@ impl<'a> Search<'a> {
                     BoundType::LowerBound,
                 );
                 self.rt.pop_position();
-                self.b_cut_count += 1;
                 return score;
             }
         }
@@ -759,8 +678,6 @@ impl<'a> Search<'a> {
             // Stalemate
             return 0;
         }
-
-        // let static_eval = *static_eval.get_or_init(|| self.evaluate());
 
         self.tt.store(
             self.chess.zobrist_key(),
@@ -853,12 +770,10 @@ impl<'a> Search<'a> {
                 best_score = score;
 
                 if score >= beta {
-                    // self.b_cut_count += 1;
                     return score;
                 }
 
                 if score > alpha {
-                    // self.a_raise_count += 1;
                     alpha = score;
                 }
             }
@@ -1006,19 +921,43 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    pub fn is_endgame(&self) -> bool {
-        let material = self.chess.material();
-        ((material[0] & (!1023)) | (material[1] & (!1023))) == 0
-    }
-
-    #[inline(always)]
     pub fn calc_board_phase(&self) -> f32 {
-        let material = self.chess.material();
+        const MATERIAL_QUEEN: u16 = 700;
+        const MATERIAL_ROOK: u16 = 350;
+        const MATERIAL_BISHOP: u16 = 210;
+        const MATERIAL_KNIGHT: u16 = 210;
+        const MATERIAL_PAWN: u16 = 70;
+        const MATERIAL_TABLE: [u16; 16] = [
+            0, // NullPieceWhite
+            0, // King has no material value
+            MATERIAL_QUEEN as u16,
+            MATERIAL_ROOK as u16,
+            MATERIAL_BISHOP as u16,
+            MATERIAL_KNIGHT as u16,
+            MATERIAL_PAWN as u16,
+            0, // Pad
+            0, // NullPieceBlack
+            0, // King has no material value
+            MATERIAL_QUEEN as u16,
+            MATERIAL_ROOK as u16,
+            MATERIAL_BISHOP as u16,
+            MATERIAL_KNIGHT as u16,
+            MATERIAL_PAWN as u16,
+            0, // Pad
+        ];
+
+        let bitboards = self.chess.bitboards();
+
+        let material: u16 = bitboards
+            .iter()
+            .enumerate()
+            .map(|(i, &bb)| bb.count_ones() as u16 * MATERIAL_TABLE[i])
+            .sum();
 
         const MAT_MAX: u16 = 5320; // 5600 - 4 pawns
         const MAT_MIN: u16 = 280; // minor piece + pawn
 
-        (((material[0] + material[1] + MAT_MIN) as f32) / ((MAT_MAX + MAT_MIN) as f32))
+        (((material + MAT_MIN) as f32) / ((MAT_MAX + MAT_MIN) as f32))
             .max(0.0)
             .min(1.0)
     }

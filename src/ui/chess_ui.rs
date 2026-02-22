@@ -475,17 +475,7 @@ impl ChessUi {
 
                     ui.text(format!("{:016X}", self.matchmaking.board.zobrist_key()));
 
-                    ui.text(format!(
-                        "hm: {}, fm: {}",
-                        self.matchmaking.board.half_moves(),
-                        self.matchmaking.board.full_moves()
-                    ));
-
-                    ui.text(format!(
-                        "mat: {} / {}",
-                        self.matchmaking.board.material()[0],
-                        self.matchmaking.board.material()[1]
-                    ));
+                    ui.text(format!("hm: {}", self.matchmaking.board.half_moves()));
 
                     // ui.text(format!(
                     //     "estimated move count: {}",

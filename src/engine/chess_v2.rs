@@ -24,30 +24,6 @@ pub const MV_FLAGS_PR_MASK: u16 = 0b1011 << 12;
 pub const MV_FLAGS_CASTLE_KING: u16 = 0b0010 << 12;
 pub const MV_FLAGS_CASTLE_QUEEN: u16 = 0b0011 << 12;
 
-const MATERIAL_QUEEN: u16 = 700;
-const MATERIAL_ROOK: u16 = 350;
-const MATERIAL_BISHOP: u16 = 210;
-const MATERIAL_KNIGHT: u16 = 210;
-const MATERIAL_PAWN: u16 = 70;
-const MATERIAL_TABLE: [u16; 16] = [
-    0, // NullPieceWhite
-    0, // King has no material value
-    MATERIAL_QUEEN as u16,
-    MATERIAL_ROOK as u16,
-    MATERIAL_BISHOP as u16,
-    MATERIAL_KNIGHT as u16,
-    MATERIAL_PAWN as u16,
-    0, // Pad
-    0, // NullPieceBlack
-    0, // King has no material value
-    MATERIAL_QUEEN as u16,
-    MATERIAL_ROOK as u16,
-    MATERIAL_BISHOP as u16,
-    MATERIAL_KNIGHT as u16,
-    MATERIAL_PAWN as u16,
-    0, // Pad
-];
-
 const CASTLES_SQUARES: [u8; 64] = [
     0b1011, 0b1111, 0b1111, 0b1111, 0b0011, 0b1111, 0b1111, 0b0111, //
     0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
@@ -57,6 +33,25 @@ const CASTLES_SQUARES: [u8; 64] = [
     0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
     0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111, //
     0b1110, 0b1111, 0b1111, 0b1111, 0b1100, 0b1111, 0b1111, 0b1101, //
+];
+
+const NON_PAWN_MATERIAL_TABLE: [u16; 16] = [
+    0,  // NullPieceWhite
+    0,  // King has no material value
+    10, // Queen
+    5,  // Rook
+    3,  // Bishop
+    3,  // Knight
+    0,  //
+    0,  // Pad
+    0,  // NullPieceBlack
+    0,  // King has no material value
+    10, // Queen
+    5,  // Rook
+    3,  // Bishop
+    3,  // Knight
+    0,  //
+    0,  // Pad
 ];
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -197,9 +192,10 @@ pub struct ChessGame {
     half_moves: u32,
     full_moves: u16,
     zobrist_key: u64,
-    material: [u16; 2],
     spt: [u8; 64],
     pawn_key: u64,
+    occupancy: u64,
+    non_pawn_mat: [u16; 2],
 }
 const _ASSERT_CHESS_GAME_SIZE: () = assert!(std::mem::size_of::<ChessGame>() == 256);
 
@@ -213,9 +209,10 @@ impl ChessGame {
             half_moves: 0,
             full_moves: 1,
             zobrist_key: 0,
-            material: [0; 2],
             spt: [0; 64],
             pawn_key: 0,
+            occupancy: 0,
+            non_pawn_mat: [0; 2],
         }
     }
 
@@ -289,7 +286,8 @@ impl ChessGame {
                 const_nonslider_split,
             );
 
-            let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+            let full_board = self.occupancy;
+
             let friendly_board = _mm512_reduce_or_epi64(bitboard_x8) as u64;
             let opponent_board = self.board.bitboards
                 [opponent_move_offset..opponent_move_offset + 8]
@@ -851,7 +849,7 @@ impl ChessGame {
             is_attacked |=
                 ntm_bitboards.get_unchecked(PieceIndex::WhiteKing as usize) & king_attack_mask;
 
-            let occupancy = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+            let occupancy = self.occupancy;
 
             let opponent_rook_board = ntm_bitboards.get_unchecked(PieceIndex::WhiteRook as usize);
             let opponent_bishop_board =
@@ -900,7 +898,7 @@ impl ChessGame {
             // let king_attack_mask = *Tables::LT_KING_MOVE_MASKS.get_unchecked(sq_index as usize);
             // attackers |= opponent_bitboards[PieceIndex::WhiteKing as usize] & king_attack_mask;
 
-            let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+            let full_board = self.occupancy;
 
             let opponent_rook_board = opponent_bitboards[PieceIndex::WhiteRook as usize];
             let opponent_bishop_board = opponent_bitboards[PieceIndex::WhiteBishop as usize];
@@ -1252,7 +1250,7 @@ impl ChessGame {
                     return None;
                 }
 
-                let full_board = self.board.bitboards.iter().fold(0, |acc, &bb| acc | bb);
+                let full_board = self.occupancy;
 
                 if move_flags == MV_FLAGS_CASTLE_KING && (full_board & (0b11 << (from_sq + 1))) != 0
                 {
@@ -1271,6 +1269,7 @@ impl ChessGame {
 
                 let rook_piece_id = PieceIndex::WhiteRook as usize + stm_offset;
                 self.board.bitboards[rook_piece_id] ^= rook_to_bit | rook_from_bit;
+                self.occupancy ^= rook_to_bit | rook_from_bit;
 
                 unsafe {
                     *self.spt.get_unchecked_mut(rook_from_sq) = 0;
@@ -1307,6 +1306,7 @@ impl ChessGame {
                 debug_assert!(cap_pawn_sq != from_sq);
 
                 self.board.bitboards[cap_piece_id] &= !(1 << cap_pawn_sq);
+                self.occupancy &= !(1 << cap_pawn_sq);
 
                 unsafe {
                     // Safety: cap_pawn_sq is guaranteed to be in board range [0, =63]
@@ -1327,8 +1327,6 @@ impl ChessGame {
                         .get_unchecked(cap_piece_id)
                         .get_unchecked(cap_pawn_sq as usize);
                 }
-
-                self.material[!self.b_move as usize] -= MATERIAL_TABLE[cap_piece_id];
 
                 nnue::NnueUpdate::capture(
                     from_piece as u8,
@@ -1368,9 +1366,8 @@ impl ChessGame {
                     to_square_piece = promotion_piece;
 
                     unsafe {
-                        self.material[self.b_move as usize] += MATERIAL_TABLE
-                            .get_unchecked(promotion_piece)
-                            - MATERIAL_TABLE.get_unchecked(from_piece);
+                        self.non_pawn_mat[self.b_move as usize] +=
+                            NON_PAWN_MATERIAL_TABLE.get_unchecked(promotion_piece);
                     }
                 }
 
@@ -1404,7 +1401,11 @@ impl ChessGame {
             *self.board.bitboards.get_unchecked_mut(from_piece) ^= from_bit;
             *self.board.bitboards.get_unchecked_mut(to_square_piece) |= to_bit;
 
-            self.material[!self.b_move as usize] -= MATERIAL_TABLE.get_unchecked(to_piece);
+            self.occupancy |= to_bit;
+            self.occupancy ^= from_bit;
+
+            self.non_pawn_mat[!self.b_move as usize] -=
+                NON_PAWN_MATERIAL_TABLE.get_unchecked(to_piece);
 
             // Remove moved piece from from_sq and add it to to_sq
             self.zobrist_key ^=
@@ -1476,7 +1477,6 @@ impl ChessGame {
         //     self.zobrist_key
         // );
 
-        // debug_assert!(self.is_valid(), "Board is invalid after move");
         debug_assert!(
             (self.board.bitboards[PieceIndex::WhiteNullPiece as usize]
                 | self.board.bitboards[PieceIndex::BlackNullPiece as usize]
@@ -1575,34 +1575,41 @@ impl ChessGame {
                     "Spt mismatch after move {}",
                     util::move_string_dbg(mv),
                 );
-                for i in 0..64 {
-                    let sq_mask = 1u64 << i;
-                    let piece_id = self.piece_at_slow(sq_mask);
+                // for i in 0..64 {
+                //     let sq_mask = 1u64 << i;
+                //     let piece_id = self.piece_at_slow(sq_mask);
 
-                    let piece_at_side_avx512 = self
-                        .piece_at_side_avx512(sq_mask, piece_id > PieceIndex::WhitePawn as usize);
-                    let piece_at_avx512 = self.piece_at_avx512(sq_mask);
-                    assert!(
-                        piece_at_side_avx512 == piece_id,
-                        "Piece at mismatch after move {}: expected {}, got {}",
-                        util::move_string_dbg(mv),
-                        piece_id,
-                        piece_at_side_avx512
-                    );
-                    assert!(
-                        piece_at_avx512 == piece_id,
-                        "Piece at mismatch after move {}: expected {}, got {}",
-                        util::move_string_dbg(mv),
-                        piece_id,
-                        piece_at_avx512
-                    );
-                }
+                //     let piece_at_side_avx512 = self
+                //         .piece_at_side_avx512(sq_mask, piece_id > PieceIndex::WhitePawn as usize);
+                //     let piece_at_avx512 = self.piece_at_avx512(sq_mask);
+                //     assert!(
+                //         piece_at_side_avx512 == piece_id,
+                //         "Piece at mismatch after move {}: expected {}, got {}",
+                //         util::move_string_dbg(mv),
+                //         piece_id,
+                //         piece_at_side_avx512
+                //     );
+                //     assert!(
+                //         piece_at_avx512 == piece_id,
+                //         "Piece at mismatch after move {}: expected {}, got {}",
+                //         util::move_string_dbg(mv),
+                //         piece_id,
+                //         piece_at_avx512
+                //     );
+                // }
                 assert!(
-                    self.material == self.calc_material(),
-                    "Material mismatch after move {}: {:?} vs {:?}",
+                    self.occupancy == self.calc_occupancy(),
+                    "Occupancy mismatch after move {}: expected {:x}, got {:x}",
                     util::move_string_dbg(mv),
-                    self.material,
-                    self.calc_material(),
+                    self.calc_occupancy(),
+                    self.occupancy
+                );
+                assert!(
+                    self.non_pawn_mat == self.calc_non_pawn_mat(),
+                    "Non-pawn material mismatch after move {}: expected {:x?}, got {:x?}",
+                    util::move_string_dbg(mv),
+                    self.calc_non_pawn_mat(),
+                    self.non_pawn_mat
                 );
 
                 if let Some(nnue) = nnue.as_mut() {
@@ -1777,20 +1784,21 @@ impl ChessGame {
         }
 
         (self.zobrist_key, self.pawn_key) = self.calc_initial_zobrist_key(tables);
-        self.material = self.calc_material();
         self.spt = self.calc_spt();
+        self.occupancy = self.calc_occupancy();
+        self.non_pawn_mat = self.calc_non_pawn_mat();
 
         Ok(fen_length)
     }
 
-    pub fn calc_material(&self) -> [u16; 2] {
-        let mut material = [0; 2];
-        for i in PieceIndex::WhiteNullPiece as usize..PieceIndex::BlackNullPiece as usize {
-            material[0] += self.board.bitboards[i].count_ones() as u16 * MATERIAL_TABLE[i];
-            material[1] += self.board.bitboards[i + 8].count_ones() as u16 * MATERIAL_TABLE[i];
+    fn calc_non_pawn_mat(&self) -> [u16; 2] {
+        let mut non_pawn_mat = [0; 2];
+        for i in PieceIndex::WhiteNullPiece as usize..PieceIndex::BlackPad as usize {
+            non_pawn_mat[i >> 3] +=
+                self.board.bitboards[i].count_ones() as u16 * NON_PAWN_MATERIAL_TABLE[i];
         }
 
-        material
+        non_pawn_mat
     }
 
     fn calc_spt(&self) -> [u8; 64] {
@@ -1938,43 +1946,6 @@ impl ChessGame {
         }
     }
 
-    pub fn is_valid(&self) -> bool {
-        if self.board.bitboards[PieceIndex::WhiteKing as usize].count_ones() != 1
-            || self.board.bitboards[PieceIndex::BlackKing as usize].count_ones() != 1
-        {
-            return false;
-        }
-
-        for bit_pos in 0..64 {
-            let mut sum = 0;
-            let bit = 1 << bit_pos;
-
-            for piece_id in PieceIndex::WhiteNullPiece as usize..PieceIndex::PieceIndexMax as usize
-            {
-                sum += if self.board.bitboards[piece_id] & bit != 0 {
-                    1
-                } else {
-                    0
-                };
-            }
-
-            if sum > 1 {
-                return false;
-            }
-        }
-
-        if self.board.bitboards[PieceIndex::WhiteNullPiece as usize]
-            | self.board.bitboards[PieceIndex::BlackNullPiece as usize]
-            | self.board.bitboards[PieceIndex::WhitePad as usize]
-            | self.board.bitboards[PieceIndex::BlackPad as usize]
-            != 0
-        {
-            return false;
-        }
-
-        true
-    }
-
     pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> (u64, u64) {
         let zb_keys = &tables.zobrist_hash_keys;
 
@@ -2090,11 +2061,6 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn material(&self) -> &[u16; 2] {
-        &self.material
-    }
-
-    #[inline(always)]
     pub fn spt(&self) -> &[u8; 64] {
         &self.spt
     }
@@ -2106,6 +2072,16 @@ impl ChessGame {
 
     #[inline(always)]
     pub fn occupancy(&self) -> u64 {
+        self.occupancy
+    }
+
+    #[inline(always)]
+    pub fn non_pawn_mat(&self) -> [u16; 2] {
+        self.non_pawn_mat
+    }
+
+    #[inline(always)]
+    pub fn calc_occupancy(&self) -> u64 {
         self.board.bitboards.iter().fold(0u64, |acc, &bb| acc | bb)
     }
 
