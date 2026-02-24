@@ -129,8 +129,6 @@ mod tests {
                     / search_engine.num_nodes_searched() as f64)
                     * 100.0
             );
-            println!("β-cutoff count: {}", search_engine.b_cut_count());
-            println!("α-raise count: {}", search_engine.a_raise_count());
             println!("depth: {}", search_engine.get_depth());
             println!("q-depth: {}", search_engine.get_quiet_depth());
             // println!("TT usage: {:.02}%", tt_stats.fill_percentage * 100.0);
