@@ -426,6 +426,98 @@ impl Tables {
         result
     };
 
+    pub const LT_NON_SLIDER_THREAT_MASKS: [u64; 64] = const {
+        let mut moves = [0; 64];
+        let mut square = 0;
+
+        while square < 64 {
+            moves[square] |= Self::LT_KING_MOVE_MASKS[square];
+            moves[square] |= Self::LT_KNIGHT_MOVE_MASKS[square];
+            moves[square] |= Self::LT_PAWN_CAPTURE_MASKS[Side::White as usize][square];
+            moves[square] |= Self::LT_PAWN_CAPTURE_MASKS[Side::Black as usize][square];
+
+            moves[square] &= !(1 << square);
+
+            square += 1;
+        }
+
+        moves
+    };
+
+    pub const LT_SLIDER_THREAT_MASKS: [u64; 64] = const {
+        let mut moves = [0; 64];
+        let mut square = 0;
+
+        while square < 64 {
+            // Files + ranks
+            {
+                let mut rank = 0;
+                let file = square as u64 % 8;
+
+                while rank < 8 {
+                    moves[square] |= 1 << (rank * 8 + file);
+                    rank += 1;
+                }
+
+                let rank = square as u64 / 8;
+                let mut file = 0;
+
+                while file < 8 {
+                    moves[square] |= 1 << (rank * 8 + file);
+                    file += 1;
+                }
+            }
+
+            // Diagonals + anti-diagonals
+            {
+                let rank = square as u64 / 8;
+                let file = square as u64 % 8;
+
+                let mut rank_it = rank as i64;
+                let mut file_it = file as i64;
+
+                while rank_it < 8 && file_it >= 0 {
+                    moves[square] |= 1 << (rank_it * 8 + file_it);
+                    file_it -= 1;
+                    rank_it += 1;
+                }
+
+                rank_it = rank as i64;
+                file_it = file as i64;
+
+                while rank_it < 8 && file_it < 8 {
+                    moves[square] |= 1 << (rank_it * 8 + file_it);
+                    file_it += 1;
+                    rank_it += 1;
+                }
+
+                rank_it = rank as i64;
+                file_it = file as i64;
+
+                while rank_it >= 0 && file_it < 8 {
+                    moves[square] |= 1 << (rank_it * 8 + file_it);
+                    file_it += 1;
+                    rank_it -= 1;
+                }
+
+                rank_it = rank as i64;
+                file_it = file as i64;
+
+                while rank_it >= 0 && file_it >= 0 {
+                    moves[square] |= 1 << (rank_it * 8 + file_it);
+                    file_it -= 1;
+                    rank_it -= 1;
+                }
+            }
+
+            moves[square] &= !(1 << square);
+
+            square += 1;
+        }
+
+        moves
+    };
+
     #[cfg_attr(any(), rustfmt::skip)]
     pub const EVAL_TABLES_INV_I8_OLD: [[i8; 64]; util::PieceId::PieceMax as usize + 2] = const {
         /*

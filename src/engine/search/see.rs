@@ -3,7 +3,9 @@ use std::arch::x86_64::*;
 use crate::{
     engine::{
         chess_v2::{ChessGame, MV_FLAG_EPCAP, MV_FLAG_PROMOTION, MV_FLAGS, PieceIndex},
-        tables,
+        search::eval,
+        sorting::u32::sort_256u32_desc_avx512,
+        tables::{self, Tables},
     },
     util,
 };
@@ -25,11 +27,6 @@ impl Pinning {
     #[inline(always)]
     pub fn update_pinned_mask(&self, attacker_sq_mask: u64, out_pinned: &mut u64) {
         let is_pinner_mask = ((attacker_sq_mask & self.pinners == 0) as u64).wrapping_sub(1);
-        println!(
-            "lol {:064b} - {}",
-            is_pinner_mask,
-            self.relations[attacker_sq_mask.trailing_zeros() as usize]
-        );
         let pin_removed_mask = (1u64
             .wrapping_shl(self.relations[attacker_sq_mask.trailing_zeros() as usize] as u32))
             & is_pinner_mask;
@@ -196,11 +193,6 @@ pub fn static_exchange_eval(
     loop {
         stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
 
-        println!(
-            "Pinned pieces: {:064b} (stm={}), stm_attackers: {:064b}",
-            pinned[b_move as usize], b_move, stm_attackers
-        );
-
         stm_attackers &= !pinned[b_move as usize];
 
         // if let Some(pins) = &pins {
@@ -216,12 +208,6 @@ pub fn static_exchange_eval(
         unsafe {
             std::hint::assert_unchecked(attacker_piece < 8);
         }
-
-        println!(
-            "[SEE] Attacker piece {:?} on square {}",
-            PieceIndex::from(attacker_piece as usize),
-            util::square_name(attacker_sq_mask.trailing_zeros() as u8),
-        );
 
         piece_board[last_moved_piece as usize] ^= to_sq_mask;
         piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
@@ -473,6 +459,142 @@ pub fn see_threshold(
     is_pass
 }
 
+#[inline(always)]
+pub fn see_threshold_sim(
+    score_table: &[i16; 16],
+    tables: &tables::Tables,
+    board: &ChessGame,
+    mv: u16,
+    threshold: i16,
+) -> bool {
+    let mut board = board.clone();
+
+    let from_sq = (mv & 0x3F) as usize;
+    let to_sq = ((mv >> 6) & 0x3F) as usize;
+    let to_sq_mask = 1u64 << to_sq;
+
+    let from_piece = board.spt()[from_sq] & 7;
+
+    let original_moved_piece = if mv & MV_FLAG_PROMOTION != 0 {
+        PieceIndex::WhiteQueen as u8
+    } else {
+        from_piece
+    };
+
+    let to_piece = if mv & MV_FLAGS == MV_FLAG_EPCAP {
+        PieceIndex::WhitePawn as u8
+    } else {
+        board.spt()[to_sq]
+    };
+
+    unsafe {
+        std::hint::assert_unchecked(to_piece < 16);
+    }
+
+    // 1. First capture:
+    // `exchange` tracks the current capture sequence value offset to the
+    // given threshold. It starts from the score of the initially captured
+    // piece (if any) minus the threshold. This means that the exchange will
+    // track the net gain/loss of the capture sequence with respect to the
+    // threshold value
+    let mut exchange = score_table[to_piece as usize] - threshold;
+
+    if exchange < 0 {
+        // Captured piece is not valuable enough to reach the threshold
+        return false;
+    }
+
+    // 2. Possible recapture:
+    // Update to net gain/loss after initial stm's piece has been recaptured
+    exchange = score_table[original_moved_piece as usize] - exchange;
+
+    if exchange <= 0 {
+        // Capturing piece can be lost while still reaching the threshold
+        return true;
+    }
+
+    unsafe {
+        if !board.make_move(mv, tables) || board.in_check(tables, !board.b_move()) {
+            // Illegal move, can't reach threshold
+            return false;
+        }
+    }
+
+    // 3. Start calculating capture sequence alternating sides.
+    // The opponent is stm so pass starts as true since the initial
+    // capture is checked to be valuable enough
+    let mut is_pass = true;
+
+    pub const PIECE_VALUES_LVA: [u16; PieceIndex::PieceIndexMax as usize] = [
+        0, 0, 1, 2, 3, 3, 4, 0, //
+        0, 0, 1, 2, 3, 3, 4, 0, //
+    ];
+
+    let mut move_list = [0u16; 256];
+    loop {
+        let mut valid_list = [0u32; 256];
+        let move_count =
+            board.gen_moves_with_masks_avx512::<true, true>(&mut move_list, to_sq_mask);
+
+        std::hint::likely(move_count < 8);
+
+        move_list[0..move_count]
+            .iter()
+            .enumerate()
+            .for_each(|(index, mv)| {
+                valid_list[index] = {
+                    let src_sq = (mv & 0x3F) as usize;
+                    let mut move_score =
+                        ((PIECE_VALUES_LVA[board.spt()[src_sq] as usize] as u64) << 16) as u32;
+                    move_score |= *mv as u32;
+                    move_score
+                };
+            });
+
+        sort_256u32_desc_avx512(&mut valid_list, move_count);
+
+        let board_copy = board.clone();
+
+        let mut lva_capture_move = None;
+        // let mut attacker_piece = 0;
+
+        for mv in valid_list[0..move_count].iter() {
+            unsafe {
+                // attacker_piece = board.spt()[(mv & 0x3F) as usize] & 7;
+                if !board.make_move(*mv as u16, tables) || board.in_check(tables, !board.b_move()) {
+                    board = board_copy;
+                    continue;
+                }
+                lva_capture_move = Some(*mv as u16);
+                break;
+            }
+        }
+
+        match lva_capture_move {
+            Some(_) => {}
+            None => break,
+        };
+
+        let attacker_piece = board.spt()[((mv >> 6) & 0x3F) as usize] & 7;
+
+        is_pass = !is_pass;
+
+        // 4. Confirmed recapture, update exchange to net gain/loss
+        // if the attacking piece would get captured in turn
+        exchange = score_table[attacker_piece as usize] - exchange;
+
+        if attacker_piece == PieceIndex::WhiteKing as u8 {
+            break;
+        }
+
+        if exchange < is_pass as i16 {
+            break;
+        }
+    }
+
+    is_pass
+}
+
 /// Safety: sq_index must be < 64
 pub unsafe fn calc_slider_attacks<const IS_ROOK: bool>(
     tables: &tables::Tables,
@@ -605,13 +727,6 @@ mod tests {
 
         exchanges[0] = score_table[to_piece as usize];
 
-        // println!(
-        //     "[NAIVE] To piece {:?} on square {}.Mv={}",
-        //     PieceIndex::from(to_piece as usize),
-        //     util::square_name(to_sq as u8),
-        //     util::move_string_dbg(mv),
-        // );
-
         if !unsafe { board.make_move(mv, tables) } {
             return None;
         }
@@ -619,8 +734,6 @@ mod tests {
         if board.in_check(tables, !board.b_move()) {
             return None;
         }
-
-        // let mut banned_moves = std::collections::BTreeSet::new();
 
         loop {
             let mut move_list = [0u16; 256];
@@ -646,13 +759,6 @@ mod tests {
 
             let moved_piece = board.spt()[(lva_capture_move & 0x3F) as usize] & 7;
 
-            // println!(
-            //     "[NAIVE-INNER] Making move {:?}",
-            //     util::move_string_dbg(lva_capture_move)
-            // );
-
-            // let board_copy = board.clone();
-
             if !unsafe { board.make_move(lva_capture_move, tables) } {
                 panic!("Failed to make LVA capture move in SEE");
             }
@@ -660,21 +766,122 @@ mod tests {
             if board.in_check(tables, !board.b_move()) {
                 if moved_piece == PieceIndex::WhiteKing as u8 {
                     // Revert king capture if there are still attackers left
-                    // exchange_index -= 1;
                     break;
                 }
-                // banned_moves.insert(lva_capture_move);
-                // board = board_copy;
-                // println!("[NAIVE-INNER] Move was illegal due to check, reverting.");
-                // continue;
             }
-
-            // banned_moves.clear();
 
             exchanges[exchange_index] =
                 score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
             exchange_index += 1;
             last_moved_piece = moved_piece;
+        }
+
+        while exchange_index > 1 {
+            exchange_index -= 1;
+
+            if exchanges[exchange_index - 1] > -exchanges[exchange_index] {
+                exchanges[exchange_index - 1] = -exchanges[exchange_index];
+            }
+        }
+
+        Some(exchanges[0])
+    }
+
+    pub fn see_naive_pins(
+        score_table: &[Eval; 16],
+        tables: &tables::Tables,
+        board: &ChessGame,
+        mv: u16,
+    ) -> Option<Eval> {
+        pub const PIECE_VALUES_LVA: [u16; PieceIndex::PieceIndexMax as usize] = [
+            0, 0, 1, 2, 3, 3, 4, 0, //
+            0, 0, 1, 2, 3, 3, 4, 0, //
+        ];
+
+        let mut board = board.clone();
+
+        let from_sq = (mv & 0x3F) as usize;
+        let to_sq = ((mv >> 6) & 0x3F) as usize;
+
+        let to_piece = if mv & MV_FLAGS == MV_FLAG_EPCAP {
+            PieceIndex::WhitePawn as u8
+        } else {
+            board.spt()[to_sq]
+        };
+
+        let mut exchanges = [0i16; 32];
+        let mut exchange_index = 1;
+        let mut last_moved_piece = if mv & MV_FLAG_PROMOTION != 0 {
+            PieceIndex::WhiteQueen as u8
+        } else {
+            board.spt()[from_sq] & 7
+        };
+
+        exchanges[0] = score_table[to_piece as usize];
+
+        if !unsafe { board.make_move(mv, tables) } {
+            return None;
+        }
+
+        if board.in_check(tables, !board.b_move()) {
+            return None;
+        }
+
+        loop {
+            let mut move_list = [0u16; 256];
+            let mut valid_list = [0u32; 256];
+            let mut valid_moves = 0;
+
+            let board_copy = board.clone();
+
+            let move_count = board.gen_moves_avx512::<true>(&mut move_list);
+
+            move_list
+                .iter()
+                .take(move_count)
+                .filter(|&&mv| ((mv >> 6) & 0x3F) as usize == to_sq)
+                .for_each(|mv| {
+                    valid_list[valid_moves] = {
+                        let src_sq = (mv & 0x3F) as usize;
+                        let mut move_score =
+                            ((PIECE_VALUES_LVA[board.spt()[src_sq] as usize] as u64) << 16) as u32;
+                        move_score |= *mv as u32;
+                        move_score
+                    };
+                    valid_moves += 1;
+                });
+
+            let valid_list = &mut valid_list[0..valid_moves];
+            valid_list.sort_by(|a, b| b.cmp(a));
+
+            let mut lva_capture_move = None;
+            // let mut attacker_piece = 0;
+
+            for mv in valid_list.iter() {
+                unsafe {
+                    // attacker_piece = board.spt()[(mv & 0x3F) as usize] & 7;
+                    if !board.make_move(*mv as u16, tables)
+                        || board.in_check(tables, !board.b_move())
+                    {
+                        board = board_copy;
+                        continue;
+                    }
+                    lva_capture_move = Some(*mv as u16);
+                    break;
+                }
+            }
+
+            match lva_capture_move {
+                Some(_) => {}
+                None => break,
+            };
+
+            let attacker_piece = board.spt()[((mv >> 6) & 0x3F) as usize] & 7;
+
+            exchanges[exchange_index] =
+                score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
+            exchange_index += 1;
+            last_moved_piece = attacker_piece;
         }
 
         while exchange_index > 1 {
@@ -722,10 +929,12 @@ mod tests {
                 None,
             );
 
+            // let result = see_threshold_sim(&WEIGHT_TABLE_ABS, &tables, &board, mv, *threshold);
+
             assert_eq!(
                 result, *expected,
-                "SEE threshold test '{}' failed: expected {}, got {} (eval {}, threshold {})",
-                name, expected, result, real_eval, threshold
+                "SEE threshold test '{}' failed: expected {}, got {} (eval {}, threshold {})\nFen={}.Mv={}",
+                name, expected, result, real_eval, threshold, board.gen_fen(), util::move_string_dbg(mv)
             );
         });
     }
@@ -871,12 +1080,6 @@ mod tests {
             }
 
             *board = board_copy.clone();
-
-            // println!(
-            //     "Fuzzing SEE on move {} in position {}",
-            //     util::move_string_dbg(mv),
-            //     board.gen_fen()
-            // );
 
             let bitboards = board.bitboards();
 
@@ -1368,5 +1571,69 @@ mod tests {
             expected, see_score
         );
     }
-    // @todo - Pins for threshold SEE & more test cases
+
+    fn see_sim_fuzz(board: &mut ChessGame, tables: &tables::Tables, depth: u8) {
+        if depth == 0 {
+            return;
+        }
+
+        let mut move_list = [0u16; 256];
+        let move_count = board.gen_moves_avx512::<false>(&mut move_list);
+
+        let board_copy = board.clone();
+
+        for &mv in move_list.iter().take(move_count) {
+            if !unsafe { board.make_move(mv, tables) } {
+                continue;
+            }
+
+            if board.in_check(tables, !board.b_move()) {
+                *board = board_copy.clone();
+                continue;
+            }
+
+            see_sim_fuzz(board, tables, depth - 1);
+
+            *board = board_copy.clone();
+
+            let naive_eval = see_naive_pins(&WEIGHT_TABLE_ABS, tables, board, mv).unwrap();
+
+            [
+                ("equal", naive_eval, true),
+                ("greater (-1)", naive_eval - 1, true),
+                ("greater (-500)", naive_eval - 500, true),
+                ("less (+1)", naive_eval + 1, false),
+                ("less (+500)", naive_eval + 500, false),
+            ]
+            .iter()
+            .for_each(|(name, threshold, expected)| {
+                let result = see_threshold_sim(&WEIGHT_TABLE_ABS, &tables, &board, mv, *threshold);
+
+                assert_eq!(
+                    result, *expected,
+                    "SEE threshold test '{}' failed: expected {}, got {} (eval {}, threshold {})\nFen={}.Mv={}",
+                    name, expected, result, naive_eval, threshold, board.gen_fen(), util::move_string_dbg(mv)
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn test_see_sim_fuzz() {
+        let test_fens = [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1",
+            "2r5/1P4pk/p2p1b1p/5b1n/BB3p2/2R2p2/P1P2P2/4RK2 w - - 0 1",
+            "1R2r2k/5bp1/3Q2p1/2p5/4P2P/1p6/2r1n1BK/8 b - - 0 1",
+        ];
+
+        for fen in test_fens {
+            let tables = tables::Tables::new();
+            let mut board = chess_v2::ChessGame::new();
+
+            assert!(board.load_fen(fen, &tables).is_ok());
+
+            see_sim_fuzz(&mut board, &tables, 4);
+        }
+    }
 }

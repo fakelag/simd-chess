@@ -218,6 +218,15 @@ impl ChessGame {
 
     #[inline(always)]
     pub fn gen_moves_avx512<const CAPTURE_ONLY: bool>(&self, move_list: &mut [u16]) -> usize {
+        self.gen_moves_with_masks_avx512::<CAPTURE_ONLY, false>(move_list, !0)
+    }
+
+    #[inline(always)]
+    pub fn gen_moves_with_masks_avx512<const CAPTURE_ONLY: bool, const USE_MASK: bool>(
+        &self,
+        move_list: &mut [u16],
+        dst_mask: u64,
+    ) -> usize {
         let mut mv_cursor = 0usize;
 
         unsafe {
@@ -426,6 +435,12 @@ impl ChessGame {
                         _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
                 }
 
+                if USE_MASK {
+                    let dst_mask_x8 = _mm512_set1_epi64(dst_mask as i64);
+                    slider_moves_x8 = _mm512_and_epi64(slider_moves_x8, dst_mask_x8);
+                    non_slider_moves_x8 = _mm512_and_epi64(non_slider_moves_x8, dst_mask_x8);
+                }
+
                 // Pawn push moves
                 if !CAPTURE_ONLY {
                     let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
@@ -614,6 +629,9 @@ impl ChessGame {
                     ((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN;
                 mv_cursor += self.is_queenside_castle_allowed(self.b_move) as usize;
             }
+
+            // Move count should never overflow 256
+            std::hint::assert_unchecked(mv_cursor < 256);
 
             mv_cursor
         }

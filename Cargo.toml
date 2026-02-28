@@ -24,3 +24,4 @@ zstd = "0.13.3"
 debug = true
 lto = "fat"
 panic = "abort"
+codegen-unit = 1

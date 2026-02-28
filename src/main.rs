@@ -5,6 +5,7 @@
 #![feature(slice_swap_unchecked)]
 #![feature(isolate_most_least_significant_one)]
 #![feature(adt_const_params)]
+#![feature(iter_collect_into)]
 #![feature(generic_const_exprs)]
 
 use crossbeam::channel;
@@ -177,6 +178,14 @@ fn search_thread(
 }
 
 fn main() {
+    // let mut b = chess_v2::ChessGame::new();
+    // b.load_fen(
+    //     "rnbqkbnr/1ppppppp/p7/8/8/P7/1PPPPPPP/RNBQKBNR w KQkq - 0 2",
+    //     &tables::Tables::new(),
+    // )
+    // .unwrap();
+    // chess_v2::ChessGame::in_check_avx512(1, 1, b.bitboards());
+    // return;
     let mode = std::env::args().nth(1).unwrap_or("uci".to_string());
 
     let result = match mode.as_str() {
@@ -354,7 +363,8 @@ fn main() {
                 }
             }
 
-            chess_ui()
+            // chess_ui()
+            Ok(())
         }
         "uci" => {
             let mut arg_it = std::env::args().skip(2);
