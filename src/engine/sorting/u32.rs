@@ -37,7 +37,7 @@ macro_rules! m512_reverse_epi32 {
 }
 
 #[inline(always)]
-fn sort4(arr: &mut [u32]) {
+pub fn sort4(arr: &mut [u32]) {
     debug_assert!(arr.len() == 4);
 
     cmp_swap_arr!(arr, 0, 1);
@@ -48,7 +48,7 @@ fn sort4(arr: &mut [u32]) {
 }
 
 #[inline(always)]
-fn sort8(arr: &mut [u32]) {
+pub fn sort8(arr: &mut [u32]) {
     debug_assert!(arr.len() == 8);
 
     sort4(&mut arr[0..4]);
@@ -67,7 +67,7 @@ fn sort8(arr: &mut [u32]) {
 }
 
 #[inline(always)]
-fn sort16(inout_x16: &mut __m512i) {
+pub fn sort16(inout_x16: &mut __m512i) {
     unsafe {
         const PERM_SELECT_B: i32 = 0x10;
 

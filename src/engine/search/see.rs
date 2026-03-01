@@ -4,7 +4,7 @@ use crate::{
     engine::{
         chess_v2::{ChessGame, MV_FLAG_EPCAP, MV_FLAG_PROMOTION, MV_FLAGS, PieceIndex},
         search::eval,
-        sorting::u32::sort_256u32_desc_avx512,
+        sorting,
         tables::{self, Tables},
     },
     util,
@@ -467,8 +467,6 @@ pub fn see_threshold_sim(
     mv: u16,
     threshold: i16,
 ) -> bool {
-    let mut board = board.clone();
-
     let from_sq = (mv & 0x3F) as usize;
     let to_sq = ((mv >> 6) & 0x3F) as usize;
     let to_sq_mask = 1u64 << to_sq;
@@ -513,8 +511,13 @@ pub fn see_threshold_sim(
         return true;
     }
 
+    let mut board = board.clone();
+
     unsafe {
-        if !board.make_move(mv, tables) || board.in_check(tables, !board.b_move()) {
+        let is_legal =
+            (board.make_move(mv, tables) as u8) & (!board.in_check(tables, !board.b_move()) as u8);
+
+        if is_legal == 0 {
             // Illegal move, can't reach threshold
             return false;
         }
@@ -530,28 +533,46 @@ pub fn see_threshold_sim(
         0, 0, 1, 2, 3, 3, 4, 0, //
     ];
 
-    let mut move_list = [0u16; 256];
+    let mut move_list = [0u16; 16];
+    let mut valid_list = [0u32; 16];
     loop {
-        let mut valid_list = [0u32; 256];
-        let move_count =
-            board.gen_moves_with_masks_avx512::<true, true>(&mut move_list, to_sq_mask);
+        let move_count = board
+            .gen_moves_with_masks_avx512::<true, true>(&mut move_list, to_sq_mask)
+            .min(16);
 
-        std::hint::likely(move_count < 8);
+        if move_count == 0 {
+            break;
+        }
 
-        move_list[0..move_count]
-            .iter()
-            .enumerate()
-            .for_each(|(index, mv)| {
-                valid_list[index] = {
+        let p = move_count.next_power_of_two();
+
+        if p == 1 {
+            valid_list[0] = move_list[0] as u32
+        } else {
+            move_list[0..move_count]
+                .iter()
+                .enumerate()
+                .for_each(|(index, mv)| {
                     let src_sq = (mv & 0x3F) as usize;
-                    let mut move_score =
-                        ((PIECE_VALUES_LVA[board.spt()[src_sq] as usize] as u64) << 16) as u32;
-                    move_score |= *mv as u32;
-                    move_score
-                };
-            });
+                    let piece_id = board.spt()[src_sq] as usize;
 
-        sort_256u32_desc_avx512(&mut valid_list, move_count);
+                    unsafe { std::hint::assert_unchecked(piece_id < 16) };
+
+                    valid_list[index] = ((PIECE_VALUES_LVA[piece_id] as u32) << 16) | (*mv as u32);
+                });
+
+            match p {
+                2 | 4 => sorting::u32::sort4(&mut valid_list[0..4]),
+                8 => sorting::u32::sort8(&mut valid_list[0..8]),
+                16 => unsafe {
+                    std::hint::cold_path();
+                    let mut input_x16 = _mm512_loadu_si512(valid_list.as_ptr() as *const __m512i);
+                    sorting::u32::sort16(&mut input_x16);
+                    _mm512_storeu_si512(valid_list.as_mut_ptr() as *mut __m512i, input_x16);
+                },
+                _ => unreachable!(),
+            }
+        }
 
         let board_copy = board.clone();
 
@@ -560,8 +581,12 @@ pub fn see_threshold_sim(
 
         for mv in valid_list[0..move_count].iter() {
             unsafe {
-                // attacker_piece = board.spt()[(mv & 0x3F) as usize] & 7;
-                if !board.make_move(*mv as u16, tables) || board.in_check(tables, !board.b_move()) {
+                // attacker_piece = board.spt()[to_sq] & 7;
+
+                let is_legal = (board.make_move(*mv as u16, tables) as u8)
+                    & (!board.in_check(tables, !board.b_move()) as u8);
+
+                if std::hint::unlikely(is_legal == 0) {
                     board = board_copy;
                     continue;
                 }
@@ -575,7 +600,7 @@ pub fn see_threshold_sim(
             None => break,
         };
 
-        let attacker_piece = board.spt()[((mv >> 6) & 0x3F) as usize] & 7;
+        let attacker_piece = board.spt()[to_sq] & 7;
 
         is_pass = !is_pass;
 
@@ -583,13 +608,14 @@ pub fn see_threshold_sim(
         // if the attacking piece would get captured in turn
         exchange = score_table[attacker_piece as usize] - exchange;
 
-        if attacker_piece == PieceIndex::WhiteKing as u8 {
+        let done = (attacker_piece == PieceIndex::WhiteKing as u8) as u8
+            | (exchange < is_pass as i16) as u8;
+
+        if done != 0 {
             break;
         }
 
-        if exchange < is_pass as i16 {
-            break;
-        }
+        valid_list.fill(0);
     }
 
     is_pass
@@ -1625,6 +1651,7 @@ mod tests {
             "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1",
             "2r5/1P4pk/p2p1b1p/5b1n/BB3p2/2R2p2/P1P2P2/4RK2 w - - 0 1",
             "1R2r2k/5bp1/3Q2p1/2p5/4P2P/1p6/2r1n1BK/8 b - - 0 1",
+            "b6k/2nqnq2/1n3n2/1r3r2/1npRpn2/2nqn3/8/K7 w - - 0 1",
         ];
 
         for fen in test_fens {
