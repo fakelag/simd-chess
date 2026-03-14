@@ -49,26 +49,35 @@ pub fn calc_pinnings(
     let bitboards = board.bitboards();
     let occupancy = black_board | white_board;
 
-    let king_sq =
-        bitboards[PieceIndex::WhiteKing as usize + (b_move as usize) * 8].trailing_zeros();
+    let stm_offset = (b_move as usize) << 3;
+    let ntm_offset = (!b_move as usize) << 3;
+
+    let king_sq = bitboards[PieceIndex::WhiteKing as usize + stm_offset].trailing_zeros();
+
+    unsafe {
+        // There is always a king on the board
+        std::hint::assert_unchecked(king_sq < 64);
+    }
+
     let king_lines = &tables::Tables::LT_LINES[king_sq as usize];
 
     let rook_moves = tables::Tables::LT_ROOK_OCCUPANCY_MASKS[king_sq as usize];
     let bishop_moves = tables::Tables::LT_BISHOP_OCCUPANCY_MASKS[king_sq as usize];
 
     let rook_attacks = rook_moves
-        & (bitboards[PieceIndex::WhiteRook as usize + !b_move as usize * 8]
-            | bitboards[PieceIndex::WhiteQueen as usize + !b_move as usize * 8]);
+        & (bitboards[PieceIndex::WhiteRook as usize + ntm_offset]
+            | bitboards[PieceIndex::WhiteQueen as usize + ntm_offset]);
 
     let bishop_attacks = bishop_moves
-        & (bitboards[PieceIndex::WhiteBishop as usize + !b_move as usize * 8]
-            | bitboards[PieceIndex::WhiteQueen as usize + !b_move as usize * 8]);
+        & (bitboards[PieceIndex::WhiteBishop as usize + ntm_offset]
+            | bitboards[PieceIndex::WhiteQueen as usize + ntm_offset]);
 
     let mut attackers = rook_attacks | bishop_attacks;
     let attacker_occ = occupancy ^ attackers;
 
-    loop {
-        let attacker_sq = crate::pop_ls1b!(attackers) as usize;
+    while attackers != 0 {
+        let attacker_sq = attackers.trailing_zeros() as u16;
+        attackers ^= 1 << attacker_sq;
 
         let path_occupied = king_lines[attacker_sq as usize] & attacker_occ;
 
