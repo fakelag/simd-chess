@@ -340,8 +340,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
     ) -> usize {
         let mut move_count = board.gen_moves_avx512::<false>(original_move_list);
 
-        std::hint::likely(move_count > 8 && move_count < 64);
-
         unsafe {
             // Safety: maximum number of legal moves in any position is 218.
             // Generated move count is guaranteed to be within bounds of 248 assuming
@@ -350,34 +348,39 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
             std::hint::assert_unchecked(move_count < 248);
         }
 
-        // let bitboards = board.bitboards();
-        // let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
-        // let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
-        // let mut piece_board: [u64; 8] = [0u64; 8];
-        // bitboards
-        //     .iter()
-        //     .take(8)
-        //     .zip(bitboards.iter().skip(8))
-        //     .enumerate()
-        //     .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+        let bitboards = board.bitboards();
+        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
+        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
+        let mut piece_board: [u64; 8] = [0u64; 8];
+        bitboards
+            .iter()
+            .take(8)
+            .zip(bitboards.iter().skip(8))
+            .enumerate()
+            .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+
+        let pins = Some(&[
+            see::calc_pinnings(false, &board, black_board, white_board),
+            see::calc_pinnings(true, &board, black_board, white_board),
+        ]);
 
         let mut i = 0;
         while i < move_count {
             let mv = original_move_list[i];
 
             let cap_see_threshold = if mv & chess_v2::MV_FLAG_CAP != 0 {
-                // see::see_threshold(
-                //     &eval::WEIGHT_TABLE_ABS,
-                //     tables,
-                //     board,
-                //     mv,
-                //     0,
-                //     black_board,
-                //     white_board,
-                //     piece_board,
-                //     None,
-                // )
-                see::see_threshold_sim(&eval::WEIGHT_TABLE_ABS, tables, board, mv, 0)
+                see::see_threshold(
+                    &eval::WEIGHT_TABLE_ABS,
+                    tables,
+                    board,
+                    mv,
+                    0,
+                    black_board,
+                    white_board,
+                    piece_board,
+                    pins,
+                )
+                // see::see_threshold_sim(&eval::WEIGHT_TABLE_ABS, tables, board, mv, 0)
             } else {
                 false
             };

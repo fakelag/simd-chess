@@ -292,9 +292,16 @@ pub fn see_threshold(
     mut piece_board: [u64; 8],
     pins: Option<&[Pinning; 2]>,
 ) -> bool {
+    let mut pinned = if let Some(pins) = &pins {
+        [pins[0].pinned, pins[1].pinned]
+    } else {
+        [0u64; 2]
+    };
+
     let from_sq = (mv & 0x3F) as usize;
     let to_sq = ((mv >> 6) & 0x3F) as usize;
     let to_sq_mask = 1u64 << to_sq;
+    let from_sq_mask: u64 = 1u64 << from_sq;
 
     let from_piece = board.spt()[from_sq] & 7;
 
@@ -338,11 +345,22 @@ pub fn see_threshold(
     }
 
     let mut b_move = board.b_move();
-    *[&mut white_board, &mut black_board][b_move as usize] ^= (1u64 << from_sq) | to_sq_mask;
+
+    if let Some(pins) = &pins {
+        pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
+
+        if from_sq_mask & pinned[b_move as usize] != 0 {
+            return false;
+        }
+
+        pins[!b_move as usize].update_pinned_mask(from_sq_mask, &mut pinned[!b_move as usize]);
+    }
+
+    *[&mut white_board, &mut black_board][b_move as usize] ^= from_sq_mask | to_sq_mask;
     *[&mut white_board, &mut black_board][!b_move as usize] &= !remove_piece_mask;
 
     // Make the move on the bitboards
-    piece_board[from_piece as usize] ^= (1u64 << from_sq) | to_sq_mask;
+    piece_board[from_piece as usize] ^= from_sq_mask | to_sq_mask;
     piece_board[to_piece as usize & 7] ^= remove_piece_mask;
 
     let mut full_board = black_board | white_board;
@@ -361,7 +379,6 @@ pub fn see_threshold(
             to_sq as u8,
         )
     };
-    let mut stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
 
     let lva = |stm_attackers: u64, piece_board: &[u64; 8]| unsafe {
         let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
@@ -386,7 +403,16 @@ pub fn see_threshold(
     // capture is checked to be valuable enough
     let mut is_pass = true;
 
-    while stm_attackers != 0 {
+    let mut stm_attackers;
+
+    loop {
+        stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
+        stm_attackers &= !pinned[b_move as usize];
+
+        if stm_attackers == 0 {
+            break;
+        }
+
         let (attacker_piece, attacker_sq_mask) = lva(stm_attackers, &piece_board);
 
         unsafe {
@@ -416,6 +442,11 @@ pub fn see_threshold(
 
         if exchange < is_pass as i16 {
             break;
+        }
+
+        if let Some(pins) = &pins {
+            pins[b_move as usize]
+                .update_pinned_mask(attacker_sq_mask, &mut pinned[b_move as usize]);
         }
 
         match attacker_piece as usize {
@@ -453,7 +484,6 @@ pub fn see_threshold(
         }
 
         all_attackers &= !to_sq_mask;
-        stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
     }
 
     is_pass
@@ -577,20 +607,21 @@ pub fn see_threshold_sim(
         let board_copy = board.clone();
 
         let mut lva_capture_move = None;
-        // let mut attacker_piece = 0;
+        let mut attacker_piece = 0;
 
         for mv in valid_list[0..move_count].iter() {
+            let mv = *mv as u16;
             unsafe {
-                // attacker_piece = board.spt()[to_sq] & 7;
+                attacker_piece = board.spt()[(mv & 0x3F) as usize] & 7;
 
-                let is_legal = (board.make_move(*mv as u16, tables) as u8)
+                let is_legal = (board.make_move(mv, tables) as u8)
                     & (!board.in_check(tables, !board.b_move()) as u8);
 
                 if std::hint::unlikely(is_legal == 0) {
                     board = board_copy;
                     continue;
                 }
-                lva_capture_move = Some(*mv as u16);
+                lva_capture_move = Some(mv);
                 break;
             }
         }
@@ -599,8 +630,6 @@ pub fn see_threshold_sim(
             Some(_) => {}
             None => break,
         };
-
-        let attacker_piece = board.spt()[to_sq] & 7;
 
         is_pass = !is_pass;
 
