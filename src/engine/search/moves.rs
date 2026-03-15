@@ -74,8 +74,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
     ) -> usize {
         let mut move_count = board.gen_moves_avx512::<false>(original_move_list);
 
-        std::hint::likely(move_count > 8 && move_count < 64);
-
         unsafe {
             // Safety: maximum number of legal moves in any position is 218.
             // Generated move count is guaranteed to be within bounds of 248 assuming
