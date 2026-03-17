@@ -39,10 +39,6 @@ impl<'a> FromIterator<&'a str> for SearchParams {
         loop {
             let command = iter.next();
 
-            if command.is_none() {
-                break;
-            }
-
             macro_rules! next_int {
                 ($input:expr,$ty:ty) => {
                     $input.next().and_then(|s| s.parse::<$ty>().ok())
@@ -60,7 +56,8 @@ impl<'a> FromIterator<&'a str> for SearchParams {
                 Some("mate") => search_params.mate = next_int!(iter, u32),
                 Some("movetime") => search_params.movetime = next_int!(iter, u32),
                 Some("infinite") => search_params.infinite = true,
-                _ => break,
+                None => break,
+                Some(cmd) => panic!("Unknown search parameter: {}", cmd),
             }
         }
 

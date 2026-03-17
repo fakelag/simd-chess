@@ -418,7 +418,7 @@ impl<'a> Search<'a> {
         let mut move_list = [0u32; 256];
         let mut original_move_list = [0u16; 256];
 
-        let move_count = if depth > 5 {
+        let move_count = if depth > 1 {
             let mut moves = SeeOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
             moves.gen_moves(
                 &self.chess,

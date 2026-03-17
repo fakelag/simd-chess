@@ -76,7 +76,7 @@ fn search_thread(
     let mut search_engine = search::search::Search::new(
         SearchParams::new(),
         tables,
-        1,
+        8,
         repetition::RepetitionTable::new(),
     );
 
