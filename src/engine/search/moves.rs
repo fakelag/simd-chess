@@ -1,7 +1,12 @@
-use crate::engine::{
-    chess_v2,
-    search::{eval, see},
-    sorting, tables,
+use std::arch::x86_64::*;
+
+use crate::{
+    engine::{
+        chess_v2,
+        search::{eval, see},
+        sorting, tables,
+    },
+    util,
 };
 
 #[cfg_attr(any(), rustfmt::skip)]
@@ -72,7 +77,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         original_move_list: &mut [u16; 256],
         move_list: &mut [u32; 256],
     ) -> usize {
-        let mut move_count = board.gen_moves_avx512::<false>(original_move_list);
+        let mut move_count = board.gen_moves_avx512::<false, _>(original_move_list);
 
         unsafe {
             // Safety: maximum number of legal moves in any position is 218.
@@ -213,23 +218,19 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
     }
 }
 
-pub struct CaptureOrdering {
-    move_list: [u16; 256],
-}
+pub struct CaptureOrdering {}
 
 impl CaptureOrdering {
     #[inline(always)]
     pub fn new() -> Self {
-        Self {
-            move_list: [0; 256],
-        }
+        Self {}
     }
 
     #[inline(always)]
     pub fn gen_moves(&mut self, board: &chess_v2::ChessGame, move_list: &mut [u32; 256]) -> usize {
-        let mut move_count = board.gen_moves_avx512::<true>(&mut self.move_list);
+        let mut move_count = board.gen_moves_avx512::<true, _>(move_list);
 
-        std::hint::likely(move_count < 64);
+        std::hint::likely(move_count < 16);
 
         unsafe {
             // Safety: maximum number of legal moves in any position is 218.
@@ -239,9 +240,86 @@ impl CaptureOrdering {
             std::hint::assert_unchecked(move_count < 248);
         }
 
-        let mut i = 0;
-        while i < move_count {
-            let mv = self.move_list[i];
+        // unsafe {
+        //     let mut promotion_mask = 0u16;
+
+        //     let spt_x64 = _mm512_loadu_epi8(board.spt().as_ptr() as *const i8);
+
+        //     for i in 0..=move_count / 16 {
+        //         let mv_x16 = _mm512_loadu_epi32(move_list.as_ptr().add(i * 16) as *const i32);
+
+        //         let move_mask =
+        //             _mm512_test_epi32_mask(mv_x16, _mm512_set1_epi32(0xFFFFFFFFu32 as i32));
+
+        //         let src_piece_x64 =
+        //             _mm512_maskz_permutexvar_epi8(0x1111111111111111u64, mv_x16, spt_x64);
+        //         let dst_piece_x64 = _mm512_permutexvar_epi8(_mm512_slli_epi16(mv_x16, 2), spt_x64);
+
+        //         let dst_piece_offset_x64 =
+        //             _mm512_set1_epi8(chess_v2::PieceIndex::PieceIndexMax as i8);
+
+        //         let dst_piece_inv_x64 = _mm512_maskz_sub_epi8(
+        //             0x2222222222222222u64,
+        //             dst_piece_offset_x64,
+        //             dst_piece_x64,
+        //         );
+
+        //         let final_x16 = _mm512_or_si512(
+        //             _mm512_slli_epi32(_mm512_or_si512(src_piece_x64, dst_piece_inv_x64), 16),
+        //             mv_x16,
+        //         );
+
+        //         promotion_mask |= _mm512_cmpeq_epi32_mask(
+        //             _mm512_and_si512(mv_x16, _mm512_set1_epi32(chess_v2::MV_FLAGS_PR_MASK as i32)),
+        //             _mm512_set1_epi32(chess_v2::MV_FLAGS_PR_QUEEN as i32),
+        //         );
+
+        //         _mm512_mask_storeu_epi32(
+        //             move_list.as_mut_ptr().add(i * 16) as *mut i32,
+        //             move_mask,
+        //             final_x16,
+        //         );
+        //     }
+
+        //     if std::hint::unlikely(promotion_mask != 0) {
+        //         let original_move_count = move_count;
+        //         for i in 0..original_move_count {
+        //             let mv = move_list[i] as u16;
+
+        //             if (mv & chess_v2::MV_FLAGS_PR_MASK) != chess_v2::MV_FLAGS_PR_QUEEN {
+        //                 continue;
+        //             }
+
+        //             let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
+
+        //             // Quiescence search can't encounter new captures after queen or knight promotions, so
+        //             // underpromotions to bishop and rook are skipped
+        //             let mv_k = mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
+
+        //             let src_sq = mv & 0x3F;
+        //             let dst_sq = (mv >> 6) & 0x3F;
+
+        //             let src_piece_id = *board.spt().get_unchecked(src_sq as usize) as u32;
+        //             let dst_piece_id = *board.spt().get_unchecked(dst_sq as usize) as u32;
+
+        //             // Calculate score (works only for captures)
+        //             let score = ((chess_v2::PieceIndex::PieceIndexMax as u32 - dst_piece_id) << 24)
+        //                 | (src_piece_id << 16);
+
+        //             std::hint::assert_unchecked(move_count < 256);
+
+        //             // @todo - underpromotion scoring, should be scored lower than Q promotion
+        //             move_list[move_count] = mv_k as u32 | score;
+        //             move_count += 1;
+        //         }
+        //     }
+        // }
+
+        // sorting::u32::sort_256u32_desc_avx512(move_list, move_count);
+
+        let original_move_count = move_count;
+        for i in 0..original_move_count {
+            let mv = move_list[i] as u16;
 
             move_list[i] = Self::score_move(mv, board.spt());
 
@@ -252,10 +330,13 @@ impl CaptureOrdering {
                 // underpromotions to bishop and rook are skipped
                 let mv_k = mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT;
 
-                self.move_list[move_count] = mv_k;
+                // @todo - underpromotion scoring, should be scored lower than Q promotion
+                unsafe {
+                    std::hint::assert_unchecked(move_count < 256);
+                }
+                move_list[move_count] = Self::score_move(mv_k, board.spt());
                 move_count += 1;
             }
-            i += 1;
         }
 
         sorting::u32::sort_256u32_desc_avx512(move_list, move_count);
@@ -274,16 +355,11 @@ impl CaptureOrdering {
         let src_sq = mv & 0x3F;
         let dst_sq = (mv >> 6) & 0x3F;
 
-        // MVV-LVA
         let mvvlva_score = unsafe {
-            let dst_piece = *spt.get_unchecked(dst_sq as usize);
-            let src_piece = *spt.get_unchecked(src_sq as usize);
+            let src_piece_id = *spt.get_unchecked(src_sq as usize) as u32;
+            let dst_piece_id = *spt.get_unchecked(dst_sq as usize) as u32;
 
-            let mvvlva_score = *MVV_LVA_SCORES_U8
-                .get_unchecked(dst_piece as usize)
-                .get_unchecked(src_piece as usize) as u16;
-
-            31 - mvvlva_score
+            ((chess_v2::PieceIndex::PieceIndexMax as u32 - dst_piece_id) << 8) | src_piece_id
         };
 
         score!(mvvlva_score)
@@ -336,7 +412,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         original_move_list: &mut [u16; 256],
         move_list: &mut [u32; 256],
     ) -> usize {
-        let mut move_count = board.gen_moves_avx512::<false>(original_move_list);
+        let mut move_count = board.gen_moves_avx512::<false, _>(original_move_list);
 
         unsafe {
             // Safety: maximum number of legal moves in any position is 218.
@@ -366,25 +442,18 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         while i < move_count {
             let mv = original_move_list[i];
 
-            let cap_see_threshold = if mv & chess_v2::MV_FLAG_CAP != 0 {
-                see::see_threshold(
-                    &eval::WEIGHT_TABLE_ABS,
-                    tables,
-                    board,
-                    mv,
-                    0,
-                    black_board,
-                    white_board,
-                    piece_board,
-                    pins,
-                )
-                // see::see_threshold_sim(&eval::WEIGHT_TABLE_ABS, tables, board, mv, 0)
-            } else {
-                false
-            };
-
-            move_list[i] =
-                self.score_move(mv, i as u8, board.spt(), history_moves, cap_see_threshold);
+            move_list[i] = self.score_move(
+                mv,
+                i as u8,
+                board.spt(),
+                history_moves,
+                tables,
+                board,
+                black_board,
+                white_board,
+                piece_board,
+                pins,
+            );
 
             if (mv & chess_v2::MV_FLAGS_PR_MASK) == chess_v2::MV_FLAGS_PR_QUEEN {
                 let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
@@ -395,6 +464,9 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
 
                 macro_rules! add_move {
                     ($move:expr) => {
+                        unsafe {
+                            std::hint::assert_unchecked(move_count < 256);
+                        }
                         original_move_list[move_count] = $move;
                         move_count += 1;
                     };
@@ -435,7 +507,12 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         mv_index: u8,
         spt: &[u8; 64],
         history_moves: &[[i16; 64]; 16],
-        cap_see_threshold: bool,
+        tables: &tables::Tables,
+        board: &chess_v2::ChessGame,
+        black_board: u64,
+        white_board: u64,
+        piece_board: [u64; 8],
+        pins: Option<&[see::Pinning; 2]>,
     ) -> u32 {
         macro_rules! score {
             ($score:expr) => {
@@ -487,6 +564,18 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
 
             31 - mvvlva_score
         };
+
+        let cap_see_threshold = see::see_threshold(
+            &eval::WEIGHT_TABLE_ABS,
+            tables,
+            board,
+            mv,
+            0,
+            black_board,
+            white_board,
+            piece_board,
+            pins,
+        );
 
         let final_score = if cap_see_threshold {
             mvvlva_score + Self::SORT_GOOD_CAPTURES_BASE

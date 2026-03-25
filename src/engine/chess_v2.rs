@@ -54,6 +54,11 @@ const NON_PAWN_MATERIAL_TABLE: [u16; 16] = [
     0,  // Pad
 ];
 
+trait MoveType {}
+
+impl MoveType for u32 {}
+impl MoveType for u16 {}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum GameState {
     Ongoing,
@@ -217,15 +222,9 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn gen_moves_avx512<const CAPTURE_ONLY: bool>(&self, move_list: &mut [u16]) -> usize {
-        self.gen_moves_with_masks_avx512::<CAPTURE_ONLY, false>(move_list, !0)
-    }
-
-    #[inline(always)]
-    pub fn gen_moves_with_masks_avx512<const CAPTURE_ONLY: bool, const USE_MASK: bool>(
+    pub fn gen_moves_avx512<const CAPTURE_ONLY: bool, MoveType: From<u16>>(
         &self,
-        move_list: &mut [u16],
-        dst_mask: u64,
+        move_list: &mut [MoveType],
     ) -> usize {
         let mut mv_cursor = 0usize;
 
@@ -341,13 +340,27 @@ impl ChessGame {
                 _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
 
             macro_rules! push_moves {
-                ($mask:expr, $moves_epi16_x8:ident) => {{
+                ($mask:expr, $moves_epi64_x8:ident) => {{
                     let mask = $mask;
-                    _mm_mask_compressstoreu_epi16(
-                        move_list.as_mut_ptr().add(mv_cursor) as *mut i16,
-                        mask,
-                        $moves_epi16_x8,
-                    );
+                    match std::mem::size_of::<MoveType>() {
+                        2 => {
+                            let moves_epi16_x8 = _mm512_cvtepi64_epi16($moves_epi64_x8);
+                            _mm_mask_compressstoreu_epi16(
+                                move_list.as_mut_ptr().add(mv_cursor) as *mut i16,
+                                mask,
+                                moves_epi16_x8,
+                            );
+                        }
+                        4 => {
+                            let moves_epi32_x8 = _mm512_cvtepi64_epi32($moves_epi64_x8);
+                            _mm256_mask_compressstoreu_epi32(
+                                move_list.as_mut_ptr().add(mv_cursor) as *mut i32,
+                                mask,
+                                moves_epi32_x8,
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
                     mv_cursor += mask.count_ones() as usize;
                 }};
             }
@@ -435,12 +448,6 @@ impl ChessGame {
                         _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
                 }
 
-                if USE_MASK {
-                    let dst_mask_x8 = _mm512_set1_epi64(dst_mask as i64);
-                    slider_moves_x8 = _mm512_and_epi64(slider_moves_x8, dst_mask_x8);
-                    non_slider_moves_x8 = _mm512_and_epi64(non_slider_moves_x8, dst_mask_x8);
-                }
-
                 // Pawn push moves
                 if !CAPTURE_ONLY {
                     let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
@@ -482,15 +489,13 @@ impl ChessGame {
                         const_promotion_flag_x8,
                     );
 
-                    let pawn_push_single_move_epi16_x8 =
-                        _mm512_cvtepi64_epi16(pawn_push_single_move_x8);
-                    let pawn_push_double_move_epi16_x8 = _mm512_cvtepi64_epi16(_mm512_or_epi64(
+                    let pawn_push_double_move_x8 = _mm512_or_epi64(
                         pawn_push_double_dst_sq_x8,
                         _mm512_or_epi64(one_of_each_non_slider_index_x8, const_dpp_flag_x8),
-                    ));
+                    );
 
-                    push_moves!(pawn_push_single_mask, pawn_push_single_move_epi16_x8);
-                    push_moves!(pawn_push_double_mask, pawn_push_double_move_epi16_x8);
+                    push_moves!(pawn_push_single_mask, pawn_push_single_move_x8);
+                    push_moves!(pawn_push_double_mask, pawn_push_double_move_x8);
                 }
 
                 let mut non_slider_dst_sq_x8 =
@@ -539,14 +544,11 @@ impl ChessGame {
                         const_cap_flag_x8,
                     );
 
-                    // Convert full move to 16-bit format
-                    let mv_epi16_x8 = _mm512_cvtepi64_epi16(non_slider_full_move_x8);
-
                     let quiet_mask = !pawn_mask
                         & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, full_board_inv_x8);
                     let cap_or_ep_mask = cap_mask | ep_mask;
 
-                    push_moves!(cap_or_ep_mask | quiet_mask, mv_epi16_x8);
+                    push_moves!(cap_or_ep_mask | quiet_mask, non_slider_full_move_x8);
 
                     let slider_dst_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, slider_dst_sq_x8);
 
@@ -565,10 +567,7 @@ impl ChessGame {
                         ),
                     );
 
-                    // Convert full move to 16-bit format
-                    let s_mv_epi16_x8 = _mm512_cvtepi64_epi16(slider_full_move_x8);
-
-                    push_moves!(s_all_mask, s_mv_epi16_x8);
+                    push_moves!(s_all_mask, slider_full_move_x8);
 
                     non_slider_moves_x8 =
                         _mm512_xor_epi64(non_slider_moves_x8, non_slider_dst_sq_bit_x8);
@@ -621,12 +620,14 @@ impl ChessGame {
                     self.board.bitboards[PieceIndex::WhiteKing as usize + friendly_move_offset];
                 let king_square = king_bitboard.trailing_zeros() as u16;
 
-                *move_list.get_unchecked_mut(mv_cursor as usize) =
-                    ((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING;
+                *move_list.get_unchecked_mut(mv_cursor as usize) = MoveType::from(
+                    ((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING,
+                );
                 mv_cursor += self.is_kingside_castle_allowed(self.b_move) as usize;
 
-                *move_list.get_unchecked_mut(mv_cursor as usize) =
-                    ((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN;
+                *move_list.get_unchecked_mut(mv_cursor as usize) = MoveType::from(
+                    ((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN,
+                );
                 mv_cursor += self.is_queenside_castle_allowed(self.b_move) as usize;
             }
 
@@ -643,7 +644,7 @@ impl ChessGame {
         self.b_move = b_move;
 
         let mut move_list = [0u16; 256];
-        let move_count = self.gen_moves_avx512::<false>(&mut move_list);
+        let move_count = self.gen_moves_avx512::<false, _>(&mut move_list);
 
         self.b_move = b_move_save;
 
@@ -1555,8 +1556,7 @@ impl ChessGame {
         let mut node_count = 0;
 
         let mut move_list = [0u16; 220];
-
-        let move_count = self.gen_moves_avx512::<false>(&mut move_list[2..]);
+        let move_count = self.gen_moves_avx512::<false, _>(&mut move_list[2..]);
 
         let board_copy = self.clone();
 

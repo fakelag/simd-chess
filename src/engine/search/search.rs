@@ -1229,7 +1229,7 @@ impl<'a> Search<'a> {
         let mut board = self.chess.clone();
 
         let mut move_list = [0u16; 256];
-        let move_count = board.gen_moves_avx512::<false>(&mut move_list);
+        let move_count = board.gen_moves_avx512::<false, _>(&mut move_list);
 
         for i in 0..move_count {
             if !unsafe { board.make_move(move_list[i], self.tables) } {
