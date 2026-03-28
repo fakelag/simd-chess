@@ -9,6 +9,11 @@ use crate::{
     util,
 };
 
+/// Upper exclusive bound for bad-capture sort scores produced by `SeeOrdering`.
+/// A sort score below this value means the capture was classified as SEE < 0
+/// during move ordering. Only valid when `SeeOrdering` was used (depth > 1).
+pub const SEE_ORDERING_BAD_CAP_LIMIT: u16 = 32;
+
 #[cfg_attr(any(), rustfmt::skip)]
 const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
     /* Ep Cap */      [0, 0, 0, 0, 0, 0, 26, 0, 0, 0, 0, 0, 0, 0, 26, 0],

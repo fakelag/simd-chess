@@ -42,9 +42,11 @@ const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
 /// SEE pruning: prune captures with SEE < -(SEE_CAPTURE_MARGIN * depth).
 const SEE_CAPTURE_MARGIN: Eval = 100;
 /// SEE pruning: max depth at which quiet SEE pruning is applied.
-const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 6;
-/// SEE pruning: prune quiets with SEE < -(SEE_QUIET_MARGIN * depth).
-const SEE_QUIET_MARGIN: Eval = 50;
+const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 8;
+/// SEE pruning: prune quiets with SEE < -(SEE_QUIET_MARGIN * depth²). Quadratic scaling.
+const SEE_QUIET_MARGIN: Eval = 12;
+/// SEE pruning: history score divisor for quiet SEE margin adjustment.
+const SEE_HISTORY_DIVISOR: Eval = 128;
 
 #[derive(Debug)]
 pub struct PvTable {
@@ -484,33 +486,47 @@ impl<'a> Search<'a> {
                 if let Some((bb_black, bb_white, bb_pieces, ref pins)) = see_prune_data {
                     let is_capture = (mv & MV_FLAG_CAP) != 0;
 
-                    // candidate-seeprune-caps.exe:
+                    // Capture SEE pruning: depth-scaled linear threshold.
+                    // Fast path: good captures (SEE >= 0 from ordering) always pass
+                    // any negative threshold, so skip the see_threshold call entirely.
                     if is_capture && depth <= SEE_CAPTURE_PRUNE_MAX_DEPTH {
-                        let threshold = -(SEE_CAPTURE_MARGIN * depth as Eval);
-                        if !see::see_threshold(
-                            &WEIGHT_TABLE_ABS,
-                            self.tables,
-                            &board_copy,
-                            mv,
-                            threshold,
-                            bb_black,
-                            bb_white,
-                            bb_pieces,
-                            Some(pins),
-                        ) {
-                            continue;
+                        let sort_score = (move_list[mv_index] >> 16) as u16;
+                        if sort_score < SEE_ORDERING_BAD_CAP_LIMIT {
+                            let threshold = -(SEE_CAPTURE_MARGIN * depth as Eval);
+                            if !see::see_threshold(
+                                &WEIGHT_TABLE_ABS,
+                                self.tables,
+                                &board_copy,
+                                mv,
+                                threshold,
+                                bb_black,
+                                bb_white,
+                                bb_pieces,
+                                Some(pins),
+                            ) {
+                                continue;
+                            }
                         }
                     }
 
-                    // candidate-seeprune-quiets.exe:
+                    // Quiet SEE pruning: quadratic threshold with history adjustment.
+                    // Quadratic scaling prunes less at shallow depths (safer) and more
+                    // at deep depths (bigger savings). History shifts the threshold:
+                    // bad history -> threshold closer to 0 -> more pruning.
                     if !is_capture && depth <= SEE_QUIET_PRUNE_MAX_DEPTH {
-                        let threshold = -(SEE_QUIET_MARGIN * depth as Eval);
+                        let src_piece = board_copy.spt()[(mv & 0x3F) as usize] as usize;
+                        let dst_sq = ((mv >> 6) & 0x3F) as usize;
+                        let history = self.history_moves[src_piece][dst_sq];
+
+                        let threshold = -(SEE_QUIET_MARGIN * depth as Eval * depth as Eval)
+                            - (history as Eval / SEE_HISTORY_DIVISOR);
+
                         if !see::see_threshold(
                             &WEIGHT_TABLE_ABS,
                             self.tables,
                             &board_copy,
                             mv,
-                            threshold,
+                            threshold.min(0),
                             bb_black,
                             bb_white,
                             bb_pieces,
@@ -804,24 +820,24 @@ impl<'a> Search<'a> {
 
         // Precompute bitboards + pins for qsearch SEE pruning of captures.
         // Only computed when not in check (in check -> quiescence_check_evasion, no SEE pruning).
-        // let (qsee_bb_black, qsee_bb_white, qsee_bb_pieces, qsee_pins) = if !in_check {
-        //     let bbs = self.chess.bitboards();
-        //     let bb_black = bbs.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
-        //     let bb_white = bbs.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
-        //     let mut bb_pieces = [0u64; 8];
-        //     bbs.iter()
-        //         .take(8)
-        //         .zip(bbs.iter().skip(8))
-        //         .enumerate()
-        //         .for_each(|(i, (w, b))| bb_pieces[i] = *w | *b);
-        //     let pins = [
-        //         see::calc_pinnings(false, &self.chess, bb_black, bb_white),
-        //         see::calc_pinnings(true, &self.chess, bb_black, bb_white),
-        //     ];
-        //     (bb_black, bb_white, bb_pieces, Some(pins))
-        // } else {
-        //     (0, 0, [0u64; 8], None)
-        // };
+        let (qsee_bb_black, qsee_bb_white, qsee_bb_pieces, qsee_pins) = if !in_check {
+            let bbs = self.chess.bitboards();
+            let bb_black = bbs.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
+            let bb_white = bbs.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
+            let mut bb_pieces = [0u64; 8];
+            bbs.iter()
+                .take(8)
+                .zip(bbs.iter().skip(8))
+                .enumerate()
+                .for_each(|(i, (w, b))| bb_pieces[i] = *w | *b);
+            let pins = [
+                see::calc_pinnings(false, &self.chess, bb_black, bb_white),
+                see::calc_pinnings(true, &self.chess, bb_black, bb_white),
+            ];
+            (bb_black, bb_white, bb_pieces, Some(pins))
+        } else {
+            (0, 0, [0u64; 8], None)
+        };
 
         let mut moves = CaptureOrdering::new();
 
@@ -834,21 +850,21 @@ impl<'a> Search<'a> {
 
             // SEE pruning: skip captures with SEE < 0 (losing material exchanges).
             // Stand-pat already covers the case where all captures are pruned.
-            // if let Some(ref pins) = qsee_pins {
-            //     if !see::see_threshold(
-            //         &WEIGHT_TABLE_ABS,
-            //         self.tables,
-            //         &board_copy,
-            //         mv,
-            //         0,
-            //         qsee_bb_black,
-            //         qsee_bb_white,
-            //         qsee_bb_pieces,
-            //         Some(pins),
-            //     ) {
-            //         continue;
-            //     }
-            // }
+            if let Some(ref pins) = qsee_pins {
+                if !see::see_threshold(
+                    &WEIGHT_TABLE_ABS,
+                    self.tables,
+                    &board_copy,
+                    mv,
+                    0,
+                    qsee_bb_black,
+                    qsee_bb_white,
+                    qsee_bb_pieces,
+                    Some(pins),
+                ) {
+                    continue;
+                }
+            }
 
             let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be valid
