@@ -37,16 +37,12 @@ const PV_DEPTH: usize = 64;
 const HISTORY_MAX: i16 = i16::MAX - 0_017;
 const HISTORY_MIN: i16 = i16::MIN + 0_017;
 
-/// SEE pruning: max depth for depth-scaled capture SEE pruning.
 const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
-/// SEE pruning: prune captures with SEE < -(SEE_CAPTURE_MARGIN * depth).
 const SEE_CAPTURE_MARGIN: Eval = 100;
-/// SEE pruning: max depth at which quiet SEE pruning is applied.
 const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 8;
-/// SEE pruning: prune quiets with SEE < -(SEE_QUIET_MARGIN * depth²). Quadratic scaling.
 const SEE_QUIET_MARGIN: Eval = 12;
-/// SEE pruning: history score divisor for quiet SEE margin adjustment.
 const SEE_HISTORY_DIVISOR: Eval = 128;
+const SEE_QS_THRESHOLD: Eval = -20;
 
 #[derive(Debug)]
 pub struct PvTable {
@@ -848,15 +844,13 @@ impl<'a> Search<'a> {
         for i in 0..moves.gen_moves(&self.chess, &mut move_list) {
             let mv = move_list[i] as u16;
 
-            // SEE pruning: skip captures with SEE < 0 (losing material exchanges).
-            // Stand-pat already covers the case where all captures are pruned.
             if let Some(ref pins) = qsee_pins {
                 if !see::see_threshold(
                     &WEIGHT_TABLE_ABS,
                     self.tables,
                     &board_copy,
                     mv,
-                    0,
+                    SEE_QS_THRESHOLD,
                     qsee_bb_black,
                     qsee_bb_white,
                     qsee_bb_pieces,
