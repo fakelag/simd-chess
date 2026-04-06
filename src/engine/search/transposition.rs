@@ -33,6 +33,9 @@ const DEBUG: bool = false;
 pub struct TtProbe {
     pub score: Option<Eval>,
     pub mv_index: u8,
+    pub tt_score: Eval,
+    pub tt_depth: u8,
+    pub bound_type: BoundType,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +257,9 @@ impl TranspositionTable {
         return Some(TtProbe {
             score: if usable { Some(entry.score) } else { None },
             mv_index: entry.mv_index,
+            tt_score: entry.score,
+            tt_depth: entry.depth(),
+            bound_type: entry.bound_type(),
         });
     }
 

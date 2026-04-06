@@ -48,7 +48,7 @@ impl RepetitionTable {
     }
 
     #[inline(always)]
-    pub fn is_repeated(&mut self, hash: u64) -> bool {
+    pub fn is_repeated(&self, hash: u64) -> bool {
         let cursor = self.cursor & (REPTABLE_SIZE - 1);
 
         for i in (0..cursor).rev() {

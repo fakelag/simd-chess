@@ -8,7 +8,7 @@ use crate::{
         chess_v2,
         search::{
             AbortSignal, SearchStrategy, eval::*, moves::*, repetition::RepetitionTable,
-            search_params::SearchParams, transposition::*,
+            search_params::SearchParams, see, transposition::*,
         },
         sorting,
         tables::{self},
@@ -30,12 +30,26 @@ const NNUE_OSIZE: usize = 8;
 
 const CORR_WEIGHT_SCALE: Eval = 128;
 const CORR_MAX_ERROR: Eval = 1024;
-const CORR_GRAIN: Eval = 2;
+const CORR_GRAIN: Eval = 8;
 
 const PV_DEPTH: usize = 64;
 
 const HISTORY_MAX: i16 = i16::MAX - 0_017;
 const HISTORY_MIN: i16 = i16::MIN + 0_017;
+
+const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
+const SEE_CAPTURE_MARGIN: Eval = 100;
+const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 8;
+const SEE_QUIET_MARGIN: Eval = 12;
+const SEE_HISTORY_DIVISOR: Eval = 128;
+const SEE_QS_THRESHOLD: Eval = -20;
+
+pub struct SeeInfo {
+    pub black_board: u64,
+    pub white_board: u64,
+    pub pieces_board: [u64; 8],
+    pub pins: [see::Pinning; 2],
+}
 
 #[derive(Debug)]
 pub struct PvTable {
@@ -76,6 +90,7 @@ pub struct Search<'a> {
     rt: RepetitionTable,
     et: EvalTable,
     history_moves: Box<[[i16; 64]; 16]>,
+    cut_moves: [[u16; 2]; PV_DEPTH],
 
     params: Box<SearchParams>,
 
@@ -84,6 +99,12 @@ pub struct Search<'a> {
     quiet_nodes: u64,
     quiet_depth: u32,
     depth: u8,
+
+    eval_stack: [Eval; PV_DEPTH],
+    lmr_table: [[u8; 64]; 64],
+    move_stack: [(u8, u8); PV_DEPTH],
+    excluded_move: u16,
+    cont_history: Box<[[[i16; 768]; 768]; 2]>,
 
     pawn_correction_heuristic: [[Eval; u16::MAX as usize + 1]; 2],
     // pub corr_stats: Vec<CorrStats>,
@@ -123,6 +144,19 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
 
             loop {
                 self.ply = 0;
+
+                // println!(
+                //     "Going depth {} with alpha = {}, beta = {}",
+                //     depth, alpha, beta
+                // );
+                // println!(
+                //     "PV={}",
+                //     self.pv[0..self.pv_length]
+                //         .iter()
+                //         .map(|mv| util::move_string_dbg(*mv))
+                //         .collect::<Vec<_>>()
+                //         .join(", ")
+                // );
 
                 let score = self.go(alpha, beta, depth);
 
@@ -196,6 +230,28 @@ impl<'a> Search<'a> {
             pv_length: 0,
             pv_trace: false,
             history_moves: Box::new([[0; 64]; 16]),
+            cut_moves: [[0; 2]; PV_DEPTH],
+            move_stack: [(0, 0); PV_DEPTH],
+            excluded_move: 0,
+            cont_history: unsafe {
+                let layout = std::alloc::Layout::new::<[[[i16; 768]; 768]; 2]>();
+                let ptr = std::alloc::alloc_zeroed(layout) as *mut [[[i16; 768]; 768]; 2];
+                Box::from_raw(ptr)
+            },
+            eval_stack: [0; PV_DEPTH],
+            lmr_table: {
+                let mut table = [[0u8; 64]; 64];
+                let mut d = 1;
+                while d < 64 {
+                    let mut m = 1;
+                    while m < 64 {
+                        table[d][m] = (0.75 + (d as f64).ln() * (m as f64).ln() / 2.2) as u8;
+                        m += 1;
+                    }
+                    d += 1;
+                }
+                table
+            },
             et: EvalTable::new(1024),
             rt,
             tt: TranspositionTable::new(tt_size_hint_mb),
@@ -230,6 +286,16 @@ impl<'a> Search<'a> {
             self.pv[i] = 0;
         }
 
+        self.cut_moves = [[0; 2]; PV_DEPTH];
+        self.eval_stack = [0; PV_DEPTH];
+        self.move_stack = [(0, 0); PV_DEPTH];
+        self.excluded_move = 0;
+
+        for entry in self.cont_history.iter_mut() {
+            for p in entry.iter_mut() {
+                p.fill(0);
+            }
+        }
         for piece in 0..16 {
             for square in 0..64 {
                 self.history_moves[piece][square] = 0;
@@ -330,21 +396,22 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        // Cut 2 plys before max PV depth since the previous call
-        // can't copy over PV moves beyond this point
-        let search_done = self.ply >= PV_DEPTH as u8 - 2 || depth == 0;
-        let apply_pruning = !self.pv_trace && ply > 0;
-
-        let mut pv_move = 0; // Null move
-
         let mut tt_move_index = 0xFFu8;
         let mut bound_type = BoundType::UpperBound;
         let mut alpha = alpha;
         let mut depth = depth;
 
-        // assert!(!(self.pv_trace && tt_move != 0));
+        let pv_move = if self.pv_trace {
+            self.pv_trace = self.pv_length > (ply + 1);
+            self.pv[ply]
+        } else {
+            0
+        };
 
-        if apply_pruning
+        let prune_node = ply > 0 && pv_move == 0;
+        let non_pv_node = alpha == beta - 1;
+
+        if prune_node
             && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
         {
             return 0;
@@ -353,40 +420,58 @@ impl<'a> Search<'a> {
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
         depth += in_check as u8;
 
-        let tt_probe = self
-            .tt
-            .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta);
+        let tt_probe = if self.excluded_move == 0 {
+            self.tt
+                .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta)
+        } else {
+            // During singular verification, skip TT cutoffs to avoid infinite recursion
+            None
+        };
 
-        if let Some(probe) = tt_probe {
-            if apply_pruning {
+        let mut tt_score = 0;
+        let mut tt_depth = 0u8;
+        let mut tt_bound = BoundType::UpperBound;
+
+        if let Some(ref probe) = tt_probe {
+            if prune_node {
                 if let Some(score) = probe.score {
                     return score;
                 }
             }
             tt_move_index = probe.mv_index;
+            tt_score = probe.tt_score;
+            tt_depth = probe.tt_depth;
+            tt_bound = probe.bound_type;
         }
 
-        if search_done {
-            debug_assert!(!self.pv_trace);
+        // IIR
+        depth -= (depth >= 4 && tt_move_index == 0xFF && prune_node) as u8;
+
+        let depth = depth;
+
+        // Cut 2 plys before max PV depth since the previous call
+        // can't copy over PV moves beyond this point
+        if self.ply >= PV_DEPTH as u8 - 2 || depth == 0 {
             return self.quiescence(alpha, beta, ply as u32);
         }
 
-        if self.pv_trace {
-            self.pv_trace = self.pv_length > (ply + 1);
-            pv_move = self.pv[ply];
-        }
+        let static_eval = self.evaluate();
+        let corrected_eval = self.eval_with_correction(static_eval);
 
-        let static_eval = OnceCell::new();
+        self.eval_stack[ply] = corrected_eval;
 
-        if apply_pruning && !in_check {
-            if alpha == beta - 1 && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
-                let eval_margin = 180 * depth as Eval;
-                let static_eval = *static_eval.get_or_init(|| self.evaluate());
+        let improving = if !in_check {
+            ply >= 2 && corrected_eval > self.eval_stack[ply - 2]
+        } else {
+            false
+        };
 
-                let eval_corrected = self.eval_with_correction(static_eval);
+        if prune_node && !in_check {
+            if non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
+                let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
 
-                if eval_corrected - eval_margin >= beta {
-                    return eval_corrected - eval_margin;
+                if corrected_eval - eval_margin >= beta {
+                    return corrected_eval - eval_margin;
                 }
             }
 
@@ -395,6 +480,9 @@ impl<'a> Search<'a> {
                 let ep_square = self.chess.make_null_move(self.tables);
 
                 let r = 2 + depth / 3;
+
+                // @todo - self.move_stack
+                // @todo - Prevent null move consequtively
 
                 self.ply += 1;
                 let score = -self.go(-beta, -beta + 1, depth - r);
@@ -418,23 +506,106 @@ impl<'a> Search<'a> {
         let mut move_list = [0u32; 256];
         let mut original_move_list = [0u16; 256];
 
-        let move_count = if depth > 1 {
-            let mut moves = SeeOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
-            moves.gen_moves(
-                &self.chess,
-                self.tables,
-                &self.history_moves,
-                &mut original_move_list,
-                &mut move_list,
-            )
+        let cont_idx_ply1 = if ply >= 1 {
+            let (p, d) = self.move_stack[ply - 1];
+            debug_assert!(p < 12);
+
+            let index = p as usize * 64 + d as usize;
+            unsafe {
+                debug_assert!(index < 768);
+                std::hint::assert_unchecked(index < 768);
+            }
+            Some(index)
         } else {
-            let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(pv_move, tt_move_index);
-            moves.gen_moves(
-                &self.chess,
-                &self.history_moves,
-                &mut original_move_list,
-                &mut move_list,
-            )
+            None
+        };
+
+        let cont_idx_ply2 = if ply >= 2 {
+            let (p, d) = self.move_stack[ply - 2];
+            debug_assert!(p < 12);
+
+            let index = p as usize * 64 + d as usize;
+            unsafe {
+                debug_assert!(index < 768);
+                std::hint::assert_unchecked(index < 768);
+            }
+            Some(index)
+        } else {
+            None
+        };
+
+        let see_info = if depth > 1 {
+            let bitboards = self.chess.bitboards();
+            let black_board = bitboards.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
+            let white_board = bitboards.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
+            let mut pieces_board = [0u64; 8];
+            bitboards
+                .iter()
+                .take(8)
+                .zip(bitboards.iter().skip(8))
+                .enumerate()
+                .for_each(|(i, (w, b))| pieces_board[i] = *w | *b);
+            let pins = [
+                see::calc_pinnings(false, &self.chess, black_board, white_board),
+                see::calc_pinnings(true, &self.chess, black_board, white_board),
+            ];
+            Some(SeeInfo {
+                black_board,
+                white_board,
+                pieces_board,
+                pins,
+            })
+        } else {
+            None
+        };
+
+        let move_count = {
+            let cont_hist = ContHistRef {
+                ply1: cont_idx_ply1.map(|idx| &self.cont_history[0][idx]),
+                ply2: cont_idx_ply2.map(|idx| &self.cont_history[1][idx]),
+            };
+
+            if let Some(see_info) = &see_info {
+                let mut moves = SeeOrdering::<HISTORY_MIN, HISTORY_MAX>::new(
+                    pv_move,
+                    tt_move_index,
+                    self.cut_moves[ply],
+                );
+                moves.gen_moves(
+                    &self.chess,
+                    self.tables,
+                    &self.history_moves,
+                    &cont_hist,
+                    see_info,
+                    &mut original_move_list,
+                    &mut move_list,
+                )
+            } else {
+                let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(
+                    pv_move,
+                    tt_move_index,
+                    self.cut_moves[ply],
+                );
+                moves.gen_moves(
+                    &self.chess,
+                    &self.history_moves,
+                    &cont_hist,
+                    &mut original_move_list,
+                    &mut move_list,
+                )
+            }
+        };
+
+        let singular_move = if prune_node
+            && depth >= 8
+            && tt_move_index != 0xFF
+            && tt_depth >= depth.saturating_sub(3)
+            && tt_bound != BoundType::UpperBound
+            && !is_mate(tt_score)
+        {
+            original_move_list[tt_move_index as usize]
+        } else {
+            0
         };
 
         let mut best_score = -SCORE_INF;
@@ -445,6 +616,95 @@ impl<'a> Search<'a> {
 
         for mv_index in 0..move_count {
             let mv = move_list[mv_index] as u16;
+
+            if mv == self.excluded_move {
+                continue;
+            }
+
+            let mut extension: u8 = 0;
+            if mv == singular_move {
+                let saved_excluded = self.excluded_move;
+                self.excluded_move = mv;
+
+                self.rt.pop_position();
+                let singular_beta = tt_score - 3 * depth as Eval;
+                let s_score = self.go(singular_beta - 1, singular_beta, depth / 2);
+
+                self.excluded_move = saved_excluded;
+
+                if self.is_stopping {
+                    return 0;
+                }
+
+                if s_score < singular_beta {
+                    extension = 1;
+                } else if singular_beta >= beta {
+                    // Multi-cut: even without the TT move, score >= beta
+                    return singular_beta;
+                }
+
+                self.rt
+                    .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
+            }
+
+            if num_legal_moves > 0
+                && !in_check
+                && depth <= SEE_QUIET_PRUNE_MAX_DEPTH.max(SEE_CAPTURE_PRUNE_MAX_DEPTH)
+            {
+                if let Some(see_info) = &see_info {
+                    let is_capture = (mv & MV_FLAG_CAP) != 0;
+
+                    // Capture SEE pruning: depth-scaled linear threshold.
+                    // Fast path: good captures (SEE >= 0 from ordering) always pass
+                    // any negative threshold, so skip the see_threshold call entirely.
+                    if is_capture && depth <= SEE_CAPTURE_PRUNE_MAX_DEPTH {
+                        let sort_score = (move_list[mv_index] >> 16) as u16;
+                        if sort_score < SEE_ORDERING_BAD_CAP_LIMIT {
+                            let threshold = -(SEE_CAPTURE_MARGIN * depth as Eval);
+                            if !see::see_threshold(
+                                &WEIGHT_TABLE_ABS,
+                                self.tables,
+                                &board_copy,
+                                mv,
+                                threshold,
+                                see_info.black_board,
+                                see_info.white_board,
+                                see_info.pieces_board,
+                                Some(&see_info.pins),
+                            ) {
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Quiet SEE pruning: quadratic threshold with history adjustment.
+                    // Quadratic scaling prunes less at shallow depths (safer) and more
+                    // at deep depths (bigger savings). History shifts the threshold:
+                    // bad history -> threshold closer to 0 -> more pruning.
+                    if !is_capture && depth <= SEE_QUIET_PRUNE_MAX_DEPTH {
+                        let src_piece = board_copy.spt()[(mv & 0x3F) as usize] as usize;
+                        let dst_sq = ((mv >> 6) & 0x3F) as usize;
+                        let history = self.history_moves[src_piece][dst_sq];
+
+                        let threshold = -(SEE_QUIET_MARGIN * depth as Eval * depth as Eval)
+                            - (history as Eval / SEE_HISTORY_DIVISOR);
+
+                        if !see::see_threshold(
+                            &WEIGHT_TABLE_ABS,
+                            self.tables,
+                            &board_copy,
+                            mv,
+                            threshold.min(0),
+                            see_info.black_board,
+                            see_info.white_board,
+                            see_info.pieces_board,
+                            Some(&see_info.pins),
+                        ) {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be valid
@@ -462,31 +722,14 @@ impl<'a> Search<'a> {
                 None => continue,
             };
 
-            // if apply_pruning && depth_pruning && !self.is_endgame() {
-            //     let threshold = if mv & MV_FLAG_CAP != 0 {
-            //         -50 * depth as i16
-            //     } else {
-            //         -10 * depth as i16 * depth as i16
-            //     };
-
-            //     if !see::see_threshold(
-            //         &WEIGHT_TABLE_ABS,
-            //         self.tables,
-            //         &board_copy,
-            //         mv,
-            //         threshold,
-            //         black_board,
-            //         white_board,
-            //         piece_board,
-            //     ) {
-            //         if !self.chess.in_check(self.tables, self.chess.b_move()) {
-            //             self.chess = board_copy;
-            //             continue;
-            //         }
-            //     }
-            // }
-
             self.nnue.make_move(nnue_update);
+
+            let src_piece = board_copy.spt()[(mv & 0x3F) as usize];
+            let dst_sq = ((mv >> 6) & 0x3F) as u8;
+            self.move_stack[ply] = (
+                util::compress_piece_index_nonzero(src_piece as usize) as u8,
+                dst_sq,
+            );
 
             let is_non_capture_or_promotion = mv & (MV_FLAG_CAP | MV_FLAG_PROMOTION) == 0;
 
@@ -495,20 +738,51 @@ impl<'a> Search<'a> {
 
             self.ply += 1;
 
+            let new_depth = depth - 1 + extension;
+
             let score = if num_legal_moves == 0 {
-                -self.go(-beta, -alpha, depth - 1)
+                -self.go(-beta, -alpha, new_depth)
             } else if late_move_reduction {
-                // Late move, apply a small reduction of 1 ply and
-                // search with window [-alpha - 1, -alpha] with the goal of
-                // proving that the move is not good enough to be played
-                let proof_score = -self.go(-alpha - 1, -alpha, depth - 2);
+                let r = {
+                    let base_r =
+                        self.lmr_table[depth.min(63) as usize][(num_legal_moves).min(63)] as i16;
+
+                    let src_piece = board_copy.spt()[(mv & 0x3F) as usize] as usize;
+                    debug_assert!(src_piece != 0);
+
+                    let dst_sq = ((mv >> 6) & 0x3F) as usize;
+                    let history = self.history_moves[src_piece][dst_sq] as i32;
+
+                    let cont_bonus = {
+                        let src_piece_comp = util::compress_piece_index_nonzero(src_piece);
+
+                        let c1 = cont_idx_ply1.map_or(0i32, |idx| {
+                            self.cont_history[0][idx][src_piece_comp * 64 + dst_sq] as i32
+                        });
+                        let c2 = cont_idx_ply2.map_or(0i32, |idx| {
+                            self.cont_history[1][idx][src_piece_comp * 64 + dst_sq] as i32
+                        });
+                        (c1 + c2) / 2
+                    };
+
+                    let combined = history + cont_bonus;
+                    let hist_adj = (combined / 8192).clamp(-2, 2) as i16;
+
+                    let mut r = base_r - hist_adj;
+
+                    r -= improving as i16;
+                    r += non_pv_node as i16;
+
+                    r.clamp(1, new_depth as i16) as u8
+                };
+
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r);
                 if proof_score > alpha {
                     // The move might be good, search it again with full depth
-                    // Null search with fallback to full search
-                    let proof_score = -self.go(-alpha - 1, -alpha, depth - 1);
+                    let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
 
                     if proof_score > alpha && proof_score < beta {
-                        -self.go(-beta, -alpha, depth - 1)
+                        -self.go(-beta, -alpha, new_depth)
                     } else {
                         proof_score
                     }
@@ -517,10 +791,10 @@ impl<'a> Search<'a> {
                 }
             } else {
                 // Null search with fallback to full search
-                let proof_score = -self.go(-alpha - 1, -alpha, depth - 1);
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
 
                 if proof_score > alpha && proof_score < beta {
-                    -self.go(-beta, -alpha, depth - 1)
+                    -self.go(-beta, -alpha, new_depth)
                 } else {
                     proof_score
                 }
@@ -579,7 +853,7 @@ impl<'a> Search<'a> {
             if score >= beta {
                 let is_non_capture = (mv & MV_FLAG_CAP) == 0;
 
-                if is_non_capture {
+                if is_non_capture && self.excluded_move == 0 {
                     let src_piece = self.chess.spt()[(mv & 0x3F) as usize] as usize;
                     let dst_square = ((mv >> 6) & 0x3F) as usize;
 
@@ -594,7 +868,20 @@ impl<'a> Search<'a> {
                     debug_assert!(PieceIndex::from(src_piece) != PieceIndex::WhiteNullPiece);
                     debug_assert!(PieceIndex::from(src_piece) != PieceIndex::BlackNullPiece);
 
+                    // @todo - Check removing original history heuristic in favor of continuation history
                     self.update_history_heuristic(
+                        src_piece,
+                        dst_square,
+                        depth as i16 * depth as i16,
+                    );
+
+                    if mv != self.cut_moves[ply][0] {
+                        self.cut_moves[ply][1] = self.cut_moves[ply][0];
+                        self.cut_moves[ply][0] = mv;
+                    }
+
+                    self.update_cont_history(
+                        ply,
                         src_piece,
                         dst_square,
                         depth as i16 * depth as i16,
@@ -632,32 +919,38 @@ impl<'a> Search<'a> {
                             dst_square,
                             -(depth as i16 * depth as i16),
                         );
+
+                        self.update_cont_history(
+                            ply,
+                            src_piece,
+                            dst_square,
+                            -(depth as i16 * depth as i16),
+                        );
                     }
                 }
 
-                if !in_check && best_move & MV_FLAG_CAP == 0 {
-                    let static_eval = *static_eval.get_or_init(|| self.evaluate());
+                if self.excluded_move == 0 && !in_check && best_move & MV_FLAG_CAP == 0 {
                     if score >= static_eval {
-                        self.update_correction_heuristics(score - static_eval, depth as Eval);
+                        self.update_correction_heuristics(score, static_eval, depth as Eval);
                     }
                 }
 
-                self.tt.store(
-                    self.chess.zobrist_key(),
-                    score,
-                    depth,
-                    || Self::find_move_index_avx512(best_move, &original_move_list),
-                    BoundType::LowerBound,
-                );
+                if self.excluded_move == 0 {
+                    self.tt.store(
+                        self.chess.zobrist_key(),
+                        score,
+                        depth,
+                        || Self::find_move_index_avx512(best_move, &original_move_list),
+                        BoundType::LowerBound,
+                    );
+                }
                 self.rt.pop_position();
                 return score;
             }
         }
         self.rt.pop_position();
 
-        if !in_check && best_move & MV_FLAG_CAP == 0 {
-            let static_eval = *static_eval.get_or_init(|| self.evaluate());
-
+        if self.excluded_move == 0 && !in_check && best_move & MV_FLAG_CAP == 0 {
             let update_score = match bound_type {
                 BoundType::UpperBound if best_move == 0 => Some(0),
                 BoundType::UpperBound if best_score <= static_eval => Some(best_score),
@@ -666,7 +959,7 @@ impl<'a> Search<'a> {
             };
 
             if let Some(score) = update_score {
-                self.update_correction_heuristics(score - static_eval, depth as Eval);
+                self.update_correction_heuristics(score, static_eval, depth as Eval);
             }
         }
 
@@ -679,13 +972,15 @@ impl<'a> Search<'a> {
             return 0;
         }
 
-        self.tt.store(
-            self.chess.zobrist_key(),
-            best_score,
-            depth,
-            || Self::find_move_index_avx512(best_move, &original_move_list),
-            bound_type,
-        );
+        if self.excluded_move == 0 {
+            self.tt.store(
+                self.chess.zobrist_key(),
+                best_score,
+                depth,
+                || Self::find_move_index_avx512(best_move, &original_move_list),
+                bound_type,
+            );
+        }
 
         best_score
     }
@@ -726,6 +1021,27 @@ impl<'a> Search<'a> {
             -SCORE_INF
         };
 
+        // Precompute bitboards + pins for qsearch SEE pruning of captures.
+        // Only computed when not in check (in check -> quiescence_check_evasion, no SEE pruning).
+        let (qsee_bb_black, qsee_bb_white, qsee_bb_pieces, qsee_pins) = if !in_check {
+            let bbs = self.chess.bitboards();
+            let bb_black = bbs.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
+            let bb_white = bbs.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
+            let mut bb_pieces = [0u64; 8];
+            bbs.iter()
+                .take(8)
+                .zip(bbs.iter().skip(8))
+                .enumerate()
+                .for_each(|(i, (w, b))| bb_pieces[i] = *w | *b);
+            let pins = [
+                see::calc_pinnings(false, &self.chess, bb_black, bb_white),
+                see::calc_pinnings(true, &self.chess, bb_black, bb_white),
+            ];
+            (bb_black, bb_white, bb_pieces, Some(pins))
+        } else {
+            (0, 0, [0u64; 8], None)
+        };
+
         let mut moves = CaptureOrdering::new();
 
         let mut best_score: Eval = static_eval;
@@ -734,6 +1050,22 @@ impl<'a> Search<'a> {
         let mut move_list = [0u32; 256];
         for i in 0..moves.gen_moves(&self.chess, &mut move_list) {
             let mv = move_list[i] as u16;
+
+            if let Some(ref pins) = qsee_pins {
+                if !see::see_threshold(
+                    &WEIGHT_TABLE_ABS,
+                    self.tables,
+                    &board_copy,
+                    mv,
+                    SEE_QS_THRESHOLD,
+                    qsee_bb_black,
+                    qsee_bb_white,
+                    qsee_bb_pieces,
+                    Some(pins),
+                ) {
+                    continue;
+                }
+            }
 
             let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be valid
@@ -791,7 +1123,7 @@ impl<'a> Search<'a> {
 
         let mut alpha = alpha;
 
-        let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(0, 0xFF);
+        let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(0, 0xFF, [0; 2]);
 
         let mut best_score = -SCORE_INF;
         let mut num_legal_moves = 0;
@@ -800,9 +1132,14 @@ impl<'a> Search<'a> {
 
         let mut move_list = [0u32; 256];
         let mut original_move_list = [0u16; 256];
+        let no_cont = ContHistRef {
+            ply1: None,
+            ply2: None,
+        };
         for i in 0..moves.gen_moves(
             &self.chess,
             &self.history_moves,
+            &no_cont,
             &mut original_move_list,
             &mut move_list,
         ) {
@@ -878,27 +1215,26 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn update_correction_heuristics(&mut self, diff: Eval, depth: i16) {
-        let diff_scaled = diff * CORR_GRAIN;
+    fn update_correction_heuristics(&mut self, score: Eval, static_eval: Eval, depth: i16) {
+        let entry = self.pawn_correction_heuristic_entry();
+        let mut current_value = *entry as i32;
 
-        let depth_weight = (depth * depth + 2 * depth + 1).min(CORR_WEIGHT_SCALE) as Eval;
+        let depth = depth as i32;
+        let diff = (score as i32) - (static_eval as i32);
 
-        Self::update_correction_heuristic_entry(
-            self.pawn_correction_heuristic_entry(),
-            diff_scaled,
-            depth_weight,
-        );
-    }
+        let diff_scaled = (diff * (CORR_GRAIN as i32))
+            .max((-CORR_MAX_ERROR) as i32)
+            .min(CORR_MAX_ERROR as i32);
 
-    #[inline(always)]
-    fn update_correction_heuristic_entry(entry: &mut Eval, diff_scaled: Eval, depth_weight: Eval) {
-        let mut current_value = *entry as Eval;
+        let depth_weight = (depth * depth + 2 * depth + 1).min(CORR_WEIGHT_SCALE as i32) as i32;
 
-        current_value = (current_value * (CORR_WEIGHT_SCALE - depth_weight)
+        current_value = (current_value * (CORR_WEIGHT_SCALE as i32 - depth_weight)
             + diff_scaled * depth_weight)
-            / CORR_WEIGHT_SCALE;
+            / (CORR_WEIGHT_SCALE as i32);
 
-        current_value = current_value.max(-CORR_MAX_ERROR).min(CORR_MAX_ERROR);
+        current_value = current_value
+            .max((-CORR_MAX_ERROR) as i32)
+            .min(CORR_MAX_ERROR as i32);
 
         *entry = current_value as Eval;
     }
@@ -907,13 +1243,7 @@ impl<'a> Search<'a> {
     pub fn eval_with_correction(&mut self, base_eval: Eval) -> Eval {
         let pawn_corr = *self.pawn_correction_heuristic_entry();
 
-        let mut correction = 0;
-        correction += pawn_corr / CORR_GRAIN;
-
-        // self.corr_stats.push(CorrStats {
-        //     original_eval: base_eval,
-        //     error: correction,
-        // });
+        let correction = pawn_corr / CORR_GRAIN;
 
         (base_eval + correction)
             .min(SCORE_INF - PV_DEPTH as i16)
@@ -1210,6 +1540,46 @@ impl<'a> Search<'a> {
         *entry = value;
     }
 
+    #[inline(always)]
+    fn update_cont_history(&mut self, ply: usize, cur_piece: usize, cur_dst: usize, bonus: i16) {
+        unsafe {
+            debug_assert!(cur_piece < 16);
+            debug_assert!(cur_dst < 64);
+            std::hint::assert_unchecked(cur_piece < 16);
+            std::hint::assert_unchecked(cur_dst < 64);
+        }
+
+        let cur_piece_comp = util::compress_piece_index_nonzero(cur_piece);
+
+        if ply >= 1 {
+            let (p, d) = self.move_stack[ply - 1];
+            let idx = p as usize * 64 + d as usize;
+
+            unsafe {
+                debug_assert!(idx < 768);
+                std::hint::assert_unchecked(idx < 768);
+            }
+
+            let entry = &mut self.cont_history[0][idx][cur_piece_comp * 64 + cur_dst];
+            let ratio = ((*entry as i64) * bonus.abs() as i64 / HISTORY_MAX as i64) as i16;
+            *entry = (*entry + (bonus - ratio)).clamp(-HISTORY_MAX, HISTORY_MAX);
+        }
+
+        if ply >= 2 {
+            let (p, d) = self.move_stack[ply - 2];
+            let idx = p as usize * 64 + d as usize;
+
+            unsafe {
+                debug_assert!(idx < 768);
+                std::hint::assert_unchecked(idx < 768);
+            }
+
+            let entry = &mut self.cont_history[1][idx][cur_piece_comp * 64 + cur_dst];
+            let ratio = ((*entry as i64) * bonus.abs() as i64 / HISTORY_MAX as i64) as i16;
+            *entry = (*entry + (bonus - ratio)).clamp(-HISTORY_MAX, HISTORY_MAX);
+        }
+    }
+
     fn check_sigabort(&self) -> bool {
         if let Some(ref sig) = self.sig {
             match sig.try_recv() {
@@ -1229,7 +1599,7 @@ impl<'a> Search<'a> {
         let mut board = self.chess.clone();
 
         let mut move_list = [0u16; 256];
-        let move_count = board.gen_moves_avx512::<false>(&mut move_list);
+        let move_count = board.gen_moves_avx512::<false, _>(&mut move_list);
 
         for i in 0..move_count {
             if !unsafe { board.make_move(move_list[i], self.tables) } {

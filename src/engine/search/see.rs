@@ -327,6 +327,10 @@ pub fn see_threshold(
         (to_sq_mask, board.spt()[to_sq])
     };
 
+    unsafe {
+        std::hint::assert_unchecked(to_piece < 16);
+    }
+
     // 1. First capture:
     // `exchange` tracks the current capture sequence value offset to the
     // given threshold. It starts from the score of the initially captured
@@ -347,10 +351,6 @@ pub fn see_threshold(
     if exchange <= 0 {
         // Capturing piece can be lost while still reaching the threshold
         return true;
-    }
-
-    unsafe {
-        std::hint::assert_unchecked(to_piece < 16);
     }
 
     let mut b_move = board.b_move();
@@ -397,6 +397,8 @@ pub fn see_threshold(
 
         debug_assert!(lane_mask != 0, "LVA called with no attackers");
         let piece_index = 7 - lane_mask.leading_zeros();
+
+        std::hint::assert_unchecked(piece_index < 8);
 
         let attacker_ls_lane = _mm512_permutexvar_epi64(
             _mm512_castsi128_si512(_mm_cvtsi32_si128(piece_index as i32)),
@@ -577,7 +579,7 @@ mod tests {
         let mut board_copy = board.clone();
 
         let mut move_list = [0u16; 256];
-        for i in 0..board_copy.gen_moves_avx512::<false>(&mut move_list) {
+        for i in 0..board_copy.gen_moves_avx512::<false, _>(&mut move_list) {
             if move_list[i] == mv {
                 if !unsafe { board_copy.make_move(mv, tables) }
                     || board_copy.in_check(tables, !board_copy.b_move())
@@ -663,8 +665,7 @@ mod tests {
 
         'outer: loop {
             let mut move_list = [0u16; 256];
-
-            let move_count = board.gen_moves_avx512::<true>(&mut move_list);
+            let move_count = board.gen_moves_avx512::<true, _>(&mut move_list);
 
             let mut lva_capture_moves = move_list
                 .iter()
@@ -827,7 +828,7 @@ mod tests {
         }
 
         let mut move_list = [0u16; 256];
-        let move_count = board.gen_moves_avx512::<false>(&mut move_list);
+        let move_count = board.gen_moves_avx512::<false, _>(&mut move_list);
 
         let board_copy = board.clone();
 

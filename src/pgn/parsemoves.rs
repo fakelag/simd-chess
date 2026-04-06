@@ -184,7 +184,9 @@ impl<'a> PgnParser<'a> {
 
     fn consume_and_make_move(&mut self) -> anyhow::Result<u16> {
         let mut pseudolegal_moves = [0u16; 256];
-        let pseudolegal_moves_count = self.board.gen_moves_avx512::<false>(&mut pseudolegal_moves);
+        let pseudolegal_moves_count = self
+            .board
+            .gen_moves_avx512::<false, _>(&mut pseudolegal_moves);
 
         let (start, end, len) = {
             let start = self.pos;
