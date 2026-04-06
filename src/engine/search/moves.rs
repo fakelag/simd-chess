@@ -3,7 +3,7 @@ use std::arch::x86_64::*;
 use crate::{
     engine::{
         chess_v2,
-        search::{eval, see},
+        search::{eval, search::SeeInfo, see},
         sorting, tables,
     },
     util,
@@ -37,6 +37,7 @@ const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
 pub struct MvvlvaOrdering<const HISTORY_MIN: i16, const HISTORY_MAX: i16> {
     tt_index: u8,
     pv_move: u16,
+    cut_moves: [u16; 2],
 }
 
 impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN, HISTORY_MAX> {
@@ -47,30 +48,30 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         |                                                               |
         \/                                                             \/
         ================================================================
-        |  SORT_QUIET_RANGE                     | SORT_CAPTURE_RANGE |TP|
+        | SORT_QUIET_RANGE                     | SORT_CAPTURE_RANGE |TP|
     */
 
-    const SORT_FAST_CAPTURE_RANGE: u16 = 32;
-    const SORT_FAST_QUIET_RANGE: u16 = 65502;
+    const SORT_CAPTURE_RANGE: u16 = 32;
+    const SORT_QUIET_RANGE: u16 = 65502;
 
-    const SORT_FAST_QUIET_BASE: u16 = 0;
-    const SORT_FAST_CAPTURE_BASE: u16 = Self::SORT_FAST_QUIET_BASE + Self::SORT_FAST_QUIET_RANGE;
-    const SORT_FAST_PVTT_BASE: u16 = Self::SORT_FAST_CAPTURE_BASE + Self::SORT_FAST_CAPTURE_RANGE;
+    const SORT_QUIET_BASE: u16 = 0;
+    const SORT_CAPTURE_BASE: u16 = Self::SORT_QUIET_BASE + Self::SORT_QUIET_RANGE;
+    const SORT_PVTT_BASE: u16 = Self::SORT_CAPTURE_BASE + Self::SORT_CAPTURE_RANGE;
 
-    const _ASSERT_RANGE: () = assert!(u16::MAX as usize - 1 == Self::SORT_FAST_PVTT_BASE as usize);
+    const _ASSERT_RANGE: () = assert!(u16::MAX as usize - 1 == Self::SORT_PVTT_BASE as usize);
     const _ASSERT_SORT_HISTORY_MINMAX_RANGE: () = assert!(
-        Self::SORT_FAST_QUIET_RANGE as usize - 1
-            == HISTORY_MAX as usize + HISTORY_MIN.abs() as usize
+        Self::SORT_QUIET_RANGE as usize - 1 == HISTORY_MAX as usize + HISTORY_MIN.abs() as usize
     );
 
     #[inline(always)]
-    pub fn new(pv_move: u16, tt_move_index: u8) -> Self {
+    pub fn new(pv_move: u16, tt_move_index: u8, cut_moves: [u16; 2]) -> Self {
         Self::_ASSERT_RANGE;
         Self::_ASSERT_SORT_HISTORY_MINMAX_RANGE;
 
         Self {
             pv_move,
             tt_index: tt_move_index,
+            cut_moves,
         }
     }
 
@@ -79,6 +80,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         &mut self,
         board: &chess_v2::ChessGame,
         history_moves: &[[i16; 64]; 16],
+        cont_hist: &ContHistRef,
         original_move_list: &mut [u16; 256],
         move_list: &mut [u32; 256],
     ) -> usize {
@@ -96,7 +98,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         while i < move_count {
             let mv = original_move_list[i];
 
-            move_list[i] = self.score_move(mv, i as u8, board.spt(), history_moves);
+            move_list[i] = self.score_move(mv, i as u8, board.spt(), history_moves, cont_hist);
 
             if (mv & chess_v2::MV_FLAGS_PR_MASK) == chess_v2::MV_FLAGS_PR_QUEEN {
                 let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
@@ -129,11 +131,11 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         sorting::u32::sort_256u32_desc_avx512(move_list, move_count);
 
         debug_assert!(
-            move_list[self.tt_index as usize] == 0
+            original_move_list[self.tt_index as usize] == 0
                 || !move_list[0..move_count]
                     .iter()
                     .any(|mv| *mv as u16 == move_list[self.tt_index as usize] as u16)
-                || (move_list[0] as u16) == move_list[self.tt_index as usize] as u16
+                || (move_list[0] as u16) == original_move_list[self.tt_index as usize] as u16
         );
         debug_assert!(self.pv_move == 0 || move_list[0] as u16 == self.pv_move);
 
@@ -147,6 +149,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         mv_index: u8,
         spt: &[u8; 64],
         history_moves: &[[i16; 64]; 16],
+        cont_hist: &ContHistRef,
     ) -> u32 {
         macro_rules! score {
             ($score:expr) => {
@@ -155,46 +158,55 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         }
 
         if mv == self.pv_move {
-            return score!(Self::SORT_FAST_PVTT_BASE + 1);
+            return score!(Self::SORT_PVTT_BASE + 1);
         }
 
         if mv_index == self.tt_index {
-            return score!(Self::SORT_FAST_PVTT_BASE);
+            return score!(Self::SORT_PVTT_BASE);
         }
 
         let src_sq = mv & 0x3F;
         let dst_sq = (mv >> 6) & 0x3F;
 
         if (mv & chess_v2::MV_FLAG_CAP) == 0 {
+            if mv == self.cut_moves[0] {
+                return score!(Self::SORT_CAPTURE_BASE - 1);
+            }
+            if mv == self.cut_moves[1] {
+                return score!(Self::SORT_CAPTURE_BASE - 2);
+            }
+
             unsafe {
                 // Safety:
                 // - src_sq and dst_sq are always < 64
                 // - src_piece is a PieceIndex < 16
                 let src_piece = *spt.get_unchecked(src_sq as usize) as usize;
 
-                let history_score = *history_moves
+                let mut combined = *history_moves
                     .get_unchecked(src_piece)
-                    .get_unchecked(dst_sq as usize);
+                    .get_unchecked(dst_sq as usize) as i32;
 
-                let history_score = (history_score as i32 + HISTORY_MIN.abs() as i32) as u16
-                    + Self::SORT_FAST_QUIET_BASE;
+                let src_piece_comp = util::compress_piece_index_nonzero(src_piece);
+                debug_assert!(src_piece_comp < 12);
 
-                debug_assert!(
-                    history_score >= Self::SORT_FAST_QUIET_BASE,
-                    "history score = {}, clamped score = {}",
-                    *history_moves
-                        .get_unchecked(src_piece)
-                        .get_unchecked(dst_sq as usize),
-                    history_score
-                );
-                debug_assert!(
-                    history_score <= (Self::SORT_FAST_CAPTURE_BASE - 1),
-                    "history score = {}, clamped score = {}",
-                    *history_moves
-                        .get_unchecked(src_piece)
-                        .get_unchecked(dst_sq as usize),
-                    history_score
-                );
+                if let Some(ch1) = cont_hist.ply1 {
+                    let index = src_piece_comp * 64 + dst_sq as usize;
+                    debug_assert!(index < 768);
+
+                    combined += *ch1.get_unchecked(index) as i32 / 2;
+                }
+                if let Some(ch2) = cont_hist.ply2 {
+                    let index = src_piece_comp * 64 + dst_sq as usize;
+                    debug_assert!(index < 768);
+
+                    combined += *ch2.get_unchecked(index) as i32 / 2;
+                }
+
+                let clamped = combined.clamp(HISTORY_MIN as i32, HISTORY_MAX as i32) as i16;
+
+                let history_score = ((clamped as i32 + HISTORY_MIN.abs() as i32) as u16
+                    + Self::SORT_QUIET_BASE)
+                    .min(Self::SORT_CAPTURE_BASE - 3);
 
                 return score!(history_score);
             }
@@ -213,13 +225,13 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> MvvlvaOrdering<HISTORY_MIN,
         };
 
         debug_assert!(
-            Self::SORT_FAST_CAPTURE_BASE + mvvlva_score < Self::SORT_FAST_PVTT_BASE,
+            Self::SORT_CAPTURE_BASE + mvvlva_score < Self::SORT_PVTT_BASE,
             "mvv-lva score = {}, clamped score = {}",
             mvvlva_score,
-            Self::SORT_FAST_CAPTURE_BASE + mvvlva_score
+            Self::SORT_CAPTURE_BASE + mvvlva_score
         );
 
-        score!(Self::SORT_FAST_CAPTURE_BASE + mvvlva_score)
+        score!(Self::SORT_CAPTURE_BASE + mvvlva_score)
     }
 }
 
@@ -364,16 +376,26 @@ impl CaptureOrdering {
             let src_piece_id = *spt.get_unchecked(src_sq as usize) as u32;
             let dst_piece_id = *spt.get_unchecked(dst_sq as usize) as u32;
 
-            ((chess_v2::PieceIndex::PieceIndexMax as u32 - dst_piece_id) << 8) | src_piece_id
+            // let promotion_bonus = ((mv & chess_v2::MV_FLAG_PROMOTION != 0) as u32) << 4;
+            let promotion_bonus = 0;
+
+            ((chess_v2::PieceIndex::PieceIndexMax as u32 - dst_piece_id + promotion_bonus) << 8)
+                | src_piece_id
         };
 
         score!(mvvlva_score)
     }
 }
 
+pub struct ContHistRef<'a> {
+    pub ply1: Option<&'a [i16; 768]>,
+    pub ply2: Option<&'a [i16; 768]>,
+}
+
 pub struct SeeOrdering<const HISTORY_MIN: i16, const HISTORY_MAX: i16> {
     tt_index: u8,
     pv_move: u16,
+    cut_moves: [u16; 2],
 }
 
 impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HISTORY_MAX> {
@@ -399,12 +421,13 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
     const _ASSERT_RANGE: () = assert!(u16::MAX as usize - 1 == Self::SORT_PVTT_BASE as usize);
 
     #[inline(always)]
-    pub fn new(pv_move: u16, tt_move_index: u8) -> Self {
+    pub fn new(pv_move: u16, tt_move_index: u8, cut_moves: [u16; 2]) -> Self {
         Self::_ASSERT_RANGE;
 
         Self {
             pv_move,
             tt_index: tt_move_index,
+            cut_moves,
         }
     }
 
@@ -414,6 +437,8 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         board: &chess_v2::ChessGame,
         tables: &tables::Tables,
         history_moves: &[[i16; 64]; 16],
+        cont_hist: &ContHistRef,
+        see_info: &SeeInfo,
         original_move_list: &mut [u16; 256],
         move_list: &mut [u32; 256],
     ) -> usize {
@@ -427,22 +452,6 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
             std::hint::assert_unchecked(move_count < 248);
         }
 
-        let bitboards = board.bitboards();
-        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
-        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
-        let mut piece_board: [u64; 8] = [0u64; 8];
-        bitboards
-            .iter()
-            .take(8)
-            .zip(bitboards.iter().skip(8))
-            .enumerate()
-            .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
-
-        let pins = Some(&[
-            see::calc_pinnings(false, &board, black_board, white_board),
-            see::calc_pinnings(true, &board, black_board, white_board),
-        ]);
-
         let mut i = 0;
         while i < move_count {
             let mv = original_move_list[i];
@@ -452,12 +461,13 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
                 i as u8,
                 board.spt(),
                 history_moves,
+                cont_hist,
                 tables,
                 board,
-                black_board,
-                white_board,
-                piece_board,
-                pins,
+                see_info.black_board,
+                see_info.white_board,
+                see_info.pieces_board,
+                Some(&see_info.pins),
             );
 
             if (mv & chess_v2::MV_FLAGS_PR_MASK) == chess_v2::MV_FLAGS_PR_QUEEN {
@@ -494,11 +504,11 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         sorting::u32::sort_256u32_desc_avx512(move_list, move_count);
 
         debug_assert!(
-            move_list[self.tt_index as usize] == 0
+            original_move_list[self.tt_index as usize] == 0
                 || !move_list[0..move_count]
                     .iter()
                     .any(|mv| *mv as u16 == move_list[self.tt_index as usize] as u16)
-                || (move_list[0] as u16) == move_list[self.tt_index as usize] as u16
+                || (move_list[0] as u16) == original_move_list[self.tt_index as usize] as u16,
         );
         debug_assert!(self.pv_move == 0 || move_list[0] as u16 == self.pv_move);
 
@@ -512,6 +522,7 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         mv_index: u8,
         spt: &[u8; 64],
         history_moves: &[[i16; 64]; 16],
+        cont_hist: &ContHistRef,
         tables: &tables::Tables,
         board: &chess_v2::ChessGame,
         black_board: u64,
@@ -537,21 +548,46 @@ impl<const HISTORY_MIN: i16, const HISTORY_MAX: i16> SeeOrdering<HISTORY_MIN, HI
         let dst_sq = (mv >> 6) & 0x3F;
 
         if (mv & chess_v2::MV_FLAG_CAP) == 0 {
+            if mv == self.cut_moves[0] {
+                return score!(Self::SORT_QUIET_BASE + Self::SORT_QUIETS_RANGE - 1);
+            }
+            if mv == self.cut_moves[1] {
+                return score!(Self::SORT_QUIET_BASE + Self::SORT_QUIETS_RANGE - 2);
+            }
+
             unsafe {
                 // Safety:
                 // - src_sq and dst_sq are always < 64
                 // - src_piece is a PieceIndex < 16
                 let src_piece = *spt.get_unchecked(src_sq as usize) as usize;
 
-                let history_score = *history_moves
+                let mut combined = *history_moves
                     .get_unchecked(src_piece)
-                    .get_unchecked(dst_sq as usize);
+                    .get_unchecked(dst_sq as usize) as i32;
 
-                let final_score = ((history_score as i32 + HISTORY_MIN.abs() as i32) as u16
+                let src_piece_comp = util::compress_piece_index_nonzero(src_piece);
+                debug_assert!(src_piece_comp < 12);
+
+                if let Some(ch1) = cont_hist.ply1 {
+                    let index = src_piece_comp * 64 + dst_sq as usize;
+                    debug_assert!(index < 768);
+
+                    combined += *ch1.get_unchecked(index) as i32 / 2;
+                }
+                if let Some(ch2) = cont_hist.ply2 {
+                    let index = src_piece_comp * 64 + dst_sq as usize;
+                    debug_assert!(index < 768);
+
+                    combined += *ch2.get_unchecked(index) as i32 / 2;
+                }
+
+                let clamped = combined.clamp(HISTORY_MIN as i32, HISTORY_MAX as i32) as i16;
+
+                let final_score = ((clamped as i32 + HISTORY_MIN.abs() as i32) as u16
                     + Self::SORT_QUIET_BASE)
                     .clamp(
                         Self::SORT_QUIET_BASE,
-                        Self::SORT_QUIET_BASE + Self::SORT_QUIETS_RANGE - 1,
+                        Self::SORT_QUIET_BASE + Self::SORT_QUIETS_RANGE - 3,
                     );
 
                 return score!(final_score);

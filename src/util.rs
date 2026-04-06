@@ -408,3 +408,32 @@ pub fn print_m512_epi64(a: &__m512i) {
     }
     println!("{:x?}", arr);
 }
+
+pub fn print_m512_epi8(a: &__m512i) {
+    let mut arr = [0u8; 64];
+    unsafe {
+        _mm512_storeu_si512(arr.as_mut_ptr() as *mut __m512i, *a);
+    }
+    println!("{:x?}", arr);
+}
+
+#[inline(always)]
+pub fn compress_piece_index_nonzero(piece_id: usize) -> usize {
+    debug_assert!(piece_id != 0, "Piece ID cannot be zero");
+    debug_assert!(
+        piece_id < chess_v2::PieceIndex::BlackPad as usize,
+        "Invalid piece ID: {}",
+        piece_id
+    );
+    let comp_index = piece_id - 1 - (((piece_id >> 3) & 1) << 1);
+    unsafe {
+        debug_assert!(
+            comp_index < 12,
+            "Compressed piece index out of bounds: {}, original piece ID: {}",
+            comp_index,
+            piece_id
+        );
+        std::hint::assert_unchecked(comp_index < 12);
+    }
+    comp_index
+}
