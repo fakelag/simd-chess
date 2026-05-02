@@ -2,6 +2,12 @@ pub struct SigAbort {}
 
 pub type AbortSignal = crossbeam::channel::Receiver<SigAbort>;
 
+#[derive(std::marker::ConstParamTy, PartialEq, Eq)]
+pub enum EngineForm {
+    Strategy,
+    Tactical,
+}
+
 pub trait SearchStrategy<'a> {
     fn search(&mut self) -> u16;
     fn num_nodes_searched(&self) -> u64;
@@ -55,7 +61,8 @@ mod tests {
             // let mut search_engine =
             //     v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
 
-            let mut search_engine = search::Search::new(params, &tables, 16, rt);
+            let mut search_engine =
+                search::Search::<{ EngineForm::Strategy }>::new(params, &tables, 16, rt);
 
             search_engine.new_game();
             search_engine.load_from_fen(test_fen, &tables).unwrap();
@@ -185,5 +192,130 @@ mod tests {
             ITERATIONS,
             total_cycles / ITERATIONS as u64 / 1_000_000
         );
+    }
+
+    #[test]
+    fn search_accuracy() {
+        use crate::engine::search::eval::WEIGHT_TABLE_ABS;
+        use crate::matchmaking::fen_feeder::SharedFenFeeder;
+        use crate::matchmaking::matchmaking::PositionFeeder;
+
+        const NUM_POSITIONS: usize = 1000;
+        const NUM_THREADS: usize = 16;
+        const BENCH_DEPTH: u8 = 10;
+        const TT_SIZE_MB: usize = 16;
+        const POSITIONS_PATH: &str = r".\data\positions\10m.txt";
+
+        fn total_material(bbs: &[u64; 16]) -> i32 {
+            let mut total = 0i32;
+            for i in 0..16 {
+                total += bbs[i].count_ones() as i32 * WEIGHT_TABLE_ABS[i] as i32;
+            }
+            total
+        }
+
+        let tables = tables::Tables::new();
+        let feeder = SharedFenFeeder::new(POSITIONS_PATH);
+        feeder.set_max_positions(NUM_POSITIONS);
+
+        let (tx, rx) =
+            crossbeam::channel::bounded::<(String, i32, i32, u16, u64, i32, u16, u64)>(256);
+
+        println!(
+            "position,material,strategy_score,strategy_bestmove,strategy_mcycles,tactical_score,tactical_bestmove,tactical_mcycles"
+        );
+
+        std::thread::scope(|s| {
+            for i in 0..NUM_THREADS {
+                let tables = &tables;
+                let mut feeder = feeder.clone();
+                let tx = tx.clone();
+
+                s.spawn(move || {
+                    let core_id = if i % 2 == 0 { i & 31 } else { (i + 16) & 31 };
+                    core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+
+                    let mut params_s = SearchParams::new();
+                    params_s.depth = Some(BENCH_DEPTH);
+                    let mut params_t = SearchParams::new();
+                    params_t.depth = Some(BENCH_DEPTH);
+
+                    let mut engine_s = search::Search::<{ EngineForm::Strategy }>::new(
+                        params_s,
+                        tables,
+                        TT_SIZE_MB,
+                        repetition::RepetitionTable::new(),
+                    );
+                    let mut engine_t = search::Search::<{ EngineForm::Tactical }>::new(
+                        params_t,
+                        tables,
+                        TT_SIZE_MB,
+                        repetition::RepetitionTable::new(),
+                    );
+
+                    while let Some(fen) = feeder.next_position() {
+                        engine_s.new_game();
+                        engine_s.load_from_fen(&fen, tables).unwrap();
+                        engine_s.new_search();
+                        let material = total_material(engine_s.get_board_mut().bitboards());
+                        let start_s = rdtsc();
+                        let bestmove_s = engine_s.search();
+                        let mcycles_s = (rdtsc() - start_s) / 1_000_000;
+
+                        engine_t.new_game();
+                        engine_t.load_from_fen(&fen, tables).unwrap();
+                        engine_t.new_search();
+                        let start_t = rdtsc();
+                        let bestmove_t = engine_t.search();
+                        let mcycles_t = (rdtsc() - start_t) / 1_000_000;
+
+                        let _ = tx.send((
+                            fen.to_string(),
+                            material,
+                            engine_s.search_score(),
+                            bestmove_s,
+                            mcycles_s,
+                            engine_t.search_score(),
+                            bestmove_t,
+                            mcycles_t,
+                        ));
+                    }
+                });
+            }
+
+            drop(tx);
+
+            let mut count = 0usize;
+            while let Ok((
+                fen,
+                material,
+                score_s,
+                bestmove_s,
+                mcycles_s,
+                score_t,
+                bestmove_t,
+                mcycles_t,
+            )) = rx.recv()
+            {
+                println!(
+                    "{},{},{},{},{},{},{},{}",
+                    fen,
+                    material,
+                    score_s,
+                    util::move_string(bestmove_s),
+                    mcycles_s,
+                    score_t,
+                    util::move_string(bestmove_t),
+                    mcycles_t,
+                );
+                count += 1;
+                if count % 100 == 0 {
+                    eprintln!(
+                        "Progress: {:.02}%",
+                        count as f64 / NUM_POSITIONS as f64 * 100.0
+                    );
+                }
+            }
+        });
     }
 }

@@ -178,6 +178,16 @@ impl Into<char> for PieceIndex {
     }
 }
 
+const PIECEINDEX_NONPAWN_MASK_U16: [u16; 8] = {
+    let mut m = [0u16; 8];
+    m[PieceIndex::WhiteKing as usize] = 0xFFFF;
+    m[PieceIndex::WhiteQueen as usize] = 0xFFFF;
+    m[PieceIndex::WhiteRook as usize] = 0xFFFF;
+    m[PieceIndex::WhiteBishop as usize] = 0xFFFF;
+    m[PieceIndex::WhiteKnight as usize] = 0xFFFF;
+    m
+};
+
 #[repr(C)]
 #[repr(align(64))]
 #[derive(Default, Debug, Clone, Copy)]
@@ -201,6 +211,7 @@ pub struct ChessGame {
     pawn_key: u64,
     occupancy: u64,
     non_pawn_mat: [u16; 2],
+    non_pawn_key: [u16; 2],
 }
 const _ASSERT_CHESS_GAME_SIZE: () = assert!(std::mem::size_of::<ChessGame>() == 256);
 
@@ -218,6 +229,7 @@ impl ChessGame {
             pawn_key: 0,
             occupancy: 0,
             non_pawn_mat: [0; 2],
+            non_pawn_key: [0; 2],
         }
     }
 
@@ -1241,6 +1253,15 @@ impl ChessGame {
 
         let from_piece = self.spt[from_sq as usize] as usize;
         let to_piece = self.spt[to_sq as usize] as usize;
+
+        unsafe {
+            debug_assert!(from_piece < PieceIndex::PieceIndexMax as usize);
+            debug_assert!(to_piece < PieceIndex::PieceIndexMax as usize);
+
+            std::hint::assert_unchecked(from_piece < PieceIndex::PieceIndexMax as usize);
+            std::hint::assert_unchecked(to_piece < PieceIndex::PieceIndexMax as usize);
+        }
+
         let is_capture = (move_flags & MV_FLAG_CAP) != 0;
         let mut to_square_piece = from_piece;
 
@@ -1302,8 +1323,13 @@ impl ChessGame {
                     //  - rook_from_sq and rook_to_sq are guaranteed to be in board range [0, =63]
                     let rook_keys = zb_keys.hash_piece_squares_new.get_unchecked(rook_piece_id);
 
-                    self.zobrist_key ^= rook_keys.get_unchecked(rook_from_sq);
-                    self.zobrist_key ^= rook_keys.get_unchecked(rook_to_sq);
+                    let h_from = *rook_keys.get_unchecked(rook_from_sq);
+                    let h_to = *rook_keys.get_unchecked(rook_to_sq);
+
+                    let delta = h_from ^ h_to;
+                    self.zobrist_key ^= delta;
+
+                    self.non_pawn_key[self.b_move as usize] ^= delta as u16;
                 }
 
                 nnue::NnueUpdate::castle(
@@ -1427,11 +1453,17 @@ impl ChessGame {
                 NON_PAWN_MATERIAL_TABLE.get_unchecked(to_piece);
 
             // Remove moved piece from from_sq and add it to to_sq
-            self.zobrist_key ^=
-                zb_keys.hash_piece_squares_new.get_unchecked(from_piece)[from_sq as usize];
-            self.zobrist_key ^= zb_keys
+            let h_from = *zb_keys
                 .hash_piece_squares_new
-                .get_unchecked(to_square_piece)[to_sq as usize];
+                .get_unchecked(from_piece)
+                .get_unchecked(from_sq as usize);
+            let h_to = *zb_keys
+                .hash_piece_squares_new
+                .get_unchecked(to_square_piece)
+                .get_unchecked(to_sq as usize);
+
+            self.zobrist_key ^= h_from;
+            self.zobrist_key ^= h_to;
             self.pawn_key ^= tables
                 .zobrist_hash_keys
                 .hash_pawn_squares
@@ -1441,13 +1473,24 @@ impl ChessGame {
                 .hash_pawn_squares
                 .get_unchecked(to_square_piece)[to_sq as usize];
 
-            // Remove captured piece from Zobrist key
-            self.zobrist_key ^=
-                zb_keys.hash_piece_squares_new.get_unchecked(to_piece)[to_sq as usize];
+            *self.non_pawn_key.get_unchecked_mut(from_piece >> 3) ^=
+                (h_from as u16) & PIECEINDEX_NONPAWN_MASK_U16[from_piece & 7];
+
+            *self.non_pawn_key.get_unchecked_mut(to_square_piece >> 3) ^=
+                (h_to as u16) & PIECEINDEX_NONPAWN_MASK_U16[to_square_piece & 7];
+
+            let h_cap = *zb_keys
+                .hash_piece_squares_new
+                .get_unchecked(to_piece)
+                .get_unchecked(to_sq as usize);
+            self.zobrist_key ^= h_cap;
             self.pawn_key ^= tables
                 .zobrist_hash_keys
                 .hash_pawn_squares
                 .get_unchecked(to_piece)[to_sq as usize];
+
+            *self.non_pawn_key.get_unchecked_mut(to_piece >> 3) ^=
+                (h_cap as u16) & PIECEINDEX_NONPAWN_MASK_U16[to_piece & 7];
 
             // Remove en passant square from Zobrist key
             self.zobrist_key ^= zb_keys
@@ -1577,7 +1620,7 @@ impl ChessGame {
             let nnue_update = unsafe { self.make_move_nnue(mv, tables) };
 
             if nnue_update.is_some() && !self.in_check(tables, !self.b_move) {
-                let (board_key, pawn_key) = self.calc_initial_zobrist_key(tables);
+                let (board_key, pawn_key, non_pawn_key) = self.calc_initial_zobrist_key(tables);
                 assert!(
                     self.zobrist_key == board_key,
                     "Zobrist key mismatch after move {}",
@@ -1587,6 +1630,13 @@ impl ChessGame {
                     self.pawn_key == pawn_key,
                     "Pawn key mismatch after move {}",
                     util::move_string_dbg(mv)
+                );
+                assert!(
+                    self.non_pawn_key == non_pawn_key,
+                    "Non-pawn key mismatch after move {}: got {:?}, expected {:?}",
+                    util::move_string_dbg(mv),
+                    self.non_pawn_key,
+                    non_pawn_key,
                 );
                 assert!(
                     self.spt == self.calc_spt(),
@@ -1801,7 +1851,8 @@ impl ChessGame {
             }
         }
 
-        (self.zobrist_key, self.pawn_key) = self.calc_initial_zobrist_key(tables);
+        (self.zobrist_key, self.pawn_key, self.non_pawn_key) =
+            self.calc_initial_zobrist_key(tables);
         self.spt = self.calc_spt();
         self.occupancy = self.calc_occupancy();
         self.non_pawn_mat = self.calc_non_pawn_mat();
@@ -1964,22 +2015,21 @@ impl ChessGame {
         }
     }
 
-    pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> (u64, u64) {
+    pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> (u64, u64, [u16; 2]) {
         let zb_keys = &tables.zobrist_hash_keys;
 
         let mut board_key = 0u64;
         let mut pawn_key = zb_keys.no_pawn_key;
+        let mut non_pawn_key = [0u16; 2];
 
         for square in 0..64 {
             let piece_id = self.piece_at_slow(1 << square);
-            board_key ^= zb_keys.hash_piece_squares_new[piece_id][square as usize];
+            let h = zb_keys.hash_piece_squares_new[piece_id][square as usize];
+            board_key ^= h;
+            pawn_key ^= zb_keys.hash_pawn_squares[piece_id][square as usize];
 
-            match PieceIndex::from(piece_id) {
-                PieceIndex::WhitePawn | PieceIndex::BlackPawn => {
-                    pawn_key ^= zb_keys.hash_pawn_squares[piece_id][square as usize];
-                }
-                _ => {}
-            }
+            let h16 = h as u16;
+            non_pawn_key[piece_id >> 3] ^= h16 & PIECEINDEX_NONPAWN_MASK_U16[piece_id & 7];
         }
 
         board_key ^= zb_keys.hash_en_passant_squares[self.en_passant as usize];
@@ -1992,7 +2042,7 @@ impl ChessGame {
             0
         };
 
-        (board_key, pawn_key)
+        (board_key, pawn_key, non_pawn_key)
     }
 
     // Sets move flags based on board state that can't be derived from move string
@@ -2076,6 +2126,11 @@ impl ChessGame {
     #[inline(always)]
     pub fn pawn_key(&self) -> u64 {
         self.pawn_key
+    }
+
+    #[inline(always)]
+    pub fn non_pawn_key(&self, side: usize) -> u16 {
+        self.non_pawn_key[side]
     }
 
     #[inline(always)]
@@ -3069,7 +3124,8 @@ mod tests {
                         continue;
                     }
 
-                    let (board_key, pawn_key) = board.calc_initial_zobrist_key(&tables);
+                    let (board_key, pawn_key, non_pawn_key) =
+                        board.calc_initial_zobrist_key(&tables);
 
                     assert_eq!(
                         board.zobrist_key(),
@@ -3088,6 +3144,13 @@ mod tests {
                         fen,
                         pawn_key,
                         board.pawn_key(),
+                    );
+                    assert_eq!(
+                        [board.non_pawn_key(0), board.non_pawn_key(1)],
+                        non_pawn_key,
+                        "Non-pawn key mismatch for move {}. Fen: {}",
+                        util::move_string(mv),
+                        fen,
                     );
 
                     check_keys_to_depth(fen, depth - 1, board, tables);

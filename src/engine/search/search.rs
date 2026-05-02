@@ -1,4 +1,4 @@
-use std::{arch::x86_64::*, cell::OnceCell};
+use std::arch::x86_64::*;
 
 use crossbeam::channel;
 
@@ -7,15 +7,17 @@ use crate::{
     engine::{
         chess_v2,
         search::{
-            AbortSignal, SearchStrategy, eval::*, moves::*, repetition::RepetitionTable,
-            search_params::SearchParams, see, transposition::*,
+            AbortSignal, EngineForm, SearchStrategy, eval::*, moves::*,
+            repetition::RepetitionTable, search_params::SearchParams, see, transposition::*,
         },
-        sorting,
         tables::{self},
     },
     nnue::nnue::{self, UpdatableNnue},
     nnue_load, util,
 };
+
+const EVAL_NNUE: bool = true;
+const EVAL_CACHE: bool = false;
 
 macro_rules! net_path {
     () => {
@@ -23,14 +25,37 @@ macro_rules! net_path {
     };
 }
 
-const EVAL_NNUE: bool = true;
-const EVAL_CACHE: bool = false;
-const NNUE_HSIZE: usize = 512;
-const NNUE_OSIZE: usize = 8;
+macro_rules! net_size {
+    () => {
+        512
+    };
+}
+const NET_OSIZE: usize = 8;
 
 const CORR_WEIGHT_SCALE: Eval = 128;
 const CORR_MAX_ERROR: Eval = 1024;
 const CORR_GRAIN: Eval = 8;
+
+const CORR_SUM_SCALE: Eval = 1024;
+
+const USE_PAWN_CORR: bool = true;
+const USE_NON_PAWN_CORR: bool = true;
+
+const CORR_W_PAWN: Eval = 128;
+const CORR_W_NP_STM: Eval = 48;
+const CORR_W_NP_NTM: Eval = 24;
+
+const USE_CORR_NMP_SKIP: bool = false;
+const USE_CORR_LMR_BUMP: bool = false;
+const USE_CORR_RFP_SCALE: bool = false;
+
+const CORR_NMP_SKIP_TH: Eval = 144;
+const CORR_LMR_BUMP_TH: Eval = 64;
+const CORR_RFP_SHAKY: Eval = 80;
+
+const CORR_MAG_HISTOGRAM: bool = false;
+const CORR_MAG_BUCKET_WIDTH: usize = 16;
+const CORR_MAG_NUM_BUCKETS: usize = 17; // 0-15, 16-31, ..., 240-255, 256+
 
 const PV_DEPTH: usize = 64;
 
@@ -71,12 +96,12 @@ impl PvTable {
 //     pub error: Eval,
 // }
 
-pub struct Search<'a> {
+pub struct Search<'a, const F: EngineForm> {
     chess: ChessGame,
     tables: &'a tables::Tables,
     sig: Option<AbortSignal>,
 
-    nnue: Box<nnue::LazyNnue<NNUE_HSIZE, NNUE_OSIZE>>,
+    nnue: Box<nnue::LazyNnue<{ net_size!() }, NET_OSIZE>>,
 
     ply: u8,
     is_stopping: bool,
@@ -107,10 +132,13 @@ pub struct Search<'a> {
     cont_history: Box<[[[i16; 768]; 768]; 2]>,
 
     pawn_correction_heuristic: [[Eval; u16::MAX as usize + 1]; 2],
+    non_pawn_correction_heuristic: Box<[[[Eval; u16::MAX as usize + 1]; 2]; 2]>,
+
+    corr_mag_histogram: [u64; CORR_MAG_NUM_BUCKETS],
     // pub corr_stats: Vec<CorrStats>,
 }
 
-impl<'a> SearchStrategy<'a> for Search<'a> {
+impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
     fn search(&mut self) -> u16 {
         const INITIAL_BOUND_MARGIN: Eval = 17;
 
@@ -187,6 +215,15 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
         self.node_count = node_count;
         self.quiet_nodes = quiet_nodes;
 
+        if CORR_MAG_HISTOGRAM {
+            let parts: Vec<String> = self
+                .corr_mag_histogram
+                .iter()
+                .map(|c| c.to_string())
+                .collect();
+            println!("info string corr_mag_hist={}", parts.join(","));
+        }
+
         self.pv[0]
     }
 
@@ -199,14 +236,14 @@ impl<'a> SearchStrategy<'a> for Search<'a> {
     }
 }
 
-impl<'a> Search<'a> {
+impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn new(
         params: SearchParams,
         tables: &'a tables::Tables,
         tt_size_hint_mb: usize,
         rt: RepetitionTable,
-    ) -> Search<'a> {
-        let nnue = nnue_load!(net_path!(), NNUE_HSIZE, NNUE_OSIZE);
+    ) -> Search<'a, F> {
+        let nnue = nnue_load!(net_path!(), { net_size!() }, NET_OSIZE);
 
         let mut s = Search {
             nnue,
@@ -256,6 +293,13 @@ impl<'a> Search<'a> {
             rt,
             tt: TranspositionTable::new(tt_size_hint_mb),
             pawn_correction_heuristic: [[0; u16::MAX as usize + 1]; 2],
+            non_pawn_correction_heuristic: unsafe {
+                let layout = std::alloc::Layout::new::<[[[Eval; u16::MAX as usize + 1]; 2]; 2]>();
+                let ptr = std::alloc::alloc_zeroed(layout)
+                    as *mut [[[Eval; u16::MAX as usize + 1]; 2]; 2];
+                Box::from_raw(ptr)
+            },
+            corr_mag_histogram: [0; CORR_MAG_NUM_BUCKETS],
             // corr_stats: Vec::new(),
         };
 
@@ -330,8 +374,12 @@ impl<'a> Search<'a> {
         for i in 0..2 {
             for j in 0..=u16::MAX as usize {
                 self.pawn_correction_heuristic[i][j] = 0;
+                self.non_pawn_correction_heuristic[0][i][j] = 0;
+                self.non_pawn_correction_heuristic[1][i][j] = 0;
             }
         }
+
+        self.corr_mag_histogram = [0; CORR_MAG_NUM_BUCKETS];
     }
 
     // pub fn resize_eval_table(&mut self, new_size_mb: usize) {
@@ -466,17 +514,25 @@ impl<'a> Search<'a> {
             false
         };
 
+        let corr_mag = (corrected_eval as i32 - static_eval as i32).unsigned_abs() as Eval;
+
         if prune_node && !in_check {
             if non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
                 let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
+                // if USE_CORR_RFP_SCALE && corr_mag > CORR_RFP_SHAKY {
+                //     eval_margin = eval_margin.saturating_add(corr_mag - CORR_RFP_SHAKY);
+                // }
 
                 if corrected_eval - eval_margin >= beta {
                     return corrected_eval - eval_margin;
                 }
             }
 
-            // Null move pruning
-            if depth >= 3 && self.chess.non_pawn_mat()[self.chess.b_move() as usize] > 0 {
+            // Null move pruning — skip if correction strongly disagrees with raw NNUE eval
+            // let nmp_corr_ok = !USE_CORR_NMP_SKIP || corr_mag < CORR_NMP_SKIP_TH;
+            if depth >= 3 && self.chess.non_pawn_mat()[self.chess.b_move() as usize] > 0
+            // && nmp_corr_ok
+            {
                 let ep_square = self.chess.make_null_move(self.tables);
 
                 let r = 2 + depth / 3;
@@ -772,6 +828,10 @@ impl<'a> Search<'a> {
 
                     r -= improving as i16;
                     r += non_pv_node as i16;
+
+                    // if USE_CORR_LMR_BUMP && corrected_eval < static_eval - CORR_LMR_BUMP_TH {
+                    //     r += 1;
+                    // }
 
                     r.clamp(1, new_depth as i16) as u8
                 };
@@ -1209,17 +1269,9 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
-    fn pawn_correction_heuristic_entry(&mut self) -> &mut Eval {
-        &mut self.pawn_correction_heuristic[self.chess.b_move() as usize]
-            [(self.chess.pawn_key() & 0xFFFF) as usize]
-    }
-
-    #[inline(always)]
-    fn update_correction_heuristics(&mut self, score: Eval, static_eval: Eval, depth: i16) {
-        let entry = self.pawn_correction_heuristic_entry();
+    fn update_correction_history(entry: &mut Eval, score: Eval, static_eval: Eval, depth: i32) {
         let mut current_value = *entry as i32;
 
-        let depth = depth as i32;
         let diff = (score as i32) - (static_eval as i32);
 
         let diff_scaled = (diff * (CORR_GRAIN as i32))
@@ -1240,14 +1292,69 @@ impl<'a> Search<'a> {
     }
 
     #[inline(always)]
+    fn update_correction_heuristics(&mut self, score: Eval, static_eval: Eval, depth: i16) {
+        let depth = depth as i32;
+        let stm = self.chess.b_move() as usize;
+        let ntm = 1 - stm;
+
+        if USE_PAWN_CORR {
+            let key = (self.chess.pawn_key() & 0xFFFF) as usize;
+            Self::update_correction_history(
+                &mut self.pawn_correction_heuristic[stm][key],
+                score,
+                static_eval,
+                depth,
+            );
+        }
+
+        if USE_NON_PAWN_CORR {
+            let ku = self.chess.non_pawn_key(stm) as usize;
+            let kt = self.chess.non_pawn_key(ntm) as usize;
+            Self::update_correction_history(
+                &mut self.non_pawn_correction_heuristic[stm][stm][ku],
+                score,
+                static_eval,
+                depth,
+            );
+            Self::update_correction_history(
+                &mut self.non_pawn_correction_heuristic[ntm][stm][kt],
+                score,
+                static_eval,
+                depth,
+            );
+        }
+    }
+
+    #[inline(always)]
     pub fn eval_with_correction(&mut self, base_eval: Eval) -> Eval {
-        let pawn_corr = *self.pawn_correction_heuristic_entry();
+        let stm = self.chess.b_move() as usize;
+        let ntm = 1 - stm;
 
-        let correction = pawn_corr / CORR_GRAIN;
+        let mut acc: i32 = 0;
 
-        (base_eval + correction)
-            .min(SCORE_INF - PV_DEPTH as i16)
-            .max((-SCORE_INF) + PV_DEPTH as i16)
+        if USE_PAWN_CORR {
+            let e = self.pawn_correction_heuristic[stm][(self.chess.pawn_key() & 0xFFFF) as usize]
+                as i32;
+            acc += e * CORR_W_PAWN as i32;
+        }
+        if USE_NON_PAWN_CORR {
+            let ku = self.chess.non_pawn_key(stm) as usize;
+            let kt = self.chess.non_pawn_key(ntm) as usize;
+            acc += self.non_pawn_correction_heuristic[stm][stm][ku] as i32 * CORR_W_NP_STM as i32;
+            acc += self.non_pawn_correction_heuristic[ntm][stm][kt] as i32 * CORR_W_NP_NTM as i32;
+        }
+
+        let correction = acc / CORR_SUM_SCALE as i32;
+
+        if CORR_MAG_HISTOGRAM {
+            let bucket = (correction.unsigned_abs() as usize / CORR_MAG_BUCKET_WIDTH)
+                .min(CORR_MAG_NUM_BUCKETS - 1);
+            self.corr_mag_histogram[bucket] += 1;
+        }
+
+        ((base_eval as i32) + correction)
+            .max((-SCORE_INF + PV_DEPTH as Eval) as i32)
+            .min((SCORE_INF - PV_DEPTH as Eval) as i32) as Eval
     }
 
     #[inline(always)]
@@ -1294,11 +1401,11 @@ impl<'a> Search<'a> {
 
     #[inline(always)]
     fn output_bucket(&self) -> u8 {
-        if NNUE_OSIZE == 1 {
+        if NET_OSIZE == 1 {
             return 0;
         }
 
-        let divisor = 32usize.div_ceil(NNUE_OSIZE);
+        let divisor = 32usize.div_ceil(NET_OSIZE);
         let occupancy = self.chess.occupancy();
 
         (occupancy.count_ones() as u8 - 2) / divisor as u8

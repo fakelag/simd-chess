@@ -1,6 +1,6 @@
-use std::io::Read;
-
 use sfbinpack::chess::{coords, r#move, piece};
+
+use super::fen_feeder::SharedFenFeeder;
 
 const DEBUG: bool = false;
 const ANNOTATION_DEPTH: u8 = 8;
@@ -11,12 +11,12 @@ use crate::{
     engine::{
         self,
         chess_v2::{self, PieceIndex},
-        search::SearchStrategy,
+        search::{EngineForm, SearchStrategy},
         tables,
     },
     matchmaking::{matchmaking::PositionFeeder, *},
-    nnue::nnue::UpdatableNnue,
-    util,
+    nnue::nnue::{self, UpdatableNnue},
+    nnue_load, util,
 };
 
 pub struct SelfplayTrainer {
@@ -58,7 +58,7 @@ impl SelfplayTrainer {
         let feeder = Box::new(SharedFenFeeder::new(position_file_path));
 
         if let Some(from) = from {
-            let mut lock = feeder.inner.lock().unwrap();
+            let mut lock = feeder.lock();
             lock.set_max_positions(from);
             for _ in 0..from {
                 lock.next_position();
@@ -66,10 +66,10 @@ impl SelfplayTrainer {
         }
 
         let num_positions_total = if let Some(count) = count {
-            let lock = feeder.inner.lock().unwrap();
-            lock.positions_total.min(count)
+            let lock = feeder.lock();
+            lock.positions_total().min(count)
         } else {
-            feeder.inner.lock().unwrap().positions_total
+            feeder.lock().positions_total()
         };
 
         feeder.set_max_positions(num_positions_total);
@@ -186,7 +186,12 @@ impl SelfplayTrainer {
 
         let rt = engine::search::repetition::RepetitionTable::new();
 
-        let mut search_engine = engine::search::search::Search::new(search_params, tables, 4, rt);
+        let mut search_engine = engine::search::search::Search::<{ EngineForm::Tactical }>::new(
+            search_params,
+            tables,
+            4,
+            rt,
+        );
 
         let mut training_entries = Vec::new();
 
@@ -445,156 +450,6 @@ impl SelfplayTrainer {
         match self.binpack_path {
             Some(ref path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) as usize,
             None => 0,
-        }
-    }
-}
-
-struct SharedFenFeeder {
-    inner: std::sync::Arc<std::sync::Mutex<FenFeeder>>,
-}
-
-impl Clone for SharedFenFeeder {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl SharedFenFeeder {
-    fn new(path: &str) -> Self {
-        Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(FenFeeder::new(path))),
-        }
-    }
-
-    fn set_max_positions(&self, max: usize) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.set_max_positions(max);
-    }
-}
-
-impl matchmaking::PositionFeeder for SharedFenFeeder {
-    fn next_position(&mut self) -> Option<String> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.next_position()
-    }
-}
-
-struct FenFeeder {
-    positions_total: usize,
-    cursor: usize,
-    max_positions_to_play: Option<usize>,
-    chunk: Vec<String>,
-    overflow: String,
-    buf: Vec<u8>,
-    reader: std::io::BufReader<std::fs::File>,
-}
-
-impl FenFeeder {
-    fn new(path: &str) -> Self {
-        let mut num_lines = 0;
-
-        let file = std::fs::File::open(path).expect("Failed to open FEN file");
-        let mut reader = std::io::BufReader::new(file);
-
-        let mut buf = vec![0; 1024 * 1024 * 4];
-        loop {
-            let n = reader.read(&mut buf).expect("Failed to read FEN file");
-
-            if n == 0 {
-                break;
-            }
-
-            num_lines += buf[..n]
-                .iter()
-                .fold(0, |acc, &b| acc + if b == b'\n' { 1 } else { 0 });
-        }
-
-        let file = std::fs::File::open(path).expect("Failed to open FEN file");
-
-        Self {
-            cursor: 0,
-            max_positions_to_play: None,
-            positions_total: num_lines,
-            chunk: Vec::new(),
-            overflow: String::new(),
-            reader: std::io::BufReader::new(file),
-            buf,
-        }
-    }
-
-    fn set_max_positions(&mut self, max: usize) {
-        self.max_positions_to_play = Some(max);
-        self.cursor = 0;
-    }
-
-    fn read_chunk(&mut self) {
-        loop {
-            let n = self
-                .reader
-                .read(&mut self.buf)
-                .expect("Failed to read FEN file");
-
-            if n == 0 {
-                break;
-            }
-
-            let bp = (0..n).rev().find_map(|i| {
-                if self.buf[i] == b'\n' {
-                    return Some(i);
-                }
-                return None;
-            });
-
-            let bp = match bp {
-                Some(b) => b,
-                None => {
-                    self.overflow
-                        .push_str(&String::from_utf8_lossy(&self.buf[..n]));
-                    continue;
-                }
-            };
-
-            let content = format!(
-                "{}{}",
-                self.overflow,
-                String::from_utf8_lossy(&self.buf[..bp])
-            );
-            self.overflow = String::from_utf8_lossy(&self.buf[bp + 1..n]).to_string();
-
-            for lines in content.lines() {
-                self.chunk.push(lines.to_string());
-            }
-            break;
-        }
-    }
-
-    fn next_position(&mut self) -> Option<String> {
-        if let Some(max) = self.max_positions_to_play {
-            if self.cursor >= max {
-                return None;
-            }
-        } else {
-            panic!("max_positions_to_play not set");
-        }
-
-        let position = self.chunk.pop();
-
-        match position {
-            Some(p) => {
-                self.cursor += 1;
-                Some(p)
-            }
-            None => {
-                self.read_chunk();
-                if let Some(position) = self.chunk.pop() {
-                    self.cursor += 1;
-                    Some(position)
-                } else {
-                    None
-                }
-            }
         }
     }
 }

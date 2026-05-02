@@ -443,7 +443,7 @@ impl<const HS: usize, const OB: usize> LazyNnue<HS, OB>
 where
     [(); 2 * HS]:,
 {
-    pub fn heap_alloc(net: Network<HS, OB>) -> Box<Self> {
+    pub fn heap_alloc(net: &Network<HS, OB>) -> Box<Self> {
         unsafe {
             let layout = std::alloc::Layout::new::<Self>();
             let ptr = std::alloc::alloc(layout) as *mut Self;
@@ -454,7 +454,7 @@ where
                 accumulators.push(AccumulatorPair::new());
             }
 
-            (&raw mut (*ptr).net).write(net);
+            (&raw mut (*ptr).net).write(*net);
             (&raw mut (*ptr).accumulators).write(accumulators);
             (&raw mut (*ptr).updates).write(Vec::with_capacity(1024));
             (&raw mut (*ptr).applied_accumulators).write(Vec::new());
@@ -556,9 +556,9 @@ where
 #[macro_export]
 macro_rules! nnue_load {
     ($path:expr, $hs:expr,$ob:expr) => {{
-        let net: &nnue::Network<$hs, $ob> = &unsafe { std::mem::transmute(*include_bytes!($path)) };
+        let net: &nnue::Network<$hs, $ob> = unsafe { std::mem::transmute(include_bytes!($path)) };
 
-        nnue::LazyNnue::heap_alloc(*net)
+        nnue::LazyNnue::heap_alloc(net)
     }};
     ($path:expr, $hs:expr) => {{ nnue_load!($path, $hs, 1) }};
 }

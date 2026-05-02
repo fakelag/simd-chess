@@ -73,7 +73,7 @@ fn search_thread(
     rx_search: channel::Receiver<UciCommand>,
     tables: &tables::Tables,
 ) {
-    let mut search_engine = search::search::Search::new(
+    let mut search_engine = search::search::Search::<{ EngineForm::Strategy }>::new(
         SearchParams::new(),
         tables,
         8,
@@ -89,9 +89,10 @@ fn search_thread(
 
                 let chess = &go.chess;
 
-                let (board_key, pawn_key) = chess.calc_initial_zobrist_key(tables);
+                let (board_key, pawn_key, non_pawn_key) = chess.calc_initial_zobrist_key(tables);
                 assert!(chess.zobrist_key() == board_key);
                 assert!(chess.pawn_key() == pawn_key);
+                assert!([chess.non_pawn_key(0), chess.non_pawn_key(1)] == non_pawn_key);
 
                 search_engine.load_from_board(chess);
                 search_engine.new_search();
