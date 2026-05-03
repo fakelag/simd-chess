@@ -13,7 +13,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::engine::ownbook::OwnBook;
 use crate::engine::search::search_params::SearchParams;
-use crate::engine::search::{SearchStrategy, repetition};
+use crate::engine::search::{EngineForm, SearchStrategy, repetition};
 use crate::uci::uci::{UciCommand, chess_uci};
 use crate::{
     engine::{

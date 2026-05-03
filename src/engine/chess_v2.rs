@@ -35,25 +35,6 @@ const CASTLES_SQUARES: [u8; 64] = [
     0b1110, 0b1111, 0b1111, 0b1111, 0b1100, 0b1111, 0b1111, 0b1101, //
 ];
 
-const NON_PAWN_MATERIAL_TABLE: [u16; 16] = [
-    0,  // NullPieceWhite
-    0,  // King has no material value
-    10, // Queen
-    5,  // Rook
-    3,  // Bishop
-    3,  // Knight
-    0,  //
-    0,  // Pad
-    0,  // NullPieceBlack
-    0,  // King has no material value
-    10, // Queen
-    5,  // Rook
-    3,  // Bishop
-    3,  // Knight
-    0,  //
-    0,  // Pad
-];
-
 trait MoveType {}
 
 impl MoveType for u32 {}
@@ -208,9 +189,8 @@ pub struct ChessGame {
     full_moves: u16,
     zobrist_key: u64,
     spt: [u8; 64],
-    pawn_key: u64,
+    pawn_key: u16,
     occupancy: u64,
-    non_pawn_mat: [u16; 2],
     non_pawn_key: [u16; 2],
 }
 const _ASSERT_CHESS_GAME_SIZE: () = assert!(std::mem::size_of::<ChessGame>() == 256);
@@ -228,7 +208,6 @@ impl ChessGame {
             spt: [0; 64],
             pawn_key: 0,
             occupancy: 0,
-            non_pawn_mat: [0; 2],
             non_pawn_key: [0; 2],
         }
     }
@@ -1366,11 +1345,12 @@ impl ChessGame {
                         .get_unchecked(cap_piece_id)
                         .get_unchecked(cap_pawn_sq as usize);
 
-                    self.pawn_key ^= tables
+                    self.pawn_key ^= *tables
                         .zobrist_hash_keys
                         .hash_pawn_squares
                         .get_unchecked(cap_piece_id)
-                        .get_unchecked(cap_pawn_sq as usize);
+                        .get_unchecked(cap_pawn_sq as usize)
+                        as u16;
                 }
 
                 nnue::NnueUpdate::capture(
@@ -1409,11 +1389,6 @@ impl ChessGame {
                     };
 
                     to_square_piece = promotion_piece;
-
-                    unsafe {
-                        self.non_pawn_mat[self.b_move as usize] +=
-                            NON_PAWN_MATERIAL_TABLE.get_unchecked(promotion_piece);
-                    }
                 }
 
                 if is_capture {
@@ -1449,9 +1424,6 @@ impl ChessGame {
             self.occupancy |= to_bit;
             self.occupancy ^= from_bit;
 
-            self.non_pawn_mat[!self.b_move as usize] -=
-                NON_PAWN_MATERIAL_TABLE.get_unchecked(to_piece);
-
             // Remove moved piece from from_sq and add it to to_sq
             let h_from = *zb_keys
                 .hash_piece_squares_new
@@ -1467,11 +1439,11 @@ impl ChessGame {
             self.pawn_key ^= tables
                 .zobrist_hash_keys
                 .hash_pawn_squares
-                .get_unchecked(from_piece)[from_sq as usize];
+                .get_unchecked(from_piece)[from_sq as usize] as u16;
             self.pawn_key ^= tables
                 .zobrist_hash_keys
                 .hash_pawn_squares
-                .get_unchecked(to_square_piece)[to_sq as usize];
+                .get_unchecked(to_square_piece)[to_sq as usize] as u16;
 
             *self.non_pawn_key.get_unchecked_mut(from_piece >> 3) ^=
                 (h_from as u16) & PIECEINDEX_NONPAWN_MASK_U16[from_piece & 7];
@@ -1487,7 +1459,7 @@ impl ChessGame {
             self.pawn_key ^= tables
                 .zobrist_hash_keys
                 .hash_pawn_squares
-                .get_unchecked(to_piece)[to_sq as usize];
+                .get_unchecked(to_piece)[to_sq as usize] as u16;
 
             *self.non_pawn_key.get_unchecked_mut(to_piece >> 3) ^=
                 (h_cap as u16) & PIECEINDEX_NONPAWN_MASK_U16[to_piece & 7];
@@ -1672,13 +1644,6 @@ impl ChessGame {
                     self.calc_occupancy(),
                     self.occupancy
                 );
-                assert!(
-                    self.non_pawn_mat == self.calc_non_pawn_mat(),
-                    "Non-pawn material mismatch after move {}: expected {:x?}, got {:x?}",
-                    util::move_string_dbg(mv),
-                    self.calc_non_pawn_mat(),
-                    self.non_pawn_mat
-                );
 
                 if let Some(nnue) = nnue.as_mut() {
                     nnue.make_move(nnue_update.unwrap());
@@ -1855,19 +1820,8 @@ impl ChessGame {
             self.calc_initial_zobrist_key(tables);
         self.spt = self.calc_spt();
         self.occupancy = self.calc_occupancy();
-        self.non_pawn_mat = self.calc_non_pawn_mat();
 
         Ok(fen_length)
-    }
-
-    fn calc_non_pawn_mat(&self) -> [u16; 2] {
-        let mut non_pawn_mat = [0; 2];
-        for i in PieceIndex::WhiteNullPiece as usize..PieceIndex::BlackPad as usize {
-            non_pawn_mat[i >> 3] +=
-                self.board.bitboards[i].count_ones() as u16 * NON_PAWN_MATERIAL_TABLE[i];
-        }
-
-        non_pawn_mat
     }
 
     fn calc_spt(&self) -> [u8; 64] {
@@ -2015,18 +1969,18 @@ impl ChessGame {
         }
     }
 
-    pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> (u64, u64, [u16; 2]) {
+    pub fn calc_initial_zobrist_key(&self, tables: &Tables) -> (u64, u16, [u16; 2]) {
         let zb_keys = &tables.zobrist_hash_keys;
 
         let mut board_key = 0u64;
-        let mut pawn_key = zb_keys.no_pawn_key;
+        let mut pawn_key = zb_keys.no_pawn_key as u16;
         let mut non_pawn_key = [0u16; 2];
 
         for square in 0..64 {
             let piece_id = self.piece_at_slow(1 << square);
             let h = zb_keys.hash_piece_squares_new[piece_id][square as usize];
             board_key ^= h;
-            pawn_key ^= zb_keys.hash_pawn_squares[piece_id][square as usize];
+            pawn_key ^= zb_keys.hash_pawn_squares[piece_id][square as usize] as u16;
 
             let h16 = h as u16;
             non_pawn_key[piece_id >> 3] ^= h16 & PIECEINDEX_NONPAWN_MASK_U16[piece_id & 7];
@@ -2124,7 +2078,7 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn pawn_key(&self) -> u64 {
+    pub fn pawn_key(&self) -> u16 {
         self.pawn_key
     }
 
@@ -2149,8 +2103,16 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn non_pawn_mat(&self) -> [u16; 2] {
-        self.non_pawn_mat
+    pub fn has_non_pawn_mat(&self, side: usize) -> bool {
+        let stm_offset = side << 3;
+        let bitboards = &self.board.bitboards;
+        unsafe {
+            (bitboards.get_unchecked(stm_offset + PieceIndex::WhiteQueen as usize)
+                | bitboards.get_unchecked(stm_offset + PieceIndex::WhiteRook as usize)
+                | bitboards.get_unchecked(stm_offset + PieceIndex::WhiteBishop as usize)
+                | bitboards.get_unchecked(stm_offset + PieceIndex::WhiteKnight as usize))
+                != 0
+        }
     }
 
     #[inline(always)]

@@ -38,24 +38,9 @@ const CORR_GRAIN: Eval = 8;
 
 const CORR_SUM_SCALE: Eval = 1024;
 
-const USE_PAWN_CORR: bool = true;
-const USE_NON_PAWN_CORR: bool = true;
-
 const CORR_W_PAWN: Eval = 128;
 const CORR_W_NP_STM: Eval = 48;
 const CORR_W_NP_NTM: Eval = 24;
-
-const USE_CORR_NMP_SKIP: bool = false;
-const USE_CORR_LMR_BUMP: bool = false;
-const USE_CORR_RFP_SCALE: bool = false;
-
-const CORR_NMP_SKIP_TH: Eval = 144;
-const CORR_LMR_BUMP_TH: Eval = 64;
-const CORR_RFP_SHAKY: Eval = 80;
-
-const CORR_MAG_HISTOGRAM: bool = false;
-const CORR_MAG_BUCKET_WIDTH: usize = 16;
-const CORR_MAG_NUM_BUCKETS: usize = 17; // 0-15, 16-31, ..., 240-255, 256+
 
 const PV_DEPTH: usize = 64;
 
@@ -96,6 +81,12 @@ impl PvTable {
 //     pub error: Eval,
 // }
 
+#[repr(C)]
+pub struct CorrectionHistory {
+    pub pawn: [[Eval; u16::MAX as usize + 1]; 2],
+    pub non_pawn: [[[Eval; u16::MAX as usize + 1]; 2]; 2],
+}
+
 pub struct Search<'a, const F: EngineForm> {
     chess: ChessGame,
     tables: &'a tables::Tables,
@@ -108,7 +99,7 @@ pub struct Search<'a, const F: EngineForm> {
 
     pv_table: Box<PvTable>,
     pv: [u16; PV_DEPTH],
-    pv_length: usize,
+    pv_length: u8,
     pv_trace: bool,
 
     tt: TranspositionTable,
@@ -122,7 +113,7 @@ pub struct Search<'a, const F: EngineForm> {
     score: Eval,
     node_count: u64,
     quiet_nodes: u64,
-    quiet_depth: u32,
+    quiet_depth: u8,
     depth: u8,
 
     eval_stack: [Eval; PV_DEPTH],
@@ -131,10 +122,7 @@ pub struct Search<'a, const F: EngineForm> {
     excluded_move: u16,
     cont_history: Box<[[[i16; 768]; 768]; 2]>,
 
-    pawn_correction_heuristic: [[Eval; u16::MAX as usize + 1]; 2],
-    non_pawn_correction_heuristic: Box<[[[Eval; u16::MAX as usize + 1]; 2]; 2]>,
-
-    corr_mag_histogram: [u64; CORR_MAG_NUM_BUCKETS],
+    corr_hist: Box<CorrectionHistory>,
     // pub corr_stats: Vec<CorrStats>,
 }
 
@@ -215,15 +203,6 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
         self.node_count = node_count;
         self.quiet_nodes = quiet_nodes;
 
-        if CORR_MAG_HISTOGRAM {
-            let parts: Vec<String> = self
-                .corr_mag_histogram
-                .iter()
-                .map(|c| c.to_string())
-                .collect();
-            println!("info string corr_mag_hist={}", parts.join(","));
-        }
-
         self.pv[0]
     }
 
@@ -292,14 +271,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             et: EvalTable::new(1024),
             rt,
             tt: TranspositionTable::new(tt_size_hint_mb),
-            pawn_correction_heuristic: [[0; u16::MAX as usize + 1]; 2],
-            non_pawn_correction_heuristic: unsafe {
-                let layout = std::alloc::Layout::new::<[[[Eval; u16::MAX as usize + 1]; 2]; 2]>();
-                let ptr = std::alloc::alloc_zeroed(layout)
-                    as *mut [[[Eval; u16::MAX as usize + 1]; 2]; 2];
+            corr_hist: unsafe {
+                let layout = std::alloc::Layout::new::<CorrectionHistory>();
+                let ptr = std::alloc::alloc_zeroed(layout) as *mut CorrectionHistory;
                 Box::from_raw(ptr)
             },
-            corr_mag_histogram: [0; CORR_MAG_NUM_BUCKETS],
             // corr_stats: Vec::new(),
         };
 
@@ -373,13 +349,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         for i in 0..2 {
             for j in 0..=u16::MAX as usize {
-                self.pawn_correction_heuristic[i][j] = 0;
-                self.non_pawn_correction_heuristic[0][i][j] = 0;
-                self.non_pawn_correction_heuristic[1][i][j] = 0;
+                self.corr_hist.pawn[i][j] = 0;
+                self.corr_hist.non_pawn[0][i][j] = 0;
+                self.corr_hist.non_pawn[1][i][j] = 0;
             }
         }
-
-        self.corr_mag_histogram = [0; CORR_MAG_NUM_BUCKETS];
     }
 
     // pub fn resize_eval_table(&mut self, new_size_mb: usize) {
@@ -392,14 +366,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     }
     #[inline(always)]
     pub fn get_pv(&self) -> &[u16] {
-        &self.pv[0..self.pv_length]
+        &self.pv[0..self.pv_length as usize]
     }
     #[inline(always)]
     pub fn get_depth(&self) -> u8 {
         self.depth
     }
     #[inline(always)]
-    pub fn get_quiet_depth(&self) -> u32 {
+    pub fn get_quiet_depth(&self) -> u8 {
         self.quiet_depth
     }
     #[inline(always)]
@@ -450,7 +424,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut depth = depth;
 
         let pv_move = if self.pv_trace {
-            self.pv_trace = self.pv_length > (ply + 1);
+            self.pv_trace = (self.pv_length as usize) > (ply + 1);
             self.pv[ply]
         } else {
             0
@@ -514,25 +488,16 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             false
         };
 
-        let corr_mag = (corrected_eval as i32 - static_eval as i32).unsigned_abs() as Eval;
-
         if prune_node && !in_check {
             if non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
                 let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
-                // if USE_CORR_RFP_SCALE && corr_mag > CORR_RFP_SHAKY {
-                //     eval_margin = eval_margin.saturating_add(corr_mag - CORR_RFP_SHAKY);
-                // }
 
                 if corrected_eval - eval_margin >= beta {
                     return corrected_eval - eval_margin;
                 }
             }
 
-            // Null move pruning — skip if correction strongly disagrees with raw NNUE eval
-            // let nmp_corr_ok = !USE_CORR_NMP_SKIP || corr_mag < CORR_NMP_SKIP_TH;
-            if depth >= 3 && self.chess.non_pawn_mat()[self.chess.b_move() as usize] > 0
-            // && nmp_corr_ok
-            {
+            if depth >= 3 && self.chess.has_non_pawn_mat(self.chess.b_move() as usize) {
                 let ep_square = self.chess.make_null_move(self.tables);
 
                 let r = 2 + depth / 3;
@@ -829,10 +794,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     r -= improving as i16;
                     r += non_pv_node as i16;
 
-                    // if USE_CORR_LMR_BUMP && corrected_eval < static_eval - CORR_LMR_BUMP_TH {
-                    //     r += 1;
-                    // }
-
                     r.clamp(1, new_depth as i16) as u8
                 };
 
@@ -1048,7 +1009,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     fn quiescence(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {
         self.node_count += 1;
         self.quiet_nodes += 1;
-        self.quiet_depth = self.quiet_depth.max(self.ply as u32 - start_ply);
+        self.quiet_depth = self.quiet_depth.max((self.ply as u32 - start_ply) as u8);
 
         if self.node_count & 0x7FF == 0 && self.check_sigabort() {
             self.is_stopping = true;
@@ -1261,8 +1222,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
     #[inline(always)]
     pub fn apply_pv(&mut self, depth: u8, score: Eval) {
-        self.pv_length = self.pv_table.lengths[0] as usize;
-        self.pv[0..self.pv_length].copy_from_slice(&self.pv_table.moves[0][0..self.pv_length]);
+        self.pv_length = self.pv_table.lengths[0];
+        let len = self.pv_length as usize;
+        self.pv[0..len].copy_from_slice(&self.pv_table.moves[0][0..len]);
         self.pv_trace = self.pv_length > 0;
         self.depth = depth;
         self.score = score;
@@ -1297,32 +1259,28 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let stm = self.chess.b_move() as usize;
         let ntm = 1 - stm;
 
-        if USE_PAWN_CORR {
-            let key = (self.chess.pawn_key() & 0xFFFF) as usize;
-            Self::update_correction_history(
-                &mut self.pawn_correction_heuristic[stm][key],
-                score,
-                static_eval,
-                depth,
-            );
-        }
+        let pawn_key = self.chess.pawn_key() as usize;
+        Self::update_correction_history(
+            &mut self.corr_hist.pawn[stm][pawn_key],
+            score,
+            static_eval,
+            depth,
+        );
 
-        if USE_NON_PAWN_CORR {
-            let ku = self.chess.non_pawn_key(stm) as usize;
-            let kt = self.chess.non_pawn_key(ntm) as usize;
-            Self::update_correction_history(
-                &mut self.non_pawn_correction_heuristic[stm][stm][ku],
-                score,
-                static_eval,
-                depth,
-            );
-            Self::update_correction_history(
-                &mut self.non_pawn_correction_heuristic[ntm][stm][kt],
-                score,
-                static_eval,
-                depth,
-            );
-        }
+        let nonpawn_key_stm = self.chess.non_pawn_key(stm) as usize;
+        let nonpawn_key_ntm = self.chess.non_pawn_key(ntm) as usize;
+        Self::update_correction_history(
+            &mut self.corr_hist.non_pawn[stm][stm][nonpawn_key_stm],
+            score,
+            static_eval,
+            depth,
+        );
+        Self::update_correction_history(
+            &mut self.corr_hist.non_pawn[ntm][stm][nonpawn_key_ntm],
+            score,
+            static_eval,
+            depth,
+        );
     }
 
     #[inline(always)]
@@ -1332,25 +1290,17 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let mut acc: i32 = 0;
 
-        if USE_PAWN_CORR {
-            let e = self.pawn_correction_heuristic[stm][(self.chess.pawn_key() & 0xFFFF) as usize]
-                as i32;
-            acc += e * CORR_W_PAWN as i32;
-        }
-        if USE_NON_PAWN_CORR {
-            let ku = self.chess.non_pawn_key(stm) as usize;
-            let kt = self.chess.non_pawn_key(ntm) as usize;
-            acc += self.non_pawn_correction_heuristic[stm][stm][ku] as i32 * CORR_W_NP_STM as i32;
-            acc += self.non_pawn_correction_heuristic[ntm][stm][kt] as i32 * CORR_W_NP_NTM as i32;
-        }
+        let pawn_key = self.chess.pawn_key() as usize;
+        acc += self.corr_hist.pawn[stm][pawn_key] as i32 * CORR_W_PAWN as i32;
+
+        let nonpawn_key_stm = self.chess.non_pawn_key(stm) as usize;
+        let nonpawn_key_ntm = self.chess.non_pawn_key(ntm) as usize;
+        acc += self.corr_hist.non_pawn[stm][stm][nonpawn_key_stm] as i32
+            * CORR_W_NP_STM as i32;
+        acc += self.corr_hist.non_pawn[ntm][stm][nonpawn_key_ntm] as i32
+            * CORR_W_NP_NTM as i32;
 
         let correction = acc / CORR_SUM_SCALE as i32;
-
-        if CORR_MAG_HISTOGRAM {
-            let bucket = (correction.unsigned_abs() as usize / CORR_MAG_BUCKET_WIDTH)
-                .min(CORR_MAG_NUM_BUCKETS - 1);
-            self.corr_mag_histogram[bucket] += 1;
-        }
 
         ((base_eval as i32) + correction)
             .max((-SCORE_INF + PV_DEPTH as Eval) as i32)
