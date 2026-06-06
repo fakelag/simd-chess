@@ -136,7 +136,9 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
         let max_depth = PV_DEPTH as u8 - 1;
         let target_depth = self.params.depth.unwrap_or(max_depth).min(max_depth);
 
-        if let Some(mv) = self.has_single_legal_move() {
+        if let Some(mv) = self.has_single_legal_move()
+            && F == EngineForm::Strategy
+        {
             let static_eval = self.evaluate();
 
             self.pv_table.lengths[0] = 1;
@@ -467,7 +469,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
 
         // IIR
-        depth -= (depth >= 4 && tt_move_index == 0xFF && prune_node) as u8;
+        // @exp IIR DISABLED
+        depth -= match F {
+            // EngineForm::TacticalB => 0,
+            _ => (depth >= 4 && tt_move_index == 0xFF && prune_node) as u8,
+        };
 
         let depth = depth;
 
@@ -489,7 +495,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         };
 
         if prune_node && !in_check {
-            if non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
+            // @exp RFP DISABLED
+            let flag_enable_rfp = match F {
+                // EngineForm::TacticalB => 0,
+                _ => true,
+            };
+            if flag_enable_rfp && non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
                 let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
 
                 if corrected_eval - eval_margin >= beta {
@@ -617,7 +628,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
         };
 
-        let singular_move = if prune_node
+        // @exp SINGULAR EXTENSION DISABLED
+        let flag_enable_se = match F {
+            // EngineForm::TacticalB => 0,
+            _ => true,
+        };
+        let singular_move = if flag_enable_se
+            && prune_node
             && depth >= 8
             && tt_move_index != 0xFF
             && tt_depth >= depth.saturating_sub(3)
@@ -668,7 +685,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
             }
 
-            if num_legal_moves > 0
+            // @exp SEE PRUNING DISABLED
+            let flag_enable_see_prune = match F {
+                // EngineForm::TacticalB => 0,
+                _ => true,
+            };
+
+            if flag_enable_see_prune
+                && num_legal_moves > 0
                 && !in_check
                 && depth <= SEE_QUIET_PRUNE_MAX_DEPTH.max(SEE_CAPTURE_PRUNE_MAX_DEPTH)
             {
@@ -1043,25 +1067,32 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         };
 
         // Precompute bitboards + pins for qsearch SEE pruning of captures.
-        // Only computed when not in check (in check -> quiescence_check_evasion, no SEE pruning).
-        let (qsee_bb_black, qsee_bb_white, qsee_bb_pieces, qsee_pins) = if !in_check {
-            let bbs = self.chess.bitboards();
-            let bb_black = bbs.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
-            let bb_white = bbs.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
-            let mut bb_pieces = [0u64; 8];
-            bbs.iter()
-                .take(8)
-                .zip(bbs.iter().skip(8))
-                .enumerate()
-                .for_each(|(i, (w, b))| bb_pieces[i] = *w | *b);
-            let pins = [
-                see::calc_pinnings(false, &self.chess, bb_black, bb_white),
-                see::calc_pinnings(true, &self.chess, bb_black, bb_white),
-            ];
-            (bb_black, bb_white, bb_pieces, Some(pins))
-        } else {
-            (0, 0, [0u64; 8], None)
+        // Only computed when not in check (in check -> quiescence_check_evasion, no SEE pruning).'
+        // @exp QS SEE PRUNING DISABLED
+        let flag_enable_qs_see_prune = match F {
+            // EngineForm::TacticalB => 0,
+            _ => true,
         };
+
+        let (qsee_bb_black, qsee_bb_white, qsee_bb_pieces, qsee_pins) =
+            if flag_enable_qs_see_prune && !in_check {
+                let bbs = self.chess.bitboards();
+                let bb_black = bbs.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
+                let bb_white = bbs.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
+                let mut bb_pieces = [0u64; 8];
+                bbs.iter()
+                    .take(8)
+                    .zip(bbs.iter().skip(8))
+                    .enumerate()
+                    .for_each(|(i, (w, b))| bb_pieces[i] = *w | *b);
+                let pins = [
+                    see::calc_pinnings(false, &self.chess, bb_black, bb_white),
+                    see::calc_pinnings(true, &self.chess, bb_black, bb_white),
+                ];
+                (bb_black, bb_white, bb_pieces, Some(pins))
+            } else {
+                (0, 0, [0u64; 8], None)
+            };
 
         let mut moves = CaptureOrdering::new();
 
@@ -1295,10 +1326,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let nonpawn_key_stm = self.chess.non_pawn_key(stm) as usize;
         let nonpawn_key_ntm = self.chess.non_pawn_key(ntm) as usize;
-        acc += self.corr_hist.non_pawn[stm][stm][nonpawn_key_stm] as i32
-            * CORR_W_NP_STM as i32;
-        acc += self.corr_hist.non_pawn[ntm][stm][nonpawn_key_ntm] as i32
-            * CORR_W_NP_NTM as i32;
+        acc += self.corr_hist.non_pawn[stm][stm][nonpawn_key_stm] as i32 * CORR_W_NP_STM as i32;
+        acc += self.corr_hist.non_pawn[ntm][stm][nonpawn_key_ntm] as i32 * CORR_W_NP_NTM as i32;
 
         let correction = acc / CORR_SUM_SCALE as i32;
 

@@ -5,7 +5,8 @@ pub type AbortSignal = crossbeam::channel::Receiver<SigAbort>;
 #[derive(std::marker::ConstParamTy, PartialEq, Eq)]
 pub enum EngineForm {
     Strategy,
-    Tactical,
+    TacticalA,
+    TacticalB,
 }
 
 pub trait SearchStrategy<'a> {
@@ -219,10 +220,12 @@ mod tests {
         feeder.set_max_positions(NUM_POSITIONS);
 
         let (tx, rx) =
-            crossbeam::channel::bounded::<(String, i32, i32, u16, u64, i32, u16, u64)>(256);
+            crossbeam::channel::bounded::<(String, i32, i32, u64, u16, u64, i32, u64, u16, u64)>(
+                256,
+            );
 
         println!(
-            "position,material,strategy_score,strategy_bestmove,strategy_mcycles,tactical_score,tactical_bestmove,tactical_mcycles"
+            "position,material,a_score,a_nodes,a_bestmove,a_cycles,b_score,b_nodes,b_bestmove,b_cycles"
         );
 
         std::thread::scope(|s| {
@@ -240,13 +243,13 @@ mod tests {
                     let mut params_t = SearchParams::new();
                     params_t.depth = Some(BENCH_DEPTH);
 
-                    let mut engine_s = search::Search::<{ EngineForm::Strategy }>::new(
+                    let mut engine_a = search::Search::<{ EngineForm::TacticalA }>::new(
                         params_s,
                         tables,
                         TT_SIZE_MB,
                         repetition::RepetitionTable::new(),
                     );
-                    let mut engine_t = search::Search::<{ EngineForm::Tactical }>::new(
+                    let mut engine_b = search::Search::<{ EngineForm::TacticalB }>::new(
                         params_t,
                         tables,
                         TT_SIZE_MB,
@@ -254,30 +257,32 @@ mod tests {
                     );
 
                     while let Some(fen) = feeder.next_position() {
-                        engine_s.new_game();
-                        engine_s.load_from_fen(&fen, tables).unwrap();
-                        engine_s.new_search();
-                        let material = total_material(engine_s.get_board_mut().bitboards());
-                        let start_s = rdtsc();
-                        let bestmove_s = engine_s.search();
-                        let mcycles_s = (rdtsc() - start_s) / 1_000_000;
+                        engine_a.new_game();
+                        engine_a.load_from_fen(&fen, tables).unwrap();
+                        engine_a.new_search();
+                        let material = total_material(engine_a.get_board_mut().bitboards());
+                        let start_a = rdtsc();
+                        let bestmove_a = engine_a.search();
+                        let cycles_a = rdtsc() - start_a;
 
-                        engine_t.new_game();
-                        engine_t.load_from_fen(&fen, tables).unwrap();
-                        engine_t.new_search();
-                        let start_t = rdtsc();
-                        let bestmove_t = engine_t.search();
-                        let mcycles_t = (rdtsc() - start_t) / 1_000_000;
+                        engine_b.new_game();
+                        engine_b.load_from_fen(&fen, tables).unwrap();
+                        engine_b.new_search();
+                        let start_b = rdtsc();
+                        let bestmove_b = engine_b.search();
+                        let cycles_b = rdtsc() - start_b;
 
                         let _ = tx.send((
                             fen.to_string(),
                             material,
-                            engine_s.search_score(),
-                            bestmove_s,
-                            mcycles_s,
-                            engine_t.search_score(),
-                            bestmove_t,
-                            mcycles_t,
+                            engine_a.search_score(),
+                            engine_a.num_nodes_searched(),
+                            bestmove_a,
+                            cycles_a,
+                            engine_b.search_score(),
+                            engine_b.num_nodes_searched(),
+                            bestmove_b,
+                            cycles_b,
                         ));
                     }
                 });
@@ -289,24 +294,28 @@ mod tests {
             while let Ok((
                 fen,
                 material,
-                score_s,
-                bestmove_s,
-                mcycles_s,
-                score_t,
-                bestmove_t,
-                mcycles_t,
+                score_a,
+                nodes_a,
+                bestmove_a,
+                cycles_a,
+                score_b,
+                nodes_b,
+                bestmove_b,
+                cycles_b,
             )) = rx.recv()
             {
                 println!(
-                    "{},{},{},{},{},{},{},{}",
+                    "{},{},{},{},{},{},{},{},{},{}",
                     fen,
                     material,
-                    score_s,
-                    util::move_string(bestmove_s),
-                    mcycles_s,
-                    score_t,
-                    util::move_string(bestmove_t),
-                    mcycles_t,
+                    score_a,
+                    nodes_a,
+                    util::move_string(bestmove_a),
+                    cycles_a,
+                    score_b,
+                    nodes_b,
+                    util::move_string(bestmove_b),
+                    cycles_b,
                 );
                 count += 1;
                 if count % 100 == 0 {
