@@ -1,4 +1,9 @@
-use std::{arch::x86_64::*, pin::Pin};
+use std::{
+    arch::x86_64::*,
+    cell::SyncUnsafeCell,
+    ops::{Deref, DerefMut},
+    pin::Pin,
+};
 
 use crate::engine::search::eval::Eval;
 
@@ -106,16 +111,16 @@ impl TtEntry {
 #[repr(align(64))]
 pub struct TtBucket([TtEntry; 8]);
 
+#[repr(align(64))]
 pub struct TranspositionTable {
     entries: Pin<Box<[TtBucket]>>,
     generation: u8,
     table_size_mask: usize,
     index_bits: u32,
-    evict_generation: [bool; 4],
-
     evict_0: __m512i,
     evict_1: __m512i,
-    hash64: std::collections::BTreeMap<*const TtEntry, u64>,
+    // evict_generation: [bool; 4],
+    // hash64: std::collections::BTreeMap<*const TtEntry, u64>,
 }
 
 // Safety: TranspositionTable must implement thread safety by itself
@@ -137,22 +142,22 @@ impl TranspositionTable {
         TranspositionTable {
             table_size_mask: table_mask,
             entries: Pin::from(entries),
-            hash64: std::collections::BTreeMap::new(),
             index_bits,
-            evict_generation: [false; 4],
             generation: 0,
             evict_0: unsafe { _mm512_set1_epi32(0) },
             evict_1: unsafe { _mm512_set1_epi32(0) },
+            // evict_generation: [false; 4],
+            // hash64: std::collections::BTreeMap::new(),
         }
     }
 
     #[inline(always)]
     pub fn new_search(&mut self) {
         self.generation = (self.generation + 1) & 0b11;
-        for i in 0..4 {
-            self.evict_generation[i as usize] =
-                (i == (self.generation + 1) & 0b11) || (i == (self.generation + 2) & 0b11);
-        }
+        // for i in 0..4 {
+        //     self.evict_generation[i as usize] =
+        //         (i == (self.generation + 1) & 0b11) || (i == (self.generation + 2) & 0b11);
+        // }
 
         let evict_0 = (((self.generation + 1) & 0b11) << 6) as u64;
         let evict_1 = (((self.generation + 2) & 0b11) << 6) as u64;
@@ -232,27 +237,28 @@ impl TranspositionTable {
 
         let bound_condition = [false, true, entry.score >= beta, entry.score <= alpha];
 
-        let usable = entry.depth() >= depth && bound_condition[entry.bound_type() as usize];
+        let probe_depth = depth.min(63);
+        let usable = entry.depth() >= probe_depth && bound_condition[entry.bound_type() as usize];
 
         if usable {
             entry.set_generation(generation);
         }
 
-        if DEBUG {
-            let hash_debug = *self.hash64.get(&(entry as *const TtEntry)).unwrap();
+        // if DEBUG {
+        //     let hash_debug = *self.hash64.get(&(entry as *const TtEntry)).unwrap();
 
-            if hash != hash_debug {
-                println!(
-                    "V3 TT Probe Hit Collision: Hash {:016X} ({:016X} in the slot), Depth {}, Type {:?}, Gen {}, HM: {}",
-                    hash,
-                    hash_debug,
-                    entry.depth(),
-                    entry.bound_type(),
-                    entry.generation(),
-                    chess.half_moves(),
-                );
-            }
-        }
+        //     if hash != hash_debug {
+        //         println!(
+        //             "V3 TT Probe Hit Collision: Hash {:016X} ({:016X} in the slot), Depth {}, Type {:?}, Gen {}, HM: {}",
+        //             hash,
+        //             hash_debug,
+        //             entry.depth(),
+        //             entry.bound_type(),
+        //             entry.generation(),
+        //             chess.half_moves(),
+        //         );
+        //     }
+        // }
 
         return Some(TtProbe {
             score: if usable { Some(entry.score) } else { None },
@@ -280,6 +286,7 @@ impl TranspositionTable {
 
     #[inline(always)]
     fn match_entries_depth_avx512(&self, bucket_vec: &__m512i, depth: u8) -> __mmask64 {
+        let depth = depth.min(63);
         unsafe {
             let result =
                 _mm512_cmple_epi8_mask(*bucket_vec, _mm512_set1_epi8((depth << 2) as i8 | 0b11));
@@ -450,12 +457,12 @@ impl TranspositionTable {
             _ => return,
         };
 
-        if DEBUG {
-            self.hash64
-                .entry(entry as *const TtEntry)
-                .and_modify(|h| *h = hash)
-                .or_insert(hash);
-        }
+        // if DEBUG {
+        //     self.hash64
+        //         .entry(entry as *const TtEntry)
+        //         .and_modify(|h| *h = hash)
+        //         .or_insert(hash);
+        // }
 
         // entry.eval = eval;
         entry.score = score;
@@ -535,13 +542,34 @@ impl TranspositionTable {
 
     pub fn clear(&mut self) {
         self.generation = 0;
-        for i in 0..4 {
-            self.evict_generation[i] = false;
-        }
+        // for i in 0..4 {
+        //     self.evict_generation[i] = false;
+        // }
         for elem in self.entries.iter_mut() {
             for entry in &mut elem.0 {
                 *entry = TtEntry::new();
             }
         }
     }
+
+    pub fn zero_depth_entries(&mut self) {
+        for elem in self.entries.iter_mut() {
+            for entry in &mut elem.0 {
+                entry.set_depth_and_type(0, entry.bound_type());
+            }
+        }
+    }
+
+    // pub fn sweep_old_generations(&mut self) {
+    //     let evict_0 = (self.generation + 1) & 0b11;
+    //     let evict_1 = (self.generation + 2) & 0b11;
+
+    //     for elem in self.entries.iter_mut() {
+    //         for entry in &mut elem.0 {
+    //             if entry.generation() == evict_0 as u8 || entry.generation() == evict_1 as u8 {
+    //                 *entry = TtEntry::new();
+    //             }
+    //         }
+    //     }
+    // }
 }

@@ -57,7 +57,7 @@ mod tests {
             // );
 
             let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(14));
+            params.depth = Some(std::hint::black_box(16));
 
             // let mut search_engine =
             //     v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
@@ -129,16 +129,8 @@ mod tests {
             //     }
             // }
 
-            println!(
-                "Nodes searched: {} ({} quiescence / {:.02}%)",
-                search_engine.num_nodes_searched(),
-                search_engine.get_quiet_nodes(),
-                (search_engine.get_quiet_nodes() as f64
-                    / search_engine.num_nodes_searched() as f64)
-                    * 100.0
-            );
+            println!("Nodes searched: {}", search_engine.num_nodes_searched());
             println!("depth: {}", search_engine.get_depth());
-            println!("q-depth: {}", search_engine.get_quiet_depth());
             // println!("TT usage: {:.02}%", tt_stats.fill_percentage * 100.0);
             // println!(
             //     "TT probe hit rate: {:.02}%",
@@ -198,12 +190,13 @@ mod tests {
     #[test]
     fn search_accuracy() {
         use crate::engine::search::eval::WEIGHT_TABLE_ABS;
+        use crate::engine::search::search::DepthStat;
         use crate::matchmaking::fen_feeder::SharedFenFeeder;
         use crate::matchmaking::matchmaking::PositionFeeder;
 
-        const NUM_POSITIONS: usize = 1000;
+        const NUM_POSITIONS: usize = 5_000;
         const NUM_THREADS: usize = 16;
-        const BENCH_DEPTH: u8 = 10;
+        const BENCH_DEPTH: u8 = 9;
         const TT_SIZE_MB: usize = 16;
         const POSITIONS_PATH: &str = r".\data\positions\10m.txt";
 
@@ -212,20 +205,19 @@ mod tests {
             for i in 0..16 {
                 total += bbs[i].count_ones() as i32 * WEIGHT_TABLE_ABS[i] as i32;
             }
-            total
+            total / 2
         }
 
         let tables = tables::Tables::new();
         let feeder = SharedFenFeeder::new(POSITIONS_PATH);
         feeder.set_max_positions(NUM_POSITIONS);
+        let start = std::time::Instant::now();
 
         let (tx, rx) =
-            crossbeam::channel::bounded::<(String, i32, i32, u64, u16, u64, i32, u64, u16, u64)>(
-                256,
-            );
+            crossbeam::channel::bounded::<(String, i32, Vec<DepthStat>, Vec<DepthStat>)>(256);
 
         println!(
-            "position,material,a_score,a_nodes,a_bestmove,a_cycles,b_score,b_nodes,b_bestmove,b_cycles"
+            "position,material,depth,a_score,a_nodes,a_bestmove,a_cycles,b_score,b_nodes,b_bestmove,b_cycles"
         );
 
         std::thread::scope(|s| {
@@ -261,28 +253,18 @@ mod tests {
                         engine_a.load_from_fen(&fen, tables).unwrap();
                         engine_a.new_search();
                         let material = total_material(engine_a.get_board_mut().bitboards());
-                        let start_a = rdtsc();
-                        let bestmove_a = engine_a.search();
-                        let cycles_a = rdtsc() - start_a;
+                        engine_a.search();
 
                         engine_b.new_game();
                         engine_b.load_from_fen(&fen, tables).unwrap();
                         engine_b.new_search();
-                        let start_b = rdtsc();
-                        let bestmove_b = engine_b.search();
-                        let cycles_b = rdtsc() - start_b;
+                        engine_b.search();
 
                         let _ = tx.send((
                             fen.to_string(),
                             material,
-                            engine_a.search_score(),
-                            engine_a.num_nodes_searched(),
-                            bestmove_a,
-                            cycles_a,
-                            engine_b.search_score(),
-                            engine_b.num_nodes_searched(),
-                            bestmove_b,
-                            cycles_b,
+                            engine_a.depth_stats().to_vec(),
+                            engine_b.depth_stats().to_vec(),
                         ));
                     }
                 });
@@ -291,40 +273,41 @@ mod tests {
             drop(tx);
 
             let mut count = 0usize;
-            while let Ok((
-                fen,
-                material,
-                score_a,
-                nodes_a,
-                bestmove_a,
-                cycles_a,
-                score_b,
-                nodes_b,
-                bestmove_b,
-                cycles_b,
-            )) = rx.recv()
-            {
-                println!(
-                    "{},{},{},{},{},{},{},{},{},{}",
-                    fen,
-                    material,
-                    score_a,
-                    nodes_a,
-                    util::move_string(bestmove_a),
-                    cycles_a,
-                    score_b,
-                    nodes_b,
-                    util::move_string(bestmove_b),
-                    cycles_b,
-                );
+            while let Ok((fen, material, stats_a, stats_b)) = rx.recv() {
+                let n = stats_a.len().min(stats_b.len());
+                for d in 0..n {
+                    let a = stats_a[d];
+                    let b = stats_b[d];
+                    println!(
+                        "{},{},{},{},{},{},{},{},{},{},{}",
+                        fen,
+                        material,
+                        a.depth,
+                        a.score,
+                        a.nodes,
+                        util::move_string(a.bestmove),
+                        a.cycles,
+                        b.score,
+                        b.nodes,
+                        util::move_string(b.bestmove),
+                        b.cycles,
+                    );
+                }
                 count += 1;
                 if count % 100 == 0 {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let rate = count as f64 / elapsed;
+                    let eta_ms = (((NUM_POSITIONS - count) as f64 / rate) * 1000.0) as u64;
                     eprintln!(
-                        "Progress: {:.02}%",
-                        count as f64 / NUM_POSITIONS as f64 * 100.0
+                        "Progress: {:.02}% | Elapsed: {:.0}s | ETA: {}",
+                        count as f64 / NUM_POSITIONS as f64 * 100.0,
+                        elapsed,
+                        util::time_format(eta_ms),
                     );
                 }
             }
+
+            eprintln!("Done in {:.1}s", start.elapsed().as_secs_f64());
         });
     }
 }

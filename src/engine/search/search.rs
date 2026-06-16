@@ -87,6 +87,15 @@ pub struct CorrectionHistory {
     pub non_pawn: [[[Eval; u16::MAX as usize + 1]; 2]; 2],
 }
 
+#[derive(Clone, Copy)]
+pub struct DepthStat {
+    pub depth: u8,
+    pub nodes: u64,
+    pub cycles: u64,
+    pub score: i32,
+    pub bestmove: u16,
+}
+
 pub struct Search<'a, const F: EngineForm> {
     chess: ChessGame,
     tables: &'a tables::Tables,
@@ -112,8 +121,6 @@ pub struct Search<'a, const F: EngineForm> {
 
     score: Eval,
     node_count: u64,
-    quiet_nodes: u64,
-    quiet_depth: u8,
     depth: u8,
 
     eval_stack: [Eval; PV_DEPTH],
@@ -124,6 +131,7 @@ pub struct Search<'a, const F: EngineForm> {
 
     corr_hist: Box<CorrectionHistory>,
     // pub corr_stats: Vec<CorrStats>,
+    depth_stats: Vec<DepthStat>,
 }
 
 impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
@@ -131,13 +139,18 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
         const INITIAL_BOUND_MARGIN: Eval = 17;
 
         let mut node_count = 0;
-        let mut quiet_nodes = 0;
 
         let max_depth = PV_DEPTH as u8 - 1;
         let target_depth = self.params.depth.unwrap_or(max_depth).min(max_depth);
 
-        if let Some(mv) = self.has_single_legal_move()
-            && F == EngineForm::Strategy
+        let stats_t0 = if F != EngineForm::Strategy {
+            unsafe { std::arch::x86_64::_rdtsc() }
+        } else {
+            0
+        };
+
+        if F == EngineForm::Strategy
+            && let Some(mv) = self.has_single_legal_move()
         {
             let static_eval = self.evaluate();
 
@@ -195,15 +208,25 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                     continue;
                 }
 
-                quiet_nodes = self.quiet_nodes;
                 node_count = self.node_count;
                 self.apply_pv(depth, score);
+
+                if F != EngineForm::Strategy {
+                    let cycles = unsafe { std::arch::x86_64::_rdtsc() } - stats_t0;
+                    self.depth_stats.push(DepthStat {
+                        depth,
+                        nodes: self.node_count,
+                        cycles,
+                        score: score as i32,
+                        bestmove: self.pv[0],
+                    });
+                }
+
                 break;
             }
         }
 
         self.node_count = node_count;
-        self.quiet_nodes = quiet_nodes;
 
         self.pv[0]
     }
@@ -232,8 +255,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             chess: chess_v2::ChessGame::new(),
             params: Box::new(params),
             tables,
-            quiet_nodes: 0,
-            quiet_depth: 0,
             node_count: 0,
             ply: 0,
             is_stopping: false,
@@ -279,6 +300,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 Box::from_raw(ptr)
             },
             // corr_stats: Vec::new(),
+            depth_stats: Vec::new(),
         };
 
         s.nnue.load(&s.chess);
@@ -294,8 +316,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.pv_trace = false;
         self.is_stopping = false;
         self.node_count = 0;
-        self.quiet_nodes = 0;
-        self.quiet_depth = 0;
         self.score = -SCORE_INF;
         self.ply = 0;
         self.depth = 0;
@@ -325,6 +345,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
 
         self.tt.new_search();
+
+        if F != EngineForm::Strategy {
+            self.depth_stats.clear();
+        }
     }
 
     /// Resets the board & nnue state without clearing the transposition or repetition tables.
@@ -375,12 +399,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.depth
     }
     #[inline(always)]
-    pub fn get_quiet_depth(&self) -> u8 {
-        self.quiet_depth
-    }
-    #[inline(always)]
-    pub fn get_quiet_nodes(&self) -> u64 {
-        self.quiet_nodes
+    pub fn depth_stats(&self) -> &[DepthStat] {
+        &self.depth_stats
     }
     #[inline(always)]
     pub fn get_rt(&self) -> &RepetitionTable {
@@ -435,7 +455,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let prune_node = ply > 0 && pv_move == 0;
         let non_pv_node = alpha == beta - 1;
 
-        if prune_node
+        if ply > 0
             && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
         {
             return 0;
@@ -459,20 +479,25 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         if let Some(ref probe) = tt_probe {
             if prune_node {
                 if let Some(score) = probe.score {
-                    return score;
+                    return Self::score_from_tt(score, self.ply);
                 }
             }
             tt_move_index = probe.mv_index;
-            tt_score = probe.tt_score;
+            tt_score = Self::score_from_tt(probe.tt_score, self.ply);
             tt_depth = probe.tt_depth;
             tt_bound = probe.bound_type;
         }
 
         // IIR
-        // @exp IIR DISABLED
-        depth -= match F {
-            // EngineForm::TacticalB => 0,
-            _ => (depth >= 4 && tt_move_index == 0xFF && prune_node) as u8,
+        let flag_enable_iir = match F {
+            EngineForm::TacticalA => true,
+            EngineForm::TacticalB => true,
+            _ => true,
+        };
+        depth -= if flag_enable_iir {
+            (depth >= 4 && tt_move_index == 0xFF && prune_node) as u8
+        } else {
+            0
         };
 
         let depth = depth;
@@ -495,9 +520,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         };
 
         if prune_node && !in_check {
-            // @exp RFP DISABLED
             let flag_enable_rfp = match F {
-                // EngineForm::TacticalB => 0,
+                EngineForm::TacticalA => false,
+                EngineForm::TacticalB => true,
                 _ => true,
             };
             if flag_enable_rfp && non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
@@ -508,13 +533,19 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
             }
 
-            if depth >= 3 && self.chess.has_non_pawn_mat(self.chess.b_move() as usize) {
+            let flag_enable_nmp = match F {
+                EngineForm::TacticalA => true,
+                EngineForm::TacticalB => true,
+                _ => true,
+            };
+
+            if flag_enable_nmp
+                && depth >= 3
+                && self.chess.has_non_pawn_mat(self.chess.b_move() as usize)
+            {
                 let ep_square = self.chess.make_null_move(self.tables);
 
                 let r = 2 + depth / 3;
-
-                // @todo - self.move_stack
-                // @todo - Prevent null move consequtively
 
                 self.ply += 1;
                 let score = -self.go(-beta, -beta + 1, depth - r);
@@ -628,9 +659,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
         };
 
-        // @exp SINGULAR EXTENSION DISABLED
         let flag_enable_se = match F {
-            // EngineForm::TacticalB => 0,
+            EngineForm::TacticalA => false,
+            EngineForm::TacticalB => true,
             _ => true,
         };
         let singular_move = if flag_enable_se
@@ -662,6 +693,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             let mut extension: u8 = 0;
             if mv == singular_move {
                 let saved_excluded = self.excluded_move;
+                let saved_cut_moves = self.cut_moves[ply];
+
                 self.excluded_move = mv;
 
                 self.rt.pop_position();
@@ -669,6 +702,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 let s_score = self.go(singular_beta - 1, singular_beta, depth / 2);
 
                 self.excluded_move = saved_excluded;
+                self.cut_moves[ply] = saved_cut_moves;
 
                 if self.is_stopping {
                     return 0;
@@ -685,9 +719,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
             }
 
-            // @exp SEE PRUNING DISABLED
             let flag_enable_see_prune = match F {
-                // EngineForm::TacticalB => 0,
+                EngineForm::TacticalA => false,
+                EngineForm::TacticalB => true,
                 _ => true,
             };
 
@@ -778,8 +812,17 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             let is_non_capture_or_promotion = mv & (MV_FLAG_CAP | MV_FLAG_PROMOTION) == 0;
 
-            let late_move_reduction =
-                num_legal_moves > 3 && depth >= 3 && !in_check && is_non_capture_or_promotion;
+            let flag_enable_lmr = match F {
+                EngineForm::TacticalA => false,
+                EngineForm::TacticalB => true,
+                _ => true,
+            };
+
+            let late_move_reduction = flag_enable_lmr
+                && num_legal_moves > 3
+                && depth >= 3
+                && !in_check
+                && is_non_capture_or_promotion;
 
             self.ply += 1;
 
@@ -981,9 +1024,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
 
                 if self.excluded_move == 0 {
+                    let store_score = Self::score_to_tt(score, self.ply);
                     self.tt.store(
                         self.chess.zobrist_key(),
-                        score,
+                        store_score,
                         depth,
                         || Self::find_move_index_avx512(best_move, &original_move_list),
                         BoundType::LowerBound,
@@ -1018,9 +1062,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
 
         if self.excluded_move == 0 {
+            let store_score = Self::score_to_tt(best_score, self.ply);
             self.tt.store(
                 self.chess.zobrist_key(),
-                best_score,
+                store_score,
                 depth,
                 || Self::find_move_index_avx512(best_move, &original_move_list),
                 bound_type,
@@ -1032,8 +1077,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
     fn quiescence(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {
         self.node_count += 1;
-        self.quiet_nodes += 1;
-        self.quiet_depth = self.quiet_depth.max((self.ply as u32 - start_ply) as u8);
 
         if self.node_count & 0x7FF == 0 && self.check_sigabort() {
             self.is_stopping = true;
@@ -1066,11 +1109,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             -SCORE_INF
         };
 
-        // Precompute bitboards + pins for qsearch SEE pruning of captures.
-        // Only computed when not in check (in check -> quiescence_check_evasion, no SEE pruning).'
-        // @exp QS SEE PRUNING DISABLED
         let flag_enable_qs_see_prune = match F {
-            // EngineForm::TacticalB => 0,
+            EngineForm::TacticalA => true,
+            EngineForm::TacticalB => true,
             _ => true,
         };
 
@@ -1666,6 +1707,24 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
     }
 
+    #[inline(always)]
+    fn score_to_tt(score: Eval, ply: u8) -> Eval {
+        if is_mate(score) {
+            score.saturating_add(score.signum() * ply as Eval)
+        } else {
+            score
+        }
+    }
+
+    #[inline(always)]
+    fn score_from_tt(score: Eval, ply: u8) -> Eval {
+        if is_mate(score) {
+            score.saturating_sub(score.signum() * ply as Eval)
+        } else {
+            score
+        }
+    }
+
     fn check_sigabort(&self) -> bool {
         if let Some(ref sig) = self.sig {
             match sig.try_recv() {
@@ -1708,46 +1767,93 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         return legal_move;
     }
 
+    #[inline(always)]
     pub fn find_move_index_avx512(mv: u16, move_list: &[u16; 256]) -> u8 {
         unsafe {
             let mv_list_ptr = move_list.as_ptr() as *const __m512i;
-            let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
-            let p1_x32 = _mm512_loadu_si512(mv_list_ptr.add(1));
-            let p2_x32 = _mm512_loadu_si512(mv_list_ptr.add(2));
-            let p3_x32 = _mm512_loadu_si512(mv_list_ptr.add(3));
-
             let mv_x32 = _mm512_set1_epi16(mv as i16);
 
-            let cmp_mask_0 = _mm512_cmpeq_epi16_mask(p0_x32, mv_x32) as u128;
-            let cmp_mask_1 = _mm512_cmpeq_epi16_mask(p1_x32, mv_x32) as u128;
-            let cmp_mask_2 = _mm512_cmpeq_epi16_mask(p2_x32, mv_x32) as u128;
-            let cmp_mask_3 = _mm512_cmpeq_epi16_mask(p3_x32, mv_x32) as u128;
+            let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
+            let cmp_mask_0 = _mm512_cmpeq_epi16_mask(p0_x32, mv_x32) as u32;
 
-            let lower_mask: u128 =
-                cmp_mask_0 | ((cmp_mask_1) << 32) | ((cmp_mask_2) << 64) | ((cmp_mask_3) << 96);
+            if std::hint::likely(cmp_mask_0 != 0) {
+                return cmp_mask_0.trailing_zeros() as u8;
+            }
 
-            // if util::should_log(hash) {
-            //     println!(
-            //         "Scanned for move {} ({}), at index {} in array {:?}",
-            //         mv,
-            //         util::move_string_dbg(mv),
-            //         lower_mask.trailing_zeros(),
-            //         move_list
-            //     );
-            //     println!(
-            //         "Masks: {:032b} {:032b} {:032b} {:032b}",
-            //         cmp_mask_0, cmp_mask_1, cmp_mask_2, cmp_mask_3
-            //     );
-            // }
+            32 + move_list
+                .get_unchecked(32..)
+                .iter()
+                .position(|&m| m == mv)
+                .unwrap_unchecked() as u8
+        }
+    }
+}
 
-            debug_assert!(lower_mask != 0, "Move {:04x} not found in move list", mv);
-            debug_assert!(
-                lower_mask.trailing_zeros() < 256,
-                "Move {:04x} index overflow",
-                mv
-            );
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            lower_mask.trailing_zeros() as u8
+    #[test]
+    fn find_move_index_all_positions() {
+        for i in 0..256usize {
+            let mut move_list = [0xAAAAu16; 256];
+            move_list[i] = 0xBBBB;
+
+            let result =
+                Search::<{ EngineForm::Strategy }>::find_move_index_avx512(0xBBBB, &move_list);
+            assert_eq!(result, i as u8, "failed at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_tt_mate_score() {
+        let to_tt = |s: Eval, p: u8| Search::<{ EngineForm::Strategy }>::score_to_tt(s, p);
+        let from_tt = |s: Eval, p: u8| Search::<{ EngineForm::Strategy }>::score_from_tt(s, p);
+
+        for s in [
+            0,
+            1,
+            -1,
+            100,
+            -100,
+            1000,
+            -1000,
+            SCORE_INF - 64,
+            -(SCORE_INF - 64),
+        ] {
+            assert!(!is_mate(s));
+            for ply in 0u8..64 {
+                assert_eq!(
+                    to_tt(s, ply),
+                    s,
+                    "non-mate {s} changed on store at ply {ply}"
+                );
+                assert_eq!(
+                    from_tt(s, ply),
+                    s,
+                    "non-mate {s} changed on probe at ply {ply}"
+                );
+            }
+        }
+
+        for ply in 0u8..64 {
+            for d in 0..(64 - ply as i32) {
+                let mag = (SCORE_INF as i32) - (ply as i32 + d);
+                for s in [mag as Eval, -(mag as Eval)] {
+                    assert!(is_mate(s), "constructed score {s} should be a mate");
+
+                    let tt = to_tt(s, ply);
+                    assert!(
+                        is_mate(tt),
+                        "TT-space score {tt} must still classify as a mate"
+                    );
+                    assert_eq!(
+                        from_tt(tt, ply),
+                        s,
+                        "round trip failed at ply {ply}, distance {d}"
+                    );
+                }
+            }
         }
     }
 }

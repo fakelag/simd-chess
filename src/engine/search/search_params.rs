@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct SearchParams {
     pub depth: Option<u8>,
     pub btime: Option<u32>,
