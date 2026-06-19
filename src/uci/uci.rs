@@ -1,11 +1,11 @@
-use std::thread::JoinHandle;
+use std::cell::SyncUnsafeCell;
 
 use crossbeam::channel;
 
 use crate::{
     engine::{
         chess_v2,
-        search::{self, AbortSignal, SigAbort, search_params, timeman},
+        search::{self, search_params, timeman},
         tables,
     },
     uci::{context::UciContext, option::*},
@@ -41,7 +41,6 @@ pub struct GoCommand {
     pub start_time: std::time::Instant,
     pub params: search_params::SearchParams,
     pub chess: chess_v2::ChessGame,
-    pub sig: AbortSignal,
     pub repetition_table: search::repetition::RepetitionTable,
     pub limits: Option<timeman::TimeLimits>,
 }
@@ -49,12 +48,14 @@ pub struct GoCommand {
 pub enum UciCommand {
     Go(GoCommand),
     OptionChange(UciOptions),
+    Ping,
     NewGame,
 }
 
 pub fn chess_uci(
     uci_context: UciContext<UciOptions>,
     tx_search: channel::Sender<UciCommand>,
+    tm: &SyncUnsafeCell<timeman::TimeManager>,
     tables: &tables::Tables,
 ) -> anyhow::Result<()> {
     let mut debug_enabled = true;
@@ -62,27 +63,20 @@ pub fn chess_uci(
     let mut game_board: Option<chess_v2::ChessGame> = None;
     let mut repetition_table: Option<search::repetition::RepetitionTable> = None;
 
-    struct GoContext {
-        tx_abort: channel::Sender<SigAbort>,
-        tx_stop: channel::Sender<SigAbort>,
-        timeout_handle: Option<JoinHandle<()>>,
-    }
-
-    let mut context: Option<GoContext> = None;
-
-    fn abort_search_uci(_debug: bool, context: &mut Option<GoContext>) {
-        if let Some(context) = context.take() {
-            let _ = context.tx_abort.try_send(SigAbort {});
-
-            if let Some(handle) = context.timeout_handle {
-                // Exit timeout thread
-                if !handle.is_finished() {
-                    let _ = context.tx_stop.try_send(SigAbort {});
-                    handle.join().unwrap();
-                }
+    let sync_stop = || {
+        let mut pings = 0;
+        unsafe { &mut *tm.get() }.stop();
+        loop {
+            match tx_search.try_send(UciCommand::Ping) {
+                Ok(_) => pings += 1,
+                Err(channel::TrySendError::Full(_)) => unsafe { &mut *tm.get() }.stop(),
+                Err(channel::TrySendError::Disconnected(_)) => break,
+            }
+            if pings > 1 {
+                break;
             }
         }
-    }
+    };
 
     loop {
         let mut buffer = String::new();
@@ -106,7 +100,7 @@ pub fn chess_uci(
             Some("ucinewgame") => {
                 tx_search.send(UciCommand::NewGame)?;
             }
-            Some("stop") => abort_search_uci(debug_enabled, &mut context),
+            Some("stop") => sync_stop(),
             Some("isready") => println!("readyok"),
             Some("position") => {
                 let mut board = chess_v2::ChessGame::new();
@@ -133,17 +127,6 @@ pub fn chess_uci(
             Some("go") => {
                 let start_time = std::time::Instant::now();
 
-                abort_search_uci(debug_enabled, &mut context);
-
-                let (tx_abort, rx_abort) = channel::bounded(1);
-                let (tx_stop, rx_stop) = channel::bounded(1);
-
-                let mut new_context = GoContext {
-                    tx_abort,
-                    tx_stop,
-                    timeout_handle: None,
-                };
-
                 let chess = game_board
                     .take()
                     .expect("Expected position command to be sent before go");
@@ -160,33 +143,17 @@ pub fn chess_uci(
                     repetition_table: repetition_table
                         .take()
                         .expect("Expected position command to be sent before go"),
-                    sig: rx_abort,
                     limits,
                 }))?;
 
-                if let Some(limits) = limits {
-                    let think_time = std::time::Duration::from_millis(limits.hard_ms);
-
-                    let tx_abort = new_context.tx_abort.clone();
-
-                    new_context.timeout_handle = Some(std::thread::spawn(move || {
-                        match rx_stop.recv_timeout(think_time) {
-                            Ok(_) => {}
-                            Err(channel::RecvTimeoutError::Timeout) => {
-                                let _ = tx_abort.try_send(SigAbort {});
-                            }
-                            Err(channel::RecvTimeoutError::Disconnected) => {
-                                panic!("Timeout thread disconnected")
-                            }
-                        }
-                    }));
-
-                    if debug_enabled {
-                        println!("info string soft {} hard {}", limits.soft_ms, limits.hard_ms);
-                    }
+                if let Some(limits) = limits
+                    && debug_enabled
+                {
+                    println!(
+                        "info string soft {} hard {}",
+                        limits.soft_ms, limits.hard_ms
+                    );
                 }
-
-                context = Some(new_context);
             }
             Some("setoption") => {
                 if input.next() != Some("name") {
@@ -243,17 +210,14 @@ pub fn chess_uci(
 
                 tx_search.send(UciCommand::OptionChange(oid))?;
             }
-            Some("quit") => break,
+            Some("quit") => {
+                sync_stop();
+                break;
+            }
             Some(arg) => return Err(anyhow::anyhow!("Unknown command: \"{}\"", arg)),
             None => return Err(anyhow::anyhow!("No command provided")),
         }
     }
-
-    if debug_enabled {
-        println!("info exiting UCI mode");
-    }
-
-    abort_search_uci(debug_enabled, &mut context);
 
     Ok(())
 }

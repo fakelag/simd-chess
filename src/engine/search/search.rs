@@ -1,18 +1,15 @@
 use std::arch::x86_64::*;
 use std::cell::SyncUnsafeCell;
 
-use crossbeam::channel;
-
 use crate::{
     chess_v2::*,
     engine::{
         chess_v2,
         search::{
-            AbortSignal, EngineForm, SearchStrategy,
+            EngineForm, SearchStrategy,
             eval::*,
             moves::*,
             repetition::RepetitionTable,
-            search_params::SearchParams,
             see,
             timeman::{IterationReport, TimeManager},
             transposition::*,
@@ -25,8 +22,6 @@ use crate::{
 
 const EVAL_NNUE: bool = true;
 const EVAL_CACHE: bool = false;
-
-const MATE_DISTANCE_PRUNING: bool = false;
 
 macro_rules! net_path {
     () => {
@@ -51,7 +46,7 @@ const CORR_W_PAWN: Eval = 128;
 const CORR_W_NP_STM: Eval = 48;
 const CORR_W_NP_NTM: Eval = 24;
 
-const PV_DEPTH: usize = 64;
+pub const PV_DEPTH: usize = 64;
 
 const HISTORY_MAX: i16 = i16::MAX - 0_017;
 const HISTORY_MIN: i16 = i16::MIN + 0_017;
@@ -85,11 +80,6 @@ impl PvTable {
     }
 }
 
-// pub struct CorrStats {
-//     pub original_eval: Eval,
-//     pub error: Eval,
-// }
-
 #[repr(C)]
 pub struct CorrectionHistory {
     pub pawn: [[Eval; u16::MAX as usize + 1]; 2],
@@ -109,8 +99,6 @@ pub struct DepthStat {
 pub struct Search<'a, const F: EngineForm> {
     chess: ChessGame,
     tables: &'a tables::Tables,
-    sig: Option<AbortSignal>,
-
     nnue: Box<nnue::LazyNnue<{ net_size!() }, NET_OSIZE>>,
 
     ply: u8,
@@ -128,8 +116,6 @@ pub struct Search<'a, const F: EngineForm> {
     history_moves: Box<[[i16; 64]; 16]>,
     cut_moves: [[u16; 2]; PV_DEPTH],
 
-    params: Box<SearchParams>,
-
     score: Eval,
     node_count: u64,
     depth: u8,
@@ -144,19 +130,19 @@ pub struct Search<'a, const F: EngineForm> {
     // pub corr_stats: Vec<CorrStats>,
     depth_stats: Vec<DepthStat>,
 
-    tm: TimeManager,
+    tm: &'a SyncUnsafeCell<TimeManager>,
     root_best_nodes: u64,
 }
 
 impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
-    fn search(&mut self) -> u16 {
+    fn search(&mut self, depth: Option<u8>) -> u16 {
         const INITIAL_BOUND_MARGIN: Eval = 17;
 
         let search_start = std::time::Instant::now();
         let mut node_count = 0;
 
         let max_depth = PV_DEPTH as u8 - 1;
-        let target_depth = self.params.depth.unwrap_or(max_depth).min(max_depth);
+        let target_depth = depth.unwrap_or(max_depth).min(max_depth);
 
         let stats_t0 = if F != EngineForm::Strategy {
             unsafe { std::arch::x86_64::_rdtsc() }
@@ -254,7 +240,7 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                     iter_nodes: self.node_count - nodes_before,
                 };
 
-                if self.tm.should_stop(&report) {
+                if self.tm_mut().should_stop(&report) {
                     break 'outer;
                 }
 
@@ -278,18 +264,16 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
 
 impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn new(
-        params: SearchParams,
         tables: &'a tables::Tables,
         tt: &'a SyncUnsafeCell<TranspositionTable>,
+        tm: &'a SyncUnsafeCell<TimeManager>,
         rt: RepetitionTable,
     ) -> Search<'a, F> {
         let nnue = nnue_load!(net_path!(), { net_size!() }, NET_OSIZE);
 
         let mut s = Search {
             nnue,
-            sig: None,
             chess: chess_v2::ChessGame::new(),
-            params: Box::new(params),
             tables,
             node_count: 0,
             ply: 0,
@@ -331,14 +315,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             et: EvalTable::new(1024),
             rt,
             tt,
+            tm,
             corr_hist: unsafe {
                 let layout = std::alloc::Layout::new::<CorrectionHistory>();
                 let ptr = std::alloc::alloc_zeroed(layout) as *mut CorrectionHistory;
                 Box::from_raw(ptr)
             },
-            // corr_stats: Vec::new(),
             depth_stats: Vec::new(),
-            tm: TimeManager::disabled(),
             root_best_nodes: 0,
         };
 
@@ -487,17 +470,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn tt_mut(&self) -> &mut TranspositionTable {
         unsafe { &mut *self.tt.get() }
     }
-    pub fn set_sig(&mut self, sig: AbortSignal) {
-        self.sig = Some(sig);
+    #[inline(always)]
+    pub fn tm_mut(&self) -> &mut TimeManager {
+        unsafe { &mut *self.tm.get() }
     }
     pub fn set_rt(&mut self, rt: RepetitionTable) {
         self.rt = rt;
-    }
-    pub fn set_search_params(&mut self, params: SearchParams) {
-        self.params = Box::new(params);
-    }
-    pub fn set_time_manager(&mut self, time_manager: TimeManager) {
-        self.tm = time_manager;
     }
     pub fn set_print_info(&mut self, on: bool) {
         self.info_print_enabled = on;
@@ -509,18 +487,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.node_count += 1;
         self.pv_table.lengths[ply] = 0;
 
-        if self.node_count & 0x7FF == 0 {
-            if self.check_sigabort() {
-                self.is_stopping = true;
-                return 0;
-            }
-
-            if let Some(max_nodes) = self.params.nodes
-                && self.node_count >= max_nodes
-            {
-                self.is_stopping = true;
-                return 0;
-            }
+        if self.check_abort() {
+            self.is_stopping = true;
+            return 0;
         }
 
         let mut tt_move_index = 0xFFu8;
@@ -539,17 +508,16 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let prune_node = ply > 0 && pv_move == 0;
         let non_pv_node = alpha == beta - 1;
 
-        if ply > 0
-            && (self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()))
-        {
-            return 0;
-        }
+        if ply > 0 {
+            if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
+                return 0;
+            }
 
-        if MATE_DISTANCE_PRUNING && ply > 0 {
             let mating_ceiling = SCORE_INF - self.ply as Eval - 1;
             if alpha >= mating_ceiling {
                 return mating_ceiling;
             }
+
             beta = beta.min(mating_ceiling);
         }
 
@@ -1176,18 +1144,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     fn quiescence(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {
         self.node_count += 1;
 
-        if self.node_count & 0x7FF == 0 {
-            if self.check_sigabort() {
-                self.is_stopping = true;
-                return 0;
-            }
-
-            if let Some(max_nodes) = self.params.nodes
-                && self.node_count >= max_nodes
-            {
-                self.is_stopping = true;
-                return 0;
-            }
+        if self.check_abort() {
+            self.is_stopping = true;
+            return 0;
         }
 
         let mut alpha = alpha;
@@ -1832,18 +1791,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
     }
 
-    fn check_sigabort(&self) -> bool {
-        if let Some(ref sig) = self.sig {
-            match sig.try_recv() {
-                Ok(_) => true,
-                Err(channel::TryRecvError::Empty) => false,
-                Err(channel::TryRecvError::Disconnected) => {
-                    panic!("sigabort channel disconnected while searching")
-                }
-            }
-        } else {
-            false
+    #[inline(always)]
+    pub fn check_abort(&mut self) -> bool {
+        if self.node_count & 0x7FF != 0 {
+            return false;
         }
+
+        return self.tm_mut().check_abort(self.node_count);
     }
 
     pub fn has_single_legal_move(&mut self) -> Option<u16> {

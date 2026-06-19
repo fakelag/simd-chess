@@ -8,6 +8,8 @@
 #![feature(iter_collect_into)]
 #![feature(generic_const_exprs)]
 
+use std::cell::SyncUnsafeCell;
+
 use crossbeam::channel;
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -71,13 +73,14 @@ fn get_opening_book(
 fn search_thread(
     uci_context: uci::context::UciContext<uci::uci::UciOptions>,
     rx_search: channel::Receiver<UciCommand>,
+    tm: &SyncUnsafeCell<search::timeman::TimeManager>,
     tables: &tables::Tables,
 ) {
     let tt = std::cell::SyncUnsafeCell::new(search::transposition::TranspositionTable::new(8));
     let mut search_engine = search::search::Search::<{ EngineForm::Strategy }>::new(
-        SearchParams::new(),
         tables,
         &tt,
+        tm,
         repetition::RepetitionTable::new(),
     );
     search_engine.set_print_info(true);
@@ -88,7 +91,6 @@ fn search_thread(
         match rx_search.recv() {
             Ok(UciCommand::Go(go)) => {
                 let debug = go.params.debug;
-
                 let chess = &go.chess;
 
                 let (board_key, pawn_key, non_pawn_key) = chess.calc_initial_zobrist_key(tables);
@@ -98,13 +100,16 @@ fn search_thread(
 
                 search_engine.load_from_board(chess);
                 search_engine.new_search();
-                search_engine.set_sig(go.sig);
                 search_engine.set_rt(go.repetition_table);
-                search_engine.set_search_params(go.params);
-                search_engine.set_time_manager(match go.limits {
-                    Some(limits) => search::timeman::TimeManager::new(limits, go.start_time),
-                    None => search::timeman::TimeManager::disabled(),
-                });
+
+                match go.limits {
+                    Some(limits) => search_engine.tm_mut().enable(limits, go.start_time),
+                    None => search_engine.tm_mut().disable(),
+                }
+
+                search_engine
+                    .tm_mut()
+                    .set_nodes(go.params.nodes.unwrap_or(0));
 
                 let book_move = match used_book {
                     Some(ref own_book) if chess.ply() < 16 => own_book
@@ -113,42 +118,10 @@ fn search_thread(
                     _ => None,
                 };
 
-                let best_move = book_move.unwrap_or_else(|| search_engine.search());
+                let best_move = book_move.unwrap_or_else(|| search_engine.search(go.params.depth));
 
-                if debug {
-                    if book_move.is_some() {
+                if debug && book_move.is_some() {
                         println!("info depth 0 score cp 0 (book)");
-                    }
-
-                    // let search_nodes = search_engine.num_nodes_searched();
-                    // let search_depth = search_engine.get_depth();
-                    // let search_score = search_engine.search_score();
-                    // let tt_stats = unsafe { &mut *transposition_table.get() }.calc_stats();
-
-                    // let elapsed = go.start_time.elapsed();
-
-                    // println!(
-                    //     "info string searched {} nodes in {} with depth {} bestmove {} ({:016b}) score {} ({:.02}% tt occupancy, {:.02} probe hit rate)",
-                    //     search_nodes,
-                    //     util::time_format(elapsed.as_millis() as u64),
-                    //     search_depth,
-                    //     util::move_string(best_move),
-                    //     best_move,
-                    //     search_score,
-                    //     tt_stats.fill_percentage * 100.0,
-                    //     tt_stats.probe_hit as f64
-                    //         / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
-                    //         * 100.0
-                    // );
-
-                    // println!(
-                    //     "info pv {:?}",
-                    //     search_engine
-                    //         .get_pv()
-                    //         .iter()
-                    //         .map(|mv| util::move_string_dbg(*mv))
-                    //         .collect::<Vec<String>>()
-                    // );
                 }
 
                 println!(
@@ -170,6 +143,7 @@ fn search_thread(
             Ok(UciCommand::NewGame) => {
                 search_engine.new_game();
             }
+            Ok(UciCommand::Ping) => {}
             Err(_) => {
                 println!("info search thread terminated");
                 break;
@@ -392,9 +366,11 @@ fn main() {
             }));
 
             let (tx_search, rx_search) = channel::bounded(1);
-            let tables = tables::Tables::new();
 
             let uci_context = uci::uci::create_context();
+
+            let tables = tables::Tables::new();
+            let time_manager = SyncUnsafeCell::new(search::timeman::TimeManager::new());
 
             let result = std::thread::scope(|s| {
                 let st = s.spawn(|| {
@@ -403,10 +379,10 @@ fn main() {
                         println!("Pinned search thread to core {}", core_id);
                     }
 
-                    search_thread(uci_context.clone(), rx_search, &tables);
+                    search_thread(uci_context.clone(), rx_search, &time_manager, &tables);
                 });
 
-                let result = chess_uci(uci_context.clone(), tx_search, &tables);
+                let result = chess_uci(uci_context.clone(), tx_search, &time_manager, &tables);
 
                 st.join().unwrap();
 

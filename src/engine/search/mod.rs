@@ -1,7 +1,3 @@
-pub struct SigAbort {}
-
-pub type AbortSignal = crossbeam::channel::Receiver<SigAbort>;
-
 #[derive(std::marker::ConstParamTy, PartialEq, Eq)]
 pub enum EngineForm {
     Strategy,
@@ -10,7 +6,7 @@ pub enum EngineForm {
 }
 
 pub trait SearchStrategy<'a> {
-    fn search(&mut self) -> u16;
+    fn search(&mut self, depth: Option<u8>) -> u16;
     fn num_nodes_searched(&self) -> u64;
     fn search_score(&self) -> i32;
 }
@@ -57,15 +53,12 @@ mod tests {
             //         .is_ok()
             // );
 
-            let mut params = SearchParams::new();
-            params.depth = Some(std::hint::black_box(16));
-
-            // let mut search_engine =
-            //     v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
+            let depth = Some(std::hint::black_box(16));
 
             let tt = std::cell::SyncUnsafeCell::new(transposition::TranspositionTable::new(16));
+            let tm = std::cell::SyncUnsafeCell::new(timeman::TimeManager::new());
             let mut search_engine =
-                search::Search::<{ EngineForm::Strategy }>::new(params, &tables, &tt, rt);
+                search::Search::<{ EngineForm::Strategy }>::new(&tables, &tt, &tm, rt);
 
             search_engine.new_game();
             search_engine.load_from_fen(test_fen, &tables).unwrap();
@@ -74,7 +67,7 @@ mod tests {
             let (bestmove, delta) = {
                 let start = rdtsc();
 
-                let mv = std::hint::black_box(search_engine.search());
+                let mv = std::hint::black_box(search_engine.search(depth));
 
                 let end = rdtsc();
                 (mv, end - start)
@@ -232,27 +225,24 @@ mod tests {
                     let core_id = if i % 2 == 0 { i & 31 } else { (i + 16) & 31 };
                     core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
 
-                    let mut params_s = SearchParams::new();
-                    params_s.depth = Some(BENCH_DEPTH);
-                    let mut params_t = SearchParams::new();
-                    params_t.depth = Some(BENCH_DEPTH);
+                    let tm = std::cell::SyncUnsafeCell::new(timeman::TimeManager::new());
 
                     let tt_a = std::cell::SyncUnsafeCell::new(
                         transposition::TranspositionTable::new(TT_SIZE_MB),
                     );
                     let mut engine_a = search::Search::<{ EngineForm::TacticalA }>::new(
-                        params_s,
                         tables,
                         &tt_a,
+                        &tm,
                         repetition::RepetitionTable::new(),
                     );
                     let tt_b = std::cell::SyncUnsafeCell::new(
                         transposition::TranspositionTable::new(TT_SIZE_MB),
                     );
                     let mut engine_b = search::Search::<{ EngineForm::TacticalB }>::new(
-                        params_t,
                         tables,
                         &tt_b,
+                        &tm,
                         repetition::RepetitionTable::new(),
                     );
 
@@ -261,12 +251,12 @@ mod tests {
                         engine_a.load_from_fen(&fen, tables).unwrap();
                         engine_a.new_search();
                         let material = total_material(engine_a.get_board_mut().bitboards());
-                        engine_a.search();
+                        engine_a.search(Some(BENCH_DEPTH));
 
                         engine_b.new_game();
                         engine_b.load_from_fen(&fen, tables).unwrap();
                         engine_b.new_search();
-                        engine_b.search();
+                        engine_b.search(Some(BENCH_DEPTH));
 
                         let _ = tx.send((
                             fen.to_string(),

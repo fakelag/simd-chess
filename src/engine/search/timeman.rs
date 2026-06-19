@@ -74,30 +74,26 @@ pub fn compute_limits(p: &SearchParams, b_move: bool) -> Option<TimeLimits> {
         });
     }
 
-    let time = if b_move { p.btime } else { p.wtime };
-    let time = match time {
-        Some(t) => t as u64,
+    let timeleft_ms = match if b_move { p.btime } else { p.wtime } {
+        Some(t) => (t as u64).saturating_sub(MOVE_OVERHEAD_MS).max(1),
         None => return None,
     };
 
-    let inc = (if b_move { p.binc } else { p.winc }).unwrap_or(0) as u64;
-    let t = time.saturating_sub(MOVE_OVERHEAD_MS).max(1);
+    let inc_ms = (if b_move { p.binc } else { p.winc }).unwrap_or(0) as u64;
 
-    let soft = match p.movestogo {
-        Some(mtg) => {
-            let mtg = (mtg as u64).max(1);
-            t / mtg + inc * INC_NUM / INC_DEN
-        }
-        None => t / SUDDEN_DEATH_DIV + inc * INC_NUM / INC_DEN,
+    let mtg: u64 = match p.movestogo {
+        Some(m) => (m as u64).max(1),
+        None => SUDDEN_DEATH_DIV,
     };
 
-    let hard_cap = (t * HARD_CAP_NUM / HARD_CAP_DEN).max(1);
-    let hard = ((soft as f64 * HARD_MULT) as u64).min(hard_cap).max(1);
-    let soft = soft.min(hard).max(1);
+    let cap_ms = (timeleft_ms * HARD_CAP_NUM / HARD_CAP_DEN).max(1);
+
+    let soft_ms = timeleft_ms / mtg + inc_ms * INC_NUM / INC_DEN;
+    let hard_ms = ((soft_ms as f64 * HARD_MULT) as u64).min(cap_ms).max(1);
 
     Some(TimeLimits {
-        soft_ms: soft,
-        hard_ms: hard,
+        soft_ms: soft_ms.min(hard_ms).max(1),
+        hard_ms,
         dynamic: true,
     })
 }

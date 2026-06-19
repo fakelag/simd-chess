@@ -1,5 +1,5 @@
 use crate::{
-    engine::chess_v2::PieceIndex,
+    engine::{chess_v2::PieceIndex, search::search::PV_DEPTH},
     util::{Align64, table_mirror, table_negate_i8},
 };
 
@@ -7,7 +7,7 @@ pub type Eval = i16;
 
 #[inline(always)]
 pub fn is_mate(score: Eval) -> bool {
-    score.abs() > SCORE_INF - 64
+    score.abs() > SCORE_INF - (PV_DEPTH as Eval)
 }
 
 pub const SCORE_INF: Eval = i16::MAX - 1;
