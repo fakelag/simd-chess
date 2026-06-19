@@ -3,8 +3,10 @@
 /data
 /openings
 /matchcfg
+/analysis
 *.bat
 *.txt
 *.zip
 *.bin
 *.binpack
+*.csv

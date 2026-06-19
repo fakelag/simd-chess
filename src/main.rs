@@ -73,12 +73,14 @@ fn search_thread(
     rx_search: channel::Receiver<UciCommand>,
     tables: &tables::Tables,
 ) {
+    let tt = std::cell::SyncUnsafeCell::new(search::transposition::TranspositionTable::new(8));
     let mut search_engine = search::search::Search::<{ EngineForm::Strategy }>::new(
         SearchParams::new(),
         tables,
-        8,
+        &tt,
         repetition::RepetitionTable::new(),
     );
+    search_engine.set_print_info(true);
 
     let mut used_book = get_opening_book(&uci_context, tables);
 
@@ -99,6 +101,10 @@ fn search_thread(
                 search_engine.set_sig(go.sig);
                 search_engine.set_rt(go.repetition_table);
                 search_engine.set_search_params(go.params);
+                search_engine.set_time_manager(match go.limits {
+                    Some(limits) => search::timeman::TimeManager::new(limits, go.start_time),
+                    None => search::timeman::TimeManager::disabled(),
+                });
 
                 let book_move = match used_book {
                     Some(ref own_book) if chess.ply() < 16 => own_book
@@ -112,12 +118,6 @@ fn search_thread(
                 if debug {
                     if book_move.is_some() {
                         println!("info depth 0 score cp 0 (book)");
-                    } else {
-                        println!(
-                            "info depth {} score cp {}",
-                            search_engine.get_depth(),
-                            search_engine.search_score()
-                        );
                     }
 
                     // let search_nodes = search_engine.num_nodes_searched();

@@ -5,7 +5,7 @@ use crossbeam::channel;
 use crate::{
     engine::{
         chess_v2,
-        search::{self, AbortSignal, SigAbort, search_params},
+        search::{self, AbortSignal, SigAbort, search_params, timeman},
         tables,
     },
     uci::{context::UciContext, option::*},
@@ -43,6 +43,7 @@ pub struct GoCommand {
     pub chess: chess_v2::ChessGame,
     pub sig: AbortSignal,
     pub repetition_table: search::repetition::RepetitionTable,
+    pub limits: Option<timeman::TimeLimits>,
 }
 
 pub enum UciCommand {
@@ -150,19 +151,7 @@ pub fn chess_uci(
                 let mut search_params = search_params::SearchParams::from_iter(input);
                 search_params.debug = debug_enabled;
 
-                let infinite = search_params.infinite;
-                let movetime = search_params.movetime;
-
-                let time = if chess.b_move() {
-                    search_params.btime
-                } else {
-                    search_params.wtime
-                };
-                let inc = if chess.b_move() {
-                    search_params.binc
-                } else {
-                    search_params.winc
-                };
+                let limits = timeman::compute_limits(&search_params, chess.b_move());
 
                 tx_search.send(UciCommand::Go(GoCommand {
                     start_time,
@@ -172,40 +161,28 @@ pub fn chess_uci(
                         .take()
                         .expect("Expected position command to be sent before go"),
                     sig: rx_abort,
+                    limits,
                 }))?;
 
-                if !infinite {
-                    let movetime_ms = if let Some(movetime) = movetime {
-                        Some(movetime)
-                    } else {
-                        // base / 20 + inc / 2
-                        time.and_then(|t| Some(t / 20 + inc.unwrap_or(0) / 2))
-                    };
+                if let Some(limits) = limits {
+                    let think_time = std::time::Duration::from_millis(limits.hard_ms);
 
-                    if let Some(mut movetime_ms) = movetime_ms {
-                        movetime_ms = movetime_ms.max(1);
+                    let tx_abort = new_context.tx_abort.clone();
 
-                        let think_time = std::time::Duration::from_millis(movetime_ms as u64);
-
-                        // Timeout thread
-                        let tx_abort = new_context.tx_abort.clone();
-
-                        new_context.timeout_handle =
-                            Some(std::thread::spawn(move || {
-                                match rx_stop.recv_timeout(think_time) {
-                                    Ok(_) => {}
-                                    Err(channel::RecvTimeoutError::Timeout) => {
-                                        let _ = tx_abort.try_send(SigAbort {});
-                                    }
-                                    Err(channel::RecvTimeoutError::Disconnected) => {
-                                        panic!("Timeout thread disconnected")
-                                    }
-                                }
-                            }));
-
-                        if debug_enabled {
-                            println!("info movetime ms {}", movetime_ms);
+                    new_context.timeout_handle = Some(std::thread::spawn(move || {
+                        match rx_stop.recv_timeout(think_time) {
+                            Ok(_) => {}
+                            Err(channel::RecvTimeoutError::Timeout) => {
+                                let _ = tx_abort.try_send(SigAbort {});
+                            }
+                            Err(channel::RecvTimeoutError::Disconnected) => {
+                                panic!("Timeout thread disconnected")
+                            }
                         }
+                    }));
+
+                    if debug_enabled {
+                        println!("info string soft {} hard {}", limits.soft_ms, limits.hard_ms);
                     }
                 }
 

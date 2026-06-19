@@ -1,4 +1,5 @@
 use std::arch::x86_64::*;
+use std::cell::SyncUnsafeCell;
 
 use crossbeam::channel;
 
@@ -7,8 +8,14 @@ use crate::{
     engine::{
         chess_v2,
         search::{
-            AbortSignal, EngineForm, SearchStrategy, eval::*, moves::*,
-            repetition::RepetitionTable, search_params::SearchParams, see, transposition::*,
+            AbortSignal, EngineForm, SearchStrategy,
+            eval::*,
+            moves::*,
+            repetition::RepetitionTable,
+            search_params::SearchParams,
+            see,
+            timeman::{IterationReport, TimeManager},
+            transposition::*,
         },
         tables::{self},
     },
@@ -18,6 +25,8 @@ use crate::{
 
 const EVAL_NNUE: bool = true;
 const EVAL_CACHE: bool = false;
+
+const MATE_DISTANCE_PRUNING: bool = false;
 
 macro_rules! net_path {
     () => {
@@ -96,6 +105,7 @@ pub struct DepthStat {
     pub bestmove: u16,
 }
 
+#[repr(align(64))]
 pub struct Search<'a, const F: EngineForm> {
     chess: ChessGame,
     tables: &'a tables::Tables,
@@ -105,13 +115,14 @@ pub struct Search<'a, const F: EngineForm> {
 
     ply: u8,
     is_stopping: bool,
+    info_print_enabled: bool,
 
     pv_table: Box<PvTable>,
     pv: [u16; PV_DEPTH],
     pv_length: u8,
     pv_trace: bool,
 
-    tt: TranspositionTable,
+    tt: &'a SyncUnsafeCell<TranspositionTable>,
     rt: RepetitionTable,
     et: EvalTable,
     history_moves: Box<[[i16; 64]; 16]>,
@@ -132,12 +143,16 @@ pub struct Search<'a, const F: EngineForm> {
     corr_hist: Box<CorrectionHistory>,
     // pub corr_stats: Vec<CorrStats>,
     depth_stats: Vec<DepthStat>,
+
+    tm: TimeManager,
+    root_best_nodes: u64,
 }
 
 impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
     fn search(&mut self) -> u16 {
         const INITIAL_BOUND_MARGIN: Eval = 17;
 
+        let search_start = std::time::Instant::now();
         let mut node_count = 0;
 
         let max_depth = PV_DEPTH as u8 - 1;
@@ -158,7 +173,11 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
             self.pv_table.moves[0][0] = mv;
 
             self.apply_pv(0, static_eval);
+            self.print_info(search_start, 0, static_eval);
+
             return mv;
+        } else {
+            self.print_info(search_start, 0, 0);
         }
 
         'outer: for depth in 1..=target_depth {
@@ -189,6 +208,9 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 //         .join(", ")
                 // );
 
+                self.root_best_nodes = 0;
+                let nodes_before = self.node_count;
+
                 let score = self.go(alpha, beta, depth);
 
                 if self.is_stopping {
@@ -211,6 +233,8 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 node_count = self.node_count;
                 self.apply_pv(depth, score);
 
+                self.print_info(search_start, depth, score);
+
                 if F != EngineForm::Strategy {
                     let cycles = unsafe { std::arch::x86_64::_rdtsc() } - stats_t0;
                     self.depth_stats.push(DepthStat {
@@ -220,6 +244,18 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                         score: score as i32,
                         bestmove: self.pv[0],
                     });
+                }
+
+                let report = IterationReport {
+                    depth,
+                    score,
+                    best_move: self.pv[0],
+                    best_move_nodes: self.root_best_nodes,
+                    iter_nodes: self.node_count - nodes_before,
+                };
+
+                if self.tm.should_stop(&report) {
+                    break 'outer;
                 }
 
                 break;
@@ -244,7 +280,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn new(
         params: SearchParams,
         tables: &'a tables::Tables,
-        tt_size_hint_mb: usize,
+        tt: &'a SyncUnsafeCell<TranspositionTable>,
         rt: RepetitionTable,
     ) -> Search<'a, F> {
         let nnue = nnue_load!(net_path!(), { net_size!() }, NET_OSIZE);
@@ -258,6 +294,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             node_count: 0,
             ply: 0,
             is_stopping: false,
+            info_print_enabled: false,
             score: -SCORE_INF,
             pv_table: unsafe {
                 let mut pv_table = Box::new_uninit();
@@ -293,7 +330,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             },
             et: EvalTable::new(1024),
             rt,
-            tt: TranspositionTable::new(tt_size_hint_mb),
+            tt,
             corr_hist: unsafe {
                 let layout = std::alloc::Layout::new::<CorrectionHistory>();
                 let ptr = std::alloc::alloc_zeroed(layout) as *mut CorrectionHistory;
@@ -301,6 +338,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             },
             // corr_stats: Vec::new(),
             depth_stats: Vec::new(),
+            tm: TimeManager::disabled(),
+            root_best_nodes: 0,
         };
 
         s.nnue.load(&s.chess);
@@ -316,6 +355,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.pv_trace = false;
         self.is_stopping = false;
         self.node_count = 0;
+        self.root_best_nodes = 0;
         self.score = -SCORE_INF;
         self.ply = 0;
         self.depth = 0;
@@ -344,7 +384,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
         }
 
-        self.tt.new_search();
+        self.tt_mut().new_search();
 
         if F != EngineForm::Strategy {
             self.depth_stats.clear();
@@ -370,7 +410,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     /// resets all heuristics.
     pub fn new_game(&mut self) {
         self.rt.clear();
-        self.tt.clear();
+        self.tt_mut().clear();
         self.et.clear();
 
         for i in 0..2 {
@@ -380,6 +420,31 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 self.corr_hist.non_pawn[1][i][j] = 0;
             }
         }
+    }
+
+    fn print_info(&self, search_start: std::time::Instant, depth: u8, score: Eval) {
+        if !self.info_print_enabled {
+            return;
+        }
+
+        let ms = search_start.elapsed().as_millis() as u64;
+        let nps = self.node_count * 1000 / ms.max(1);
+        let pv = self.pv[0..self.pv_length as usize]
+            .iter()
+            .map(|mv| util::move_string(*mv))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // info depth {} score cp {}
+        println!(
+            "info depth {} {} nodes {} nps {} time {} pv {}",
+            depth,
+            util::format_uci_score(score as i32),
+            self.node_count,
+            nps,
+            ms,
+            pv,
+        );
     }
 
     // pub fn resize_eval_table(&mut self, new_size_mb: usize) {
@@ -418,7 +483,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn get_nnue_mut(&mut self) -> &mut impl nnue::UpdatableNnue {
         self.nnue.as_mut()
     }
-
+    #[inline(always)]
+    pub fn tt_mut(&self) -> &mut TranspositionTable {
+        unsafe { &mut *self.tt.get() }
+    }
     pub fn set_sig(&mut self, sig: AbortSignal) {
         self.sig = Some(sig);
     }
@@ -428,6 +496,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn set_search_params(&mut self, params: SearchParams) {
         self.params = Box::new(params);
     }
+    pub fn set_time_manager(&mut self, time_manager: TimeManager) {
+        self.tm = time_manager;
+    }
+    pub fn set_print_info(&mut self, on: bool) {
+        self.info_print_enabled = on;
+    }
 
     fn go(&mut self, alpha: Eval, beta: Eval, depth: u8) -> Eval {
         let ply = self.ply as usize & (PV_DEPTH - 1);
@@ -435,14 +509,24 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.node_count += 1;
         self.pv_table.lengths[ply] = 0;
 
-        if self.node_count & 0x7FF == 0 && self.check_sigabort() {
-            self.is_stopping = true;
-            return 0;
+        if self.node_count & 0x7FF == 0 {
+            if self.check_sigabort() {
+                self.is_stopping = true;
+                return 0;
+            }
+
+            if let Some(max_nodes) = self.params.nodes
+                && self.node_count >= max_nodes
+            {
+                self.is_stopping = true;
+                return 0;
+            }
         }
 
         let mut tt_move_index = 0xFFu8;
         let mut bound_type = BoundType::UpperBound;
         let mut alpha = alpha;
+        let mut beta = beta;
         let mut depth = depth;
 
         let pv_move = if self.pv_trace {
@@ -461,11 +545,19 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             return 0;
         }
 
+        if MATE_DISTANCE_PRUNING && ply > 0 {
+            let mating_ceiling = SCORE_INF - self.ply as Eval - 1;
+            if alpha >= mating_ceiling {
+                return mating_ceiling;
+            }
+            beta = beta.min(mating_ceiling);
+        }
+
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
         depth += in_check as u8;
 
         let tt_probe = if self.excluded_move == 0 {
-            self.tt
+            self.tt_mut()
                 .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta)
         } else {
             // During singular verification, skip TT cutoffs to avoid infinite recursion
@@ -824,6 +916,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 && !in_check
                 && is_non_capture_or_promotion;
 
+            let root_nodes_before = self.node_count;
+
             self.ply += 1;
 
             let new_depth = depth - 1 + extension;
@@ -902,6 +996,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             if score > best_score {
                 best_score = score;
                 best_move = mv;
+
+                if self.ply == 0 {
+                    self.root_best_nodes = self.node_count - root_nodes_before;
+                }
             }
 
             if score <= alpha {
@@ -1025,7 +1123,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
                 if self.excluded_move == 0 {
                     let store_score = Self::score_to_tt(score, self.ply);
-                    self.tt.store(
+                    self.tt_mut().store(
                         self.chess.zobrist_key(),
                         store_score,
                         depth,
@@ -1063,7 +1161,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         if self.excluded_move == 0 {
             let store_score = Self::score_to_tt(best_score, self.ply);
-            self.tt.store(
+            self.tt_mut().store(
                 self.chess.zobrist_key(),
                 store_score,
                 depth,
@@ -1078,9 +1176,18 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     fn quiescence(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {
         self.node_count += 1;
 
-        if self.node_count & 0x7FF == 0 && self.check_sigabort() {
-            self.is_stopping = true;
-            return 0;
+        if self.node_count & 0x7FF == 0 {
+            if self.check_sigabort() {
+                self.is_stopping = true;
+                return 0;
+            }
+
+            if let Some(max_nodes) = self.params.nodes
+                && self.node_count >= max_nodes
+            {
+                self.is_stopping = true;
+                return 0;
+            }
         }
 
         let mut alpha = alpha;

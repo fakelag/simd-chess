@@ -279,6 +279,18 @@ pub fn move_string(mv: u16) -> String {
     )
 }
 
+pub fn format_uci_score(score: i32) -> String {
+    use crate::engine::search::eval::{Eval, SCORE_INF, is_mate};
+
+    if is_mate(score as Eval) {
+        let plies = SCORE_INF as i32 - score.abs();
+        let moves = (plies + 1) / 2;
+        format!("score mate {}", if score >= 0 { moves } else { -moves })
+    } else {
+        format!("score cp {}", score)
+    }
+}
+
 pub fn move_string_dbg(mv: u16) -> String {
     format!(
         "{}{}{}",

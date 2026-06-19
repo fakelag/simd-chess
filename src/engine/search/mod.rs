@@ -21,6 +21,7 @@ pub mod repetition;
 pub mod search;
 pub mod search_params;
 pub mod see;
+pub mod timeman;
 pub mod transposition;
 
 #[cfg(test)]
@@ -62,8 +63,9 @@ mod tests {
             // let mut search_engine =
             //     v11_opt::Search::new(params, chess, &tables, unsafe { &mut *tt.get() }, rt, &rx);
 
+            let tt = std::cell::SyncUnsafeCell::new(transposition::TranspositionTable::new(16));
             let mut search_engine =
-                search::Search::<{ EngineForm::Strategy }>::new(params, &tables, 16, rt);
+                search::Search::<{ EngineForm::Strategy }>::new(params, &tables, &tt, rt);
 
             search_engine.new_game();
             search_engine.load_from_fen(test_fen, &tables).unwrap();
@@ -235,16 +237,22 @@ mod tests {
                     let mut params_t = SearchParams::new();
                     params_t.depth = Some(BENCH_DEPTH);
 
+                    let tt_a = std::cell::SyncUnsafeCell::new(
+                        transposition::TranspositionTable::new(TT_SIZE_MB),
+                    );
                     let mut engine_a = search::Search::<{ EngineForm::TacticalA }>::new(
                         params_s,
                         tables,
-                        TT_SIZE_MB,
+                        &tt_a,
                         repetition::RepetitionTable::new(),
+                    );
+                    let tt_b = std::cell::SyncUnsafeCell::new(
+                        transposition::TranspositionTable::new(TT_SIZE_MB),
                     );
                     let mut engine_b = search::Search::<{ EngineForm::TacticalB }>::new(
                         params_t,
                         tables,
-                        TT_SIZE_MB,
+                        &tt_b,
                         repetition::RepetitionTable::new(),
                     );
 
