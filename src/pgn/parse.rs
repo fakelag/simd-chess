@@ -40,6 +40,14 @@ impl PgnReadBuf {
             buf: vec![0u8; CHUNK_SIZE + BACKBUF_SIZE],
         }
     }
+
+    pub fn from_buf(buf: Vec<u8>) -> Self {
+        PgnReadBuf { buf }
+    }
+
+    pub fn into_buf(self) -> Vec<u8> {
+        self.buf
+    }
 }
 
 #[derive(Debug)]
@@ -363,5 +371,132 @@ impl PgnGameParser {
 
             return Ok(Some((ch_start, BACKBUF_SIZE + bp, next_remsize)));
         }
+    }
+}
+
+pub fn parse_games(buf: &[u8], games: &mut Vec<PgnGame>) {
+    let mut game_state = PgnGameState::Tags;
+    let mut game = PgnGame::new();
+
+    let str = std::str::from_utf8(buf).unwrap();
+
+    for line in str.lines() {
+        match game_state {
+            PgnGameState::Tags => {
+                if line.is_empty() {
+                    game_state = PgnGameState::Moves;
+                    continue;
+                }
+
+                if !line.starts_with('[') || !line.ends_with(']') {
+                    panic!("Invalid tag line: {}", line);
+                }
+
+                let mut parts = line[1..line.len() - 1].splitn(2, ' ');
+                let tag = parts.next().unwrap();
+                let value = parts.next().unwrap_or("").trim_matches('"');
+
+                let val_start = value.as_ptr() as usize - buf.as_ptr() as usize;
+                let val = Some((val_start, val_start + value.len()));
+
+                match tag {
+                    "Event" => game.event = val,
+                    "Site" => game.site = val,
+                    "White" => game.white = val,
+                    "Black" => game.black = val,
+                    "Result" => game.result = val,
+                    "UTCDate" => game.utc_date = val,
+                    "UTCTime" => game.utc_time = val,
+                    "WhiteElo" => game.white_elo = val,
+                    "BlackElo" => game.black_elo = val,
+                    "WhiteRatingDiff" => game.white_rating_diff = val,
+                    "BlackRatingDiff" => game.black_rating_diff = val,
+                    "ECO" => game.eco = val,
+                    "Eco" => game.eco = val,
+                    "Opening" => game.opening = val,
+                    "TimeControl" => game.time_control = val,
+                    "Termination" => game.termination = val,
+                    _ => {}
+                }
+            }
+            PgnGameState::Moves => {
+                if line.is_empty() {
+                    games.push(game);
+                    game = PgnGame::new();
+                    game_state = PgnGameState::Tags;
+                    continue;
+                }
+
+                let val_start = line.as_ptr() as usize - buf.as_ptr() as usize;
+                if let Some(moves) = &mut game.moves {
+                    moves.1 = val_start + line.len();
+                } else {
+                    game.moves = Some((val_start, val_start + line.len()));
+                }
+            }
+        }
+    }
+}
+
+pub struct PgnChunker {
+    carry: Vec<u8>,
+    finished: bool,
+}
+
+impl PgnChunker {
+    pub fn new() -> Self {
+        PgnChunker {
+            carry: Vec::new(),
+            finished: false,
+        }
+    }
+
+    pub fn next_chunk<R: Read + ?Sized>(
+        &mut self,
+        reader: &mut R,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        let carry_len = self.carry.len();
+        buf[..carry_len].copy_from_slice(&self.carry);
+        self.carry.clear();
+
+        let mut filled = carry_len;
+
+        while filled < CHUNK_SIZE && !self.finished {
+            match reader.read(&mut buf[filled..CHUNK_SIZE]) {
+                Ok(0) => self.finished = true,
+                Ok(n) => filled += n,
+                Err(e) => panic!("Error reading from stream: {}", e),
+            }
+        }
+
+        if filled == 0 {
+            return None;
+        }
+
+        match Self::find_last_boundary(&buf[..filled]) {
+            Some(b) => {
+                self.carry.extend_from_slice(&buf[b..filled]);
+                Some(b)
+            }
+            None if self.finished => Some(filled),
+            None => panic!(
+                "Chunk buffer too small: no game boundary in {} bytes",
+                filled
+            ),
+        }
+    }
+
+    fn find_last_boundary(data: &[u8]) -> Option<usize> {
+        (4..data.len()).rev().find_map(|i| {
+            let is_lf_ending = &data[i - 1..=i] == b"\n\n" && data[i - 2] != b']';
+            let is_crlf_ending = &data[i - 3..=i] == b"\r\n\r\n" && data[i - 4] != b']';
+
+            if is_lf_ending || is_crlf_ending {
+                Some(i + 1)
+            } else {
+                None
+            }
+        })
     }
 }

@@ -314,6 +314,18 @@ pub fn time_format(ms: u64) -> String {
     }
 }
 
+pub fn pin_thread_for_worker(index: usize) {
+    const PHYSICAL_CORES: usize = 16;
+
+    let core = if index < PHYSICAL_CORES {
+        index * 2
+    } else {
+        (index - PHYSICAL_CORES) * 2 + 1
+    };
+
+    core_affinity::set_for_current(core_affinity::CoreId { id: core });
+}
+
 pub fn byte_size_string(bytes: usize) -> String {
     let kb = bytes as f64 / 1024.0;
     let mb = kb / 1024.0;

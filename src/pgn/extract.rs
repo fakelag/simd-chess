@@ -1,16 +1,27 @@
 use std::{
+    cell::SyncUnsafeCell,
+    collections::HashSet,
     fs::File,
-    io::{BufReader, Write},
+    io::{BufReader, Read, Write},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
+use crossbeam::channel::{Receiver, Sender};
 use rand::{Rng, SeedableRng};
 
 use crate::{
     engine::{
         chess_v2::{self, ChessGame},
+        search::{
+            EngineForm, SearchStrategy, repetition, search::Search, stability, timeman,
+            transposition,
+        },
         tables,
     },
-    pgn::parse::{PgnGame, PgnGameParser, PgnGameTermination, PgnReadBuf},
+    pgn::parse::{self, PgnGame, PgnGameTermination, PgnReadBuf},
     util,
 };
 
@@ -19,142 +30,273 @@ pub enum MovePick {
     Random,
 }
 
+struct CountingReader<'a, R> {
+    inner: R,
+    bytes: &'a AtomicU64,
+}
+
+impl<R: Read> Read for CountingReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
 pub struct PositionExtractParams {
     pub fcompleted_only: bool,
     pub ffrom_ply: usize,
     pub fto_ply: usize,
     pub fmin_ply: usize,
     pub fnum_positions: usize,
-    pub fdist_openings: bool,
     pub fno_duplicates: bool,
+    pub fcp_threshold: Option<i32>,
     pub fpick: MovePick,
     pub fseed: u64,
     pub fattempts_per_position: usize,
+    pub fsharpness_threshold: Option<f64>,
+    pub fsharpness_depth: u8,
 }
 
-struct ExtractContext<'a> {
-    games: &'a mut Vec<PgnGame>,
-    storage: &'a mut PgnReadBuf,
-    moves: &'a mut Vec<u16>,
-    board: ChessGame,
-    tables: tables::Tables,
-    rng: rand::rngs::StdRng,
-    zobrist_set: std::collections::BTreeSet<u64>,
-    opening_map: std::collections::BTreeMap<String, usize>,
-    sum_openings: usize,
-    count_openings: usize,
-    buffer: String,
-    game_count: usize,
-    writer: std::io::BufWriter<File>,
+struct WorkerChunkInput {
+    chunk_index: u64,
+    buf: Vec<u8>,
+    len: usize,
 }
 
-impl ExtractContext<'_> {
-    fn process_batch(&mut self, params: &PositionExtractParams) -> bool {
-        for game in self.games.drain(..) {
-            self.moves.clear();
+struct WorkerChunkResult {
+    fens: Vec<String>,
+    visited: usize,
+    games: usize,
+}
 
-            if params.fcompleted_only
-                && game.termination(&self.storage) != Some(PgnGameTermination::Normal)
-            {
-                continue;
-            }
+struct Worker<'a> {
+    rx_chunks: &'a Receiver<WorkerChunkInput>,
+    tx_positions: &'a Sender<WorkerChunkResult>,
+    pool_tx: &'a Sender<Vec<u8>>,
+    params: &'a PositionExtractParams,
+    tables: &'a tables::Tables,
+    board: &'a ChessGame,
+    dedup: &'a Mutex<HashSet<u64>>,
+}
 
-            if params.fdist_openings {
-                let op_entry = match game.opening(&self.storage) {
-                    Some(op) => {
-                        let key = op.to_string();
-                        self.opening_map.entry(key)
+impl Worker<'_> {
+    fn new<'a>(
+        rx_chunks: &'a Receiver<WorkerChunkInput>,
+        tx_positions: &'a Sender<WorkerChunkResult>,
+        pool_tx: &'a Sender<Vec<u8>>,
+        params: &'a PositionExtractParams,
+        tables: &'a tables::Tables,
+        board: &'a ChessGame,
+        dedup: &'a Mutex<HashSet<u64>>,
+    ) -> Worker<'a> {
+        Worker {
+            rx_chunks,
+            tx_positions,
+            pool_tx,
+            params,
+            tables,
+            board,
+            dedup,
+        }
+    }
+
+    fn process_game(
+        &mut self,
+        game: &PgnGame,
+        storage: &PgnReadBuf,
+        moves: &mut Vec<u16>,
+        rng: &mut rand::rngs::StdRng,
+        sharpness_search: &mut Option<Search<'_, { EngineForm::TacticalB }>>,
+        fens_out: &mut Vec<String>,
+    ) -> usize {
+        let params = self.params;
+
+        moves.clear();
+
+        if self.params.fcompleted_only
+            && game.termination(storage) != Some(PgnGameTermination::Normal)
+        {
+            return 0;
+        }
+
+        match game.parse_moves(storage, self.board, self.tables, moves) {
+            Some(Ok(())) => {
+                if moves.len() < params.fmin_ply || moves.len() < params.ffrom_ply {
+                    return 0;
+                }
+
+                let mut visited = 0;
+
+                for _ in 0..params.fattempts_per_position {
+                    let to_move = match params.fpick {
+                        MovePick::First => params.ffrom_ply,
+                        MovePick::Random => {
+                            let min = params.ffrom_ply;
+                            let max = moves.len().min(params.fto_ply);
+
+                            if min >= max {
+                                continue;
+                            }
+
+                            rng.random_range(min..max)
+                        }
+                    };
+
+                    visited += 1;
+
+                    let mut game_board = self.board.clone();
+
+                    for mv in moves.iter().take(to_move) {
+                        unsafe { game_board.make_move(*mv, self.tables) };
                     }
-                    None => continue,
-                };
 
-                let op_count = op_entry.or_insert(0usize);
+                    let zobrist_key = game_board.zobrist_key();
 
-                if *op_count == 0 {
-                    self.count_openings += 1;
-                }
-
-                self.sum_openings += 1;
-
-                if (*op_count as f32) < ((self.sum_openings / self.count_openings).max(1) as f32) {
-                    *op_count += 1;
-                } else {
-                    continue;
-                }
-            }
-
-            match game.parse_moves(&self.storage, &self.board, &self.tables, self.moves) {
-                Some(Ok(())) => {
-                    if self.moves.len() < params.fmin_ply || self.moves.len() < params.ffrom_ply {
+                    if params.fno_duplicates && self.dedup.lock().unwrap().contains(&zobrist_key) {
                         continue;
                     }
 
-                    for _ in 0..params.fattempts_per_position {
-                        let to_move = match params.fpick {
-                            MovePick::First => params.ffrom_ply,
-                            MovePick::Random => {
-                                let min = params.ffrom_ply;
-                                let max = self.moves.len().min(params.fto_ply);
+                    let fen = game_board.gen_fen();
 
-                                if min >= max {
-                                    continue;
-                                }
+                    if let Some(search) = sharpness_search.as_mut() {
+                        search.new_game();
+                        search.load_from_fen(&fen, self.tables).unwrap();
+                        search.new_search();
+                        search.search(Some(params.fsharpness_depth));
 
-                                self.rng.random_range(min..max)
+                        let sharpness = stability::calc_sharpness(search.depth_stats());
+                        let score = search.search_score();
+
+                        if let Some(threshold) = params.fsharpness_threshold {
+                            if !sharpness.is_some_and(|s| s >= threshold) {
+                                continue;
                             }
-                        };
-
-                        let mut game_board = self.board.clone();
-
-                        for mv in self.moves.iter().take(to_move) {
-                            unsafe { game_board.make_move(*mv, &self.tables) };
                         }
 
-                        if params.fno_duplicates
-                            && !self.zobrist_set.insert(game_board.zobrist_key())
-                        {
-                            // println!("Skipping duplicate position {}", game_board.gen_fen());
-                            continue;
+                        if let Some(cp_threshold) = params.fcp_threshold {
+                            if score.abs() > cp_threshold {
+                                continue;
+                            }
                         }
-
-                        if self.game_count % 50_000 == 0 {
-                            println!(
-                                "Extracting positions {}/{} ({:.2}%)",
-                                self.game_count,
-                                params.fnum_positions,
-                                (self.game_count as f64 / params.fnum_positions as f64) * 100.0
-                            );
-                        }
-
-                        self.buffer.push_str(&format!("{}\n", game_board.gen_fen()));
-                        self.game_count += 1;
-                        break;
                     }
+
+                    if params.fno_duplicates && !self.dedup.lock().unwrap().insert(zobrist_key) {
+                        continue;
+                    }
+
+                    fens_out.push(fen);
+                    return visited;
                 }
-                Some(Err(e)) => {
-                    eprintln!(
-                        "Failed to parse moves for game {:?}: {}",
-                        game.site(&self.storage),
-                        e
-                    );
-                    continue;
-                }
-                None => continue,
+
+                visited
+            }
+            Some(Err(e)) => {
+                eprintln!(
+                    "Failed to parse moves for game {:?}: {}",
+                    game.site(storage),
+                    e
+                );
+                0
+            }
+            None => 0,
+        }
+    }
+
+    fn worker_thread(&mut self) {
+        let tt = SyncUnsafeCell::new(transposition::TranspositionTable::new(16));
+        let mut tm = SyncUnsafeCell::new(timeman::TimeManager::new());
+        tm.get_mut().disable();
+
+        let mut sharpness_search =
+            if self.params.fsharpness_threshold.is_some() || self.params.fcp_threshold.is_some() {
+                Some(Search::<{ EngineForm::TacticalB }>::new(
+                    self.tables,
+                    &tt,
+                    &tm,
+                    repetition::RepetitionTable::new(),
+                ))
+            } else {
+                None
             };
 
-            if self.buffer.len() >= 1024 * 1024 {
-                self.writer.write_all(self.buffer.as_bytes()).unwrap();
-                self.buffer.clear();
+        let mut moves: Vec<u16> = Vec::new();
+        let mut games: Vec<PgnGame> = Vec::new();
+
+        loop {
+            let chunk = match self.rx_chunks.recv() {
+                Ok(chunk) => chunk,
+                Err(_) => break,
+            };
+
+            let mut rng = rand::rngs::StdRng::seed_from_u64(self.params.fseed ^ chunk.chunk_index);
+
+            games.clear();
+            parse::parse_games(&chunk.buf[..chunk.len], &mut games);
+            let storage = PgnReadBuf::from_buf(chunk.buf);
+
+            let games_count = games.len();
+            let mut fens: Vec<String> = Vec::new();
+            let mut visited = 0usize;
+
+            for game in games.drain(..) {
+                visited += self.process_game(
+                    &game,
+                    &storage,
+                    &mut moves,
+                    &mut rng,
+                    &mut sharpness_search,
+                    &mut fens,
+                );
             }
 
-            if self.game_count >= params.fnum_positions {
-                self.writer.write_all(self.buffer.as_bytes()).unwrap();
-                self.buffer.clear();
-                return false;
+            let _ = self.pool_tx.send(storage.into_buf());
+
+            if self
+                .tx_positions
+                .send(WorkerChunkResult {
+                    fens,
+                    visited,
+                    games: games_count,
+                })
+                .is_err()
+            {
+                break;
             }
         }
+    }
+}
 
-        true
+fn reader_thread(
+    source: &mut dyn Read,
+    tx_chunks: &Sender<WorkerChunkInput>,
+    pool_rx: &Receiver<Vec<u8>>,
+) {
+    let mut chunker = parse::PgnChunker::new();
+    let mut chunk_index = 0u64;
+
+    loop {
+        let mut buf = match pool_rx.recv() {
+            Ok(buf) => buf,
+            Err(_) => break,
+        };
+
+        match chunker.next_chunk(source, &mut buf) {
+            Some(len) => {
+                if tx_chunks
+                    .send(WorkerChunkInput {
+                        chunk_index,
+                        buf,
+                        len,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                chunk_index += 1;
+            }
+            None => break,
+        }
     }
 }
 
@@ -162,32 +304,8 @@ pub fn extract_positions(
     db_path: &str,
     out_path: &str,
     params: PositionExtractParams,
+    threads: usize,
 ) -> anyhow::Result<()> {
-    let tables = tables::Tables::new();
-
-    let mut ctx = ExtractContext {
-        games: &mut Vec::new(),
-        storage: &mut PgnReadBuf::new(),
-        moves: &mut Vec::new(),
-        board: {
-            let mut board = chess_v2::ChessGame::new();
-            assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
-            board
-        },
-        tables,
-        rng: rand::rngs::StdRng::seed_from_u64(params.fseed),
-        zobrist_set: std::collections::BTreeSet::new(),
-        opening_map: std::collections::BTreeMap::new(),
-        sum_openings: 0,
-        count_openings: 0,
-        buffer: String::new(),
-        game_count: 0,
-        writer: {
-            let file = File::create(out_path)?;
-            std::io::BufWriter::new(file)
-        },
-    };
-
     let path = std::path::Path::new(db_path);
 
     match path.try_exists() {
@@ -210,43 +328,33 @@ pub fn extract_positions(
 
     let db_extension = path.extension().and_then(std::ffi::OsStr::to_str);
 
-    let mut it = PgnGameParser::new();
-    let mut total_games = 0usize;
+    let tables = tables::Tables::new();
 
-    match db_extension {
+    let board = {
+        let mut board = chess_v2::ChessGame::new();
+        assert!(board.load_fen(util::FEN_STARTPOS, &tables).is_ok());
+        board
+    };
+
+    let bytes_read = AtomicU64::new(0);
+    let source_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+
+    let dedup: Mutex<HashSet<u64>> = Mutex::new(HashSet::new());
+
+    let mut source: Box<dyn Read + Send> = match db_extension {
         Some("zst") => {
-            let file = File::open(path)?;
-            let buf = BufReader::new(file);
-
-            let mut decoder = zstd::Decoder::new(buf)?;
-
-            loop {
-                if !it.next_batch(&mut decoder, &mut ctx.storage, &mut ctx.games) {
-                    break;
-                }
-
-                total_games += ctx.games.len();
-
-                if !ctx.process_batch(&params) {
-                    break;
-                }
-            }
+            let counted = CountingReader {
+                inner: File::open(path)?,
+                bytes: &bytes_read,
+            };
+            Box::new(zstd::Decoder::new(BufReader::new(counted))?)
         }
         Some("pgn") => {
-            let file = File::open(path)?;
-            let mut reader = BufReader::new(file);
-
-            loop {
-                if !it.next_batch(&mut reader, &mut ctx.storage, &mut ctx.games) {
-                    break;
-                }
-
-                total_games += ctx.games.len();
-
-                if !ctx.process_batch(&params) {
-                    break;
-                }
-            }
+            let counted = CountingReader {
+                inner: File::open(path)?,
+                bytes: &bytes_read,
+            };
+            Box::new(BufReader::new(counted))
         }
         _ => {
             return Err(anyhow::anyhow!(
@@ -256,9 +364,142 @@ pub fn extract_positions(
         }
     };
 
+    let buf_size = parse::CHUNK_SIZE + parse::BACKBUF_SIZE;
+    let pool_size = threads + 4;
+
+    let (tx_chunks, rx_chunks) = crossbeam::channel::bounded::<WorkerChunkInput>(pool_size);
+    let (tx_positions, rx_positions) = crossbeam::channel::bounded::<WorkerChunkResult>(256);
+    let (pool_tx, pool_rx) = crossbeam::channel::unbounded::<Vec<u8>>();
+
+    for _ in 0..pool_size {
+        pool_tx.send(vec![0u8; buf_size]).unwrap();
+    }
+
+    let mut writer = std::io::BufWriter::new(File::create(out_path)?);
+
+    let mut total_games = 0usize;
+    let mut positions_added = 0usize;
+
+    std::thread::scope(|s| -> anyhow::Result<()> {
+        {
+            let tx_chunks = tx_chunks.clone();
+            s.spawn(move || reader_thread(&mut *source, &tx_chunks, &pool_rx));
+        }
+
+        for i in 0..threads {
+            let rx_chunks = rx_chunks.clone();
+            let tx_positions = tx_positions.clone();
+            let pool_tx = pool_tx.clone();
+            let params = &params;
+            let tables = &tables;
+            let board = &board;
+            let dedup = &dedup;
+
+            s.spawn(move || {
+                util::pin_thread_for_worker(i);
+
+                let mut worker = Worker::new(
+                    &rx_chunks,
+                    &tx_positions,
+                    &pool_tx,
+                    params,
+                    tables,
+                    board,
+                    dedup,
+                );
+
+                worker.worker_thread();
+            });
+        }
+
+        // Drop originals owned by main thread
+        drop(tx_chunks);
+        drop(rx_chunks);
+        drop(tx_positions);
+        drop(pool_tx);
+
+        let start_time = std::time::Instant::now();
+        let mut positions_visited = 0usize;
+        let mut out_buf = String::new();
+        let mut last_log_time = std::time::Instant::now();
+        let mut last_log_added = 0usize;
+        let mut last_log_visited = 0usize;
+        let mut last_log_bytes = 0u64;
+
+        loop {
+            let result = match rx_positions.recv() {
+                Ok(result) => result,
+                Err(_) => break,
+            };
+
+            total_games += result.games;
+            positions_visited += result.visited;
+
+            for fen in result.fens {
+                if positions_added >= params.fnum_positions {
+                    break;
+                }
+                out_buf.push_str(&fen);
+                out_buf.push('\n');
+                positions_added += 1;
+            }
+
+            if out_buf.len() >= 1024 * 128 {
+                writer.write_all(out_buf.as_bytes())?;
+                out_buf.clear();
+            }
+
+            if last_log_time.elapsed().as_secs() >= 10 {
+                let now = std::time::Instant::now();
+                let interval = now.duration_since(last_log_time).as_secs_f64();
+                let add_rate = (positions_added - last_log_added) as f64 / interval;
+                let visit_rate = (positions_visited - last_log_visited) as f64 / interval;
+                let bytes_now = bytes_read.load(Ordering::Relaxed);
+                let read_rate = (bytes_now - last_log_bytes) as f64 / interval;
+                let remaining = params.fnum_positions.saturating_sub(positions_added);
+                let eta = if add_rate > 0.0 {
+                    util::time_format((remaining as f64 / add_rate * 1000.0) as u64)
+                } else {
+                    "?".to_string()
+                };
+
+                println!(
+                    "Extracting {}/{} ({:.2}%) | added {:.0}/s | visited {:.0}/s | read {}/{} ({}/s) | ETA {} | elapsed {}",
+                    positions_added,
+                    params.fnum_positions,
+                    (positions_added as f64 / params.fnum_positions as f64) * 100.0,
+                    add_rate,
+                    visit_rate,
+                    util::byte_size_string(bytes_now as usize),
+                    util::byte_size_string(source_size as usize),
+                    util::byte_size_string(read_rate as usize),
+                    eta,
+                    util::time_format(now.duration_since(start_time).as_millis() as u64),
+                );
+
+                last_log_time = now;
+                last_log_added = positions_added;
+                last_log_visited = positions_visited;
+                last_log_bytes = bytes_now;
+            }
+
+            if positions_added >= params.fnum_positions {
+                break;
+            }
+        }
+
+        writer.write_all(out_buf.as_bytes())?;
+
+        drop(rx_positions);
+
+        Ok(())
+    })?;
+
+    writer.flush()?;
+
     println!(
-        "Extracted {} positions (searched {} games)",
-        ctx.game_count, total_games
+        "Extracted {} positions from {} games",
+        positions_added, total_games
     );
 
     Ok(())

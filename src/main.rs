@@ -277,18 +277,21 @@ fn main() {
                 fto_ply: 300,
                 fmin_ply: 0,
                 fseed: 0,
+                fcp_threshold: None,
                 fnum_positions: 100,
                 fcompleted_only: false,
-                fdist_openings: false,
                 fno_duplicates: false,
                 fpick: pgn::extract::MovePick::Random,
                 fattempts_per_position: 1,
+                fsharpness_threshold: None,
+                fsharpness_depth: 7,
             };
 
             let mut arg_it = std::env::args().skip(2);
 
             let mut in_path = None;
             let mut out_path = None;
+            let mut threads = 1usize;
             loop {
                 let arg = match arg_it.next() {
                     Some(a) => a,
@@ -301,8 +304,20 @@ fn main() {
                     "--min-ply" => params.fmin_ply = arg_it.next().unwrap().parse().unwrap(),
                     "--count" => params.fnum_positions = arg_it.next().unwrap().parse().unwrap(),
                     "--seed" => params.fseed = arg_it.next().unwrap().parse().unwrap(),
+                    "--cp-threshold" => {
+                        params.fcp_threshold = Some(arg_it.next().unwrap().parse().unwrap())
+                    }
+                    "--attempts" => {
+                        params.fattempts_per_position = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--sharpness-threshold" => {
+                        params.fsharpness_threshold = Some(arg_it.next().unwrap().parse().unwrap())
+                    }
+                    "--sharpness-depth" => {
+                        params.fsharpness_depth = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--threads" => threads = arg_it.next().unwrap().parse().unwrap(),
                     "--no-duplicates" => params.fno_duplicates = true,
-                    "--dist-openings" => params.fdist_openings = true,
                     "--completed-only" => params.fcompleted_only = true,
                     "--db" => in_path = Some(arg_it.next().unwrap()),
                     "--core" => {
@@ -318,7 +333,7 @@ fn main() {
             let in_path = in_path.expect("Expected path to pgn input file");
             let out_path = out_path.expect("Expected output path");
 
-            pgn::extract::extract_positions(&in_path, &out_path, params)
+            pgn::extract::extract_positions(&in_path, &out_path, params, threads)
         }
         "gui" => {
             let mut arg_it = std::env::args().skip(2);
