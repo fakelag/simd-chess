@@ -376,7 +376,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NnueUpdate {
     NnueUpdateAddSub((u32, u32)),
     NnueUpdateAddSubSub((u32, u32, u32)),

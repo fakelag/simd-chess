@@ -150,8 +150,10 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
             0
         };
 
+        let (only_move, first_move) = self.check_root_moves();
+
         if F == EngineForm::Strategy
-            && let Some(mv) = self.has_single_legal_move()
+            && let Some(mv) = only_move
         {
             let static_eval = self.evaluate();
 
@@ -249,6 +251,12 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
         }
 
         self.node_count = node_count;
+
+        if self.pv[0] == 0
+            && let Some(mv) = first_move
+        {
+            self.pv[0] = mv;
+        }
 
         self.pv[0]
     }
@@ -1800,7 +1808,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         return self.tm_mut().check_abort(self.node_count);
     }
 
-    pub fn has_single_legal_move(&mut self) -> Option<u16> {
+    pub fn check_root_moves(&self) -> (Option<u16>, Option<u16>) {
         let mut legal_move = None;
         let mut board = self.chess.clone();
 
@@ -1818,14 +1826,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
 
             if legal_move.is_some() {
-                return None;
+                return (None, legal_move);
             }
 
             legal_move = Some(move_list[i]);
             board = self.chess.clone();
         }
 
-        return legal_move;
+        return (legal_move, legal_move);
     }
 
     #[inline(always)]

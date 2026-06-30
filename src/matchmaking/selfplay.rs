@@ -5,15 +5,16 @@ use super::fen_feeder::SharedFenFeeder;
 use std::cell::SyncUnsafeCell;
 
 const DEBUG: bool = false;
-const ANNOTATION_DEPTH: u8 = 9;
-const INSUFFICIENT_MATERIAL_DRAW: bool = true;
-const THREE_FOLD_REPETITION_DRAW: bool = true;
+const ANNOTATION_DEPTH: u8 = 8;
+const USE_ACC_SEARCH: bool = false;
+
 const STABILITY_THRESHOLD: f64 = 0.13;
 
+const INSUFFICIENT_MATERIAL_DRAW: bool = true;
+const THREE_FOLD_REPETITION_DRAW: bool = true;
 const WIN_ADJUDICATION: bool = false;
 const WIN_ADJ_SCORE: i32 = 2000;
 const WIN_ADJ_PLIES: i32 = 5;
-
 const DRAW_ADJUDICATION: bool = false;
 const DRAW_ADJ_SCORE: i32 = 10;
 const DRAW_ADJ_PLIES: u32 = 10;
@@ -97,6 +98,7 @@ impl SelfplayTrainer {
         position_file_path: &str,
         from: Option<usize>,
         count: Option<usize>,
+        max_positions: Option<usize>,
     ) -> anyhow::Result<()> {
         let feeder = Box::new(SharedFenFeeder::new(position_file_path));
 
@@ -158,12 +160,11 @@ impl SelfplayTrainer {
             self.stats_positions_total = 0;
             self.stat_num_stab_threshold_passed = 0;
 
-            loop {
+            'outer: loop {
                 match rx_entries.recv_timeout(std::time::Duration::from_secs(1)) {
                     Ok(entries) => {
                         self.stats_num_games_cp += 1;
                         self.stats_num_games_total += 1;
-                        self.stats_positions_total += entries.len();
 
                         for e in entries {
                             self.stat_num_stab_threshold_passed +=
@@ -171,6 +172,17 @@ impl SelfplayTrainer {
 
                             if let Some(writer) = &mut self.binpack_writer {
                                 writer.write_entry(&e.entry).unwrap();
+                                self.stats_positions_total += 1;
+                            }
+
+                            if let Some(max_positions) = max_positions {
+                                if self.stats_positions_total >= max_positions {
+                                    println!(
+                                        "Reached max positions limit of {}. Stopping selfplay.",
+                                        max_positions
+                                    );
+                                    break 'outer;
+                                }
                             }
                         }
                     }
@@ -184,7 +196,7 @@ impl SelfplayTrainer {
                     let games_per_minute_stable = self.stats_num_games_total as f64
                         / (start_at.elapsed().as_secs_f64() / 60.0);
                     println!(
-                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. Acc used %: {}, Binpack size: {}. ETA: {}",
+                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. >=stab%: {}, Binpack size: {}. ETA: {}",
                         self.stats_num_games_total,
                         self.stats_flushed_at.elapsed().as_secs_f64() / 60.0,
                         games_per_minute,
@@ -206,6 +218,8 @@ impl SelfplayTrainer {
                     self.stats_num_games_cp = 0;
                 }
             }
+
+            drop(rx_entries);
 
             for handle in handles {
                 let _ = handle.join().unwrap();
@@ -349,7 +363,11 @@ impl SelfplayTrainer {
                 b_move = !b_move;
             }
 
-            tx.send(training_entries.clone()).unwrap();
+            match tx.send(training_entries.clone()) {
+                Ok(_) => {}
+                // Handle disconnect
+                Err(_) => break,
+            }
             training_entries.clear();
         }
 
@@ -535,7 +553,6 @@ impl<'a> SelfplayEngine<'a> {
 
     fn new_game(&mut self, fen: &str) -> anyhow::Result<()> {
         self.search_qlk.new_game();
-        self.search_acc.new_game();
 
         self.search_qlk
             .load_from_fen(fen, self.tables)
@@ -546,24 +563,31 @@ impl<'a> SelfplayEngine<'a> {
                     err
                 )
             })?;
-        self.search_acc
-            .load_from_fen(fen, self.tables)
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "Failed to load FEN \"{}\" during annotated selfplay - {:?}",
-                    fen,
-                    err
-                )
-            })?;
+
+        if USE_ACC_SEARCH {
+            self.search_acc.new_game();
+            self.search_acc
+                .load_from_fen(fen, self.tables)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "Failed to load FEN \"{}\" during annotated selfplay - {:?}",
+                        fen,
+                        err
+                    )
+                })?;
+        }
 
         let board_zobrist = self.search_qlk.get_board_mut().zobrist_key();
 
         self.search_qlk
             .get_rt_mut()
             .push_position(board_zobrist, true);
-        self.search_acc
-            .get_rt_mut()
-            .push_position(board_zobrist, true);
+
+        if USE_ACC_SEARCH {
+            self.search_acc
+                .get_rt_mut()
+                .push_position(board_zobrist, true);
+        }
 
         self.zobrist_key = board_zobrist;
 
@@ -582,7 +606,7 @@ impl<'a> SelfplayEngine<'a> {
 
         let is_mate = engine::search::eval::is_mate(self.search_qlk.search_score() as Eval);
 
-        let (bestmove, score) = if use_acc && !is_mate {
+        let (bestmove, score) = if USE_ACC_SEARCH && use_acc && !is_mate {
             self.search_acc.new_search();
             self.search_acc.tt_mut().zero_depth_entries();
 
@@ -597,7 +621,7 @@ impl<'a> SelfplayEngine<'a> {
             "Qlk board changed during search!"
         );
         debug_assert!(
-            self.search_acc.get_board_mut().zobrist_key() == self.zobrist_key,
+            !USE_ACC_SEARCH || self.search_acc.get_board_mut().zobrist_key() == self.zobrist_key,
             "Acc board changed during search!"
         );
 
@@ -633,17 +657,20 @@ impl<'a> SelfplayEngine<'a> {
         self.search_qlk
             .get_nnue_mut()
             .make_move(nnue_update.clone());
-        self.search_acc.get_nnue_mut().make_move(nnue_update);
-
         self.search_qlk
             .get_rt_mut()
             .push_position(board.zobrist_key(), last_move_irreversible);
-        self.search_acc
-            .get_rt_mut()
-            .push_position(board.zobrist_key(), last_move_irreversible);
-
         self.search_qlk.get_board_mut().clone_from(&board);
-        self.search_acc.get_board_mut().clone_from(&board);
+
+        if USE_ACC_SEARCH {
+            self.search_acc.get_nnue_mut().make_move(nnue_update);
+
+            self.search_acc
+                .get_rt_mut()
+                .push_position(board.zobrist_key(), last_move_irreversible);
+
+            self.search_acc.get_board_mut().clone_from(&board);
+        }
 
         self.zobrist_key = board.zobrist_key();
 
