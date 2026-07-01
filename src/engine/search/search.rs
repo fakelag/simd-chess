@@ -534,7 +534,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let tt_probe = if self.excluded_move == 0 {
             self.tt_mut()
-                .probe(&self.chess, self.chess.zobrist_key(), depth, alpha, beta)
+                .probe(self.chess.zobrist_key(), depth, alpha, beta)
         } else {
             // During singular verification, skip TT cutoffs to avoid infinite recursion
             None

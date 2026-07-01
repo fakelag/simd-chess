@@ -210,14 +210,7 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    pub fn probe(
-        &mut self,
-        chess: &crate::engine::chess_v2::ChessGame,
-        hash: u64,
-        depth: u8,
-        alpha: Eval,
-        beta: Eval,
-    ) -> Option<TtProbe> {
+    pub fn probe(&mut self, hash: u64, depth: u8, alpha: Eval, beta: Eval) -> Option<TtProbe> {
         let generation = self.generation;
 
         let bucket_index = self.bucket_index(hash);
@@ -289,7 +282,7 @@ impl TranspositionTable {
         let depth = depth.min(63);
         unsafe {
             let result =
-                _mm512_cmple_epi8_mask(*bucket_vec, _mm512_set1_epi8((depth << 2) as i8 | 0b11));
+                _mm512_cmple_epu8_mask(*bucket_vec, _mm512_set1_epi8((depth << 2) as i8 | 0b11));
 
             result >> 1
         }

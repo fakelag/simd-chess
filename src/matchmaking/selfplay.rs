@@ -110,21 +110,21 @@ impl SelfplayTrainer {
             }
         }
 
-        let num_positions_total = if let Some(count) = count {
+        let num_games_total = if let Some(count) = count {
             let lock = feeder.lock();
             lock.positions_total().min(count)
         } else {
             feeder.lock().positions_total()
         };
 
-        feeder.set_max_positions(num_positions_total);
+        feeder.set_max_positions(num_games_total);
 
         println!(
-            "Starting selfplay with {} threads, depth {} {} total positions ({:.02} per matchmaker){}",
+            "Starting selfplay with {} threads, depth {} {} total games ({:.02} per matchmaker){}",
             threads,
             ANNOTATION_DEPTH,
-            num_positions_total,
-            num_positions_total as f64 / threads as f64,
+            num_games_total,
+            num_games_total as f64 / threads as f64,
             if self.binpack_writer.is_some() {
                 String::new()
             } else {
@@ -195,6 +195,28 @@ impl SelfplayTrainer {
                         / (self.stats_flushed_at.elapsed().as_secs_f64() / 60.0);
                     let games_per_minute_stable = self.stats_num_games_total as f64
                         / (start_at.elapsed().as_secs_f64() / 60.0);
+
+                    let time_to_complete_games_ms = ((num_games_total - self.stats_num_games_total)
+                        as f64
+                        / games_per_minute_stable
+                        * 60.0
+                        * 1000.0) as u64;
+
+                    let eta_ms = if let Some(max_positions) = max_positions {
+                        let positions_per_minute_stable = self.stats_positions_total as f64
+                            / (start_at.elapsed().as_secs_f64() / 60.0);
+
+                        let time_to_complete_positions_ms =
+                            ((max_positions - self.stats_positions_total) as f64
+                                / positions_per_minute_stable
+                                * 60.0
+                                * 1000.0) as u64;
+
+                        time_to_complete_games_ms.min(time_to_complete_positions_ms)
+                    } else {
+                        time_to_complete_games_ms
+                    };
+
                     println!(
                         "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. >=stab%: {}, Binpack size: {}. ETA: {}",
                         self.stats_num_games_total,
@@ -207,12 +229,7 @@ impl SelfplayTrainer {
                             / self.stats_positions_total as f64)
                             * 100.0,
                         util::byte_size_string(self.binpack_size_bytes()),
-                        util::time_format(
-                            ((num_positions_total - self.stats_num_games_total) as f64
-                                / games_per_minute_stable
-                                * 60.0
-                                * 1000.0) as u64
-                        )
+                        util::time_format(eta_ms)
                     );
                     self.stats_flushed_at = std::time::Instant::now();
                     self.stats_num_games_cp = 0;

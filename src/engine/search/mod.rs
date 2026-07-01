@@ -17,16 +17,14 @@ pub mod repetition;
 pub mod search;
 pub mod search_params;
 pub mod see;
+pub mod stability;
 pub mod timeman;
 pub mod transposition;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        engine::{search::search_params::SearchParams, tables},
-        util,
-    };
+    use crate::{engine::tables, util};
 
     fn rdtsc() -> u64 {
         unsafe { std::arch::x86_64::_rdtsc() }
@@ -46,14 +44,8 @@ mod tests {
 
         let bench = || {
             let rt = repetition::RepetitionTable::new();
-            // let mut chess = chess_v2::ChessGame::new();
-            // assert!(
-            //     chess
-            //         .load_fen(std::hint::black_box(test_fen), &tables)
-            //         .is_ok()
-            // );
 
-            let depth = Some(std::hint::black_box(16));
+            let depth = Some(std::hint::black_box(18));
 
             let tt = std::cell::SyncUnsafeCell::new(transposition::TranspositionTable::new(16));
             let tm = std::cell::SyncUnsafeCell::new(timeman::TimeManager::new());
@@ -73,85 +65,9 @@ mod tests {
                 (mv, end - start)
             };
 
-            // let corr_stats = &mut search_engine.corr_stats;
-            // corr_stats.sort_by(|a, b| b.error.abs().cmp(&a.error.abs()));
-            // let len = corr_stats.len();
-
-            // println!("PC: Top 10 pawn correction errors:");
-            // for stat in corr_stats.iter().take(10) {
-            //     println!(
-            //         "Original eval: {}, Correction error: {}",
-            //         stat.original_eval, stat.error
-            //     );
-            // }
-            // println!(
-            //     "PC: Median pawn correction error: {}",
-            //     corr_stats[len / 2].error
-            // );
-            // println!(
-            //     "PC: Average pawn correction error: {}",
-            //     corr_stats.iter().map(|s| s.error as i64).sum::<i64>() / len as i64
-            // );
-            // println!("num corrections applied: {}", corr_stats.len());
-
-            // let categories = [
-            //     -501, -500, -400, -300, -200, -100, -50, -20, -10, -5, 0, 5, 10, 20, 50, 100, 200,
-            //     300, 400, 500, 501,
-            // ];
-            // let mut distribution = vec![0; categories.len() + 1];
-            // for stat in corr_stats.iter() {
-            //     let mut placed = false;
-            //     for (i, &cat) in categories.iter().enumerate() {
-            //         if stat.error <= cat {
-            //             distribution[i] += 1;
-            //             placed = true;
-            //             break;
-            //         }
-            //     }
-            //     if !placed {
-            //         distribution[categories.len()] += 1;
-            //     }
-            // }
-
-            // println!("PC: Pawn correction error distribution:");
-            // for (i, &cat) in categories.iter().enumerate() {
-            //     if i == 0 {
-            //         println!("  <= {}: {}", cat, distribution[i]);
-            //     } else if i == categories.len() - 1 {
-            //         println!("  > {}: {}", categories[i - 1], distribution[i]);
-            //     } else {
-            //         println!("  ({} , {}]: {}", categories[i - 1], cat, distribution[i]);
-            //     }
-            // }
-
             println!("Nodes searched: {}", search_engine.num_nodes_searched());
             println!("depth: {}", search_engine.get_depth());
-            // println!("TT usage: {:.02}%", tt_stats.fill_percentage * 100.0);
-            // println!(
-            //     "TT probe hit rate: {:.02}%",
-            //     tt_stats.probe_hit as f64
-            //         / (tt_stats.probe_hit as f64 + tt_stats.probe_miss as f64)
-            //         * 100.0
-            // );
-            // println!(
-            //     "TT store hit rate: {:.02}%",
-            //     tt_stats.store_hit as f64
-            //         / (tt_stats.store_hit as f64 + tt_stats.store_miss as f64)
-            //         * 100.0
-            // );
 
-            // let et_stats = search_engine.get_et().calc_stats();
-            // println!(
-            //     "ET usage: {:.02}% ({} collisions)",
-            //     et_stats.fill_percentage * 100.0,
-            //     et_stats.collisions
-            // );
-            // println!(
-            //     "Eval probe hit rate: {:.02}%",
-            //     et_stats.probe_hit as f64
-            //         / (et_stats.probe_hit as f64 + et_stats.probe_miss as f64)
-            //         * 100.0
-            // );
             println!(
                 "PV: {:?}",
                 search_engine

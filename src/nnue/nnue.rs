@@ -123,46 +123,12 @@ where
         let weights = &self.output_weights[bucket as usize];
         let bias = self.output_bias[bucket as usize];
 
-        let output = unsafe {
-            let qa_x32 = _mm512_set1_epi16(QA);
-            let zero_x32 = _mm512_setzero_si512();
-            let mut output_x32 = _mm512_setzero_si512();
+        let mut output = Self::screlu_dot(stm, ntm, weights);
 
-            for i in 0..HS / 32 {
-                let stm_input_x32 = _mm512_load_si512(stm.vals.as_ptr().add(i * 32) as *const _);
-                let ntm_input_x32 = _mm512_load_si512(ntm.vals.as_ptr().add(i * 32) as *const _);
-                let stm_weight_x32 =
-                    _mm512_load_si512(weights[..HS].as_ptr().add(i * 32) as *const _);
-                let ntm_weight_x32 =
-                    _mm512_load_si512(weights[HS..].as_ptr().add(i * 32) as *const _);
-
-                let stm_input_clipped_x32 =
-                    _mm512_max_epi16(_mm512_min_epi16(stm_input_x32, qa_x32), zero_x32);
-                let ntm_input_clipped_x32 =
-                    _mm512_max_epi16(_mm512_min_epi16(ntm_input_x32, qa_x32), zero_x32);
-
-                let stm_output_x32 = _mm512_madd_epi16(
-                    _mm512_mullo_epi16(stm_input_clipped_x32, stm_weight_x32),
-                    stm_input_clipped_x32,
-                );
-                let ntm_output_x32 = _mm512_madd_epi16(
-                    _mm512_mullo_epi16(ntm_input_clipped_x32, ntm_weight_x32),
-                    ntm_input_clipped_x32,
-                );
-
-                output_x32 = _mm512_add_epi32(output_x32, stm_output_x32);
-                output_x32 = _mm512_add_epi32(output_x32, ntm_output_x32);
-            }
-
-            let mut output = _mm512_reduce_add_epi32(output_x32);
-
-            output /= i32::from(QA);
-            output += i32::from(bias);
-            output *= QS;
-            output /= i32::from(QA) * i32::from(QB);
-
-            output
-        };
+        output /= i32::from(QA);
+        output += i32::from(bias);
+        output *= QS;
+        output /= i32::from(QA) * i32::from(QB);
 
         debug_assert!(
             output >= i32::from(i16::MIN) && output <= i32::from(i16::MAX),
@@ -176,6 +142,78 @@ where
         );
 
         output as i16
+    }
+
+    #[inline(always)]
+    fn screlu_lane(
+        stm: &Accumulator<HS, OB>,
+        ntm: &Accumulator<HS, OB>,
+        w: &[i16; 2 * HS],
+        seg32: usize,
+        max_x32: __m512i,
+        min_x32: __m512i,
+    ) -> (__m512i, __m512i) {
+        unsafe {
+            let stm_input_x32 = _mm512_load_si512(stm.vals.as_ptr().add(seg32 * 32) as *const _);
+            let ntm_input_x32 = _mm512_load_si512(ntm.vals.as_ptr().add(seg32 * 32) as *const _);
+            let stm_weight_x32 = _mm512_load_si512(w[..HS].as_ptr().add(seg32 * 32) as *const _);
+            let ntm_weight_x32 = _mm512_load_si512(w[HS..].as_ptr().add(seg32 * 32) as *const _);
+
+            let stm_input_clipped_x32 =
+                _mm512_max_epi16(_mm512_min_epi16(stm_input_x32, max_x32), min_x32);
+            let ntm_input_clipped_x32 =
+                _mm512_max_epi16(_mm512_min_epi16(ntm_input_x32, max_x32), min_x32);
+
+            let stm_output_x32 = _mm512_madd_epi16(
+                _mm512_mullo_epi16(stm_input_clipped_x32, stm_weight_x32),
+                stm_input_clipped_x32,
+            );
+            let ntm_output_x32 = _mm512_madd_epi16(
+                _mm512_mullo_epi16(ntm_input_clipped_x32, ntm_weight_x32),
+                ntm_input_clipped_x32,
+            );
+
+            (stm_output_x32, ntm_output_x32)
+        }
+    }
+
+    #[inline(always)]
+    fn screlu_dot(
+        stm: &Accumulator<HS, OB>,
+        ntm: &Accumulator<HS, OB>,
+        weights: &[i16; 2 * HS],
+    ) -> i32 {
+        debug_assert!(HS % 128 == 0);
+
+        unsafe {
+            let qa_x32 = _mm512_set1_epi16(QA);
+            let zero_x32 = _mm512_setzero_si512();
+
+            let mut acc0 = _mm512_setzero_si512();
+            let mut acc1 = _mm512_setzero_si512();
+            let mut acc2 = _mm512_setzero_si512();
+            let mut acc3 = _mm512_setzero_si512();
+
+            let mut i = 0;
+            while i < HS / 32 {
+                let (stm0, ntm0) = Self::screlu_lane(stm, ntm, weights, i, qa_x32, zero_x32);
+                let (stm1, ntm1) = Self::screlu_lane(stm, ntm, weights, i + 1, qa_x32, zero_x32);
+                let (stm2, ntm2) = Self::screlu_lane(stm, ntm, weights, i + 2, qa_x32, zero_x32);
+                let (stm3, ntm3) = Self::screlu_lane(stm, ntm, weights, i + 3, qa_x32, zero_x32);
+
+                acc0 = _mm512_add_epi32(acc0, _mm512_add_epi32(stm0, ntm0));
+                acc1 = _mm512_add_epi32(acc1, _mm512_add_epi32(stm1, ntm1));
+                acc2 = _mm512_add_epi32(acc2, _mm512_add_epi32(stm2, ntm2));
+                acc3 = _mm512_add_epi32(acc3, _mm512_add_epi32(stm3, ntm3));
+
+                i += 4;
+            }
+
+            let acc01 = _mm512_add_epi32(acc0, acc1);
+            let acc23 = _mm512_add_epi32(acc2, acc3);
+
+            _mm512_reduce_add_epi32(_mm512_add_epi32(acc01, acc23))
+        }
     }
 }
 

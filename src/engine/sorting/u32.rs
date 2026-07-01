@@ -143,6 +143,7 @@ pub fn sort16(inout_x16: &mut __m512i) {
     }
 }
 
+// #[inline(always)]
 fn sort32(inout_x16_0: &mut __m512i, inout_x16_1: &mut __m512i) {
     unsafe {
         sort16(inout_x16_0);
@@ -161,6 +162,7 @@ fn sort32(inout_x16_0: &mut __m512i, inout_x16_1: &mut __m512i) {
     }
 }
 
+// #[inline(always)]
 fn sort64(
     inout_x16_0: &mut __m512i,
     inout_x16_1: &mut __m512i,
@@ -337,6 +339,11 @@ fn sort256(
     }
 }
 
+#[inline(never)]
+pub fn sort_slow(buf: &mut [u32]) {
+    buf.sort_unstable_by(|a, b| b.cmp(a));
+}
+
 /// Sorts a fixed-allocation array of n elements (up to 256) in const time
 /// using avx512 accelerated bitonic sorting networks. Sorting is applied
 /// in descending order. The array is sorted in-place, padding the array with 0xFFFF
@@ -431,62 +438,63 @@ pub fn sort_256u32_desc_avx512(buf: &mut [u32; 256], n: usize) {
             }
             _ => {
                 std::hint::cold_path();
+                sort_slow(buf);
 
-                let ptr = buf.as_ptr() as *const __m512i;
+                // let ptr = buf.as_ptr() as *const __m512i;
 
-                let mut input_x16_0 = _mm512_loadu_si512(ptr);
-                let mut input_x16_1 = _mm512_loadu_si512(ptr.add(1));
-                let mut input_x16_2 = _mm512_loadu_si512(ptr.add(2));
-                let mut input_x16_3 = _mm512_loadu_si512(ptr.add(3));
-                let mut input_x16_4 = _mm512_loadu_si512(ptr.add(4));
-                let mut input_x16_5 = _mm512_loadu_si512(ptr.add(5));
-                let mut input_x16_6 = _mm512_loadu_si512(ptr.add(6));
-                let mut input_x16_7 = _mm512_loadu_si512(ptr.add(7));
-                let mut input_x16_8 = _mm512_loadu_si512(ptr.add(8));
-                let mut input_x16_9 = _mm512_loadu_si512(ptr.add(9));
-                let mut input_x16_10 = _mm512_loadu_si512(ptr.add(10));
-                let mut input_x16_11 = _mm512_loadu_si512(ptr.add(11));
-                let mut input_x16_12 = _mm512_loadu_si512(ptr.add(12));
-                let mut input_x16_13 = _mm512_loadu_si512(ptr.add(13));
-                let mut input_x16_14 = _mm512_loadu_si512(ptr.add(14));
-                let mut input_x16_15 = _mm512_loadu_si512(ptr.add(15));
+                // let mut input_x16_0 = _mm512_loadu_si512(ptr);
+                // let mut input_x16_1 = _mm512_loadu_si512(ptr.add(1));
+                // let mut input_x16_2 = _mm512_loadu_si512(ptr.add(2));
+                // let mut input_x16_3 = _mm512_loadu_si512(ptr.add(3));
+                // let mut input_x16_4 = _mm512_loadu_si512(ptr.add(4));
+                // let mut input_x16_5 = _mm512_loadu_si512(ptr.add(5));
+                // let mut input_x16_6 = _mm512_loadu_si512(ptr.add(6));
+                // let mut input_x16_7 = _mm512_loadu_si512(ptr.add(7));
+                // let mut input_x16_8 = _mm512_loadu_si512(ptr.add(8));
+                // let mut input_x16_9 = _mm512_loadu_si512(ptr.add(9));
+                // let mut input_x16_10 = _mm512_loadu_si512(ptr.add(10));
+                // let mut input_x16_11 = _mm512_loadu_si512(ptr.add(11));
+                // let mut input_x16_12 = _mm512_loadu_si512(ptr.add(12));
+                // let mut input_x16_13 = _mm512_loadu_si512(ptr.add(13));
+                // let mut input_x16_14 = _mm512_loadu_si512(ptr.add(14));
+                // let mut input_x16_15 = _mm512_loadu_si512(ptr.add(15));
 
-                sort256(
-                    &mut input_x16_0,
-                    &mut input_x16_1,
-                    &mut input_x16_2,
-                    &mut input_x16_3,
-                    &mut input_x16_4,
-                    &mut input_x16_5,
-                    &mut input_x16_6,
-                    &mut input_x16_7,
-                    &mut input_x16_8,
-                    &mut input_x16_9,
-                    &mut input_x16_10,
-                    &mut input_x16_11,
-                    &mut input_x16_12,
-                    &mut input_x16_13,
-                    &mut input_x16_14,
-                    &mut input_x16_15,
-                );
+                // sort256(
+                //     &mut input_x16_0,
+                //     &mut input_x16_1,
+                //     &mut input_x16_2,
+                //     &mut input_x16_3,
+                //     &mut input_x16_4,
+                //     &mut input_x16_5,
+                //     &mut input_x16_6,
+                //     &mut input_x16_7,
+                //     &mut input_x16_8,
+                //     &mut input_x16_9,
+                //     &mut input_x16_10,
+                //     &mut input_x16_11,
+                //     &mut input_x16_12,
+                //     &mut input_x16_13,
+                //     &mut input_x16_14,
+                //     &mut input_x16_15,
+                // );
 
-                let ptr = buf.as_mut_ptr() as *mut __m512i;
-                _mm512_storeu_si512(ptr, input_x16_0);
-                _mm512_storeu_si512(ptr.add(1), input_x16_1);
-                _mm512_storeu_si512(ptr.add(2), input_x16_2);
-                _mm512_storeu_si512(ptr.add(3), input_x16_3);
-                _mm512_storeu_si512(ptr.add(4), input_x16_4);
-                _mm512_storeu_si512(ptr.add(5), input_x16_5);
-                _mm512_storeu_si512(ptr.add(6), input_x16_6);
-                _mm512_storeu_si512(ptr.add(7), input_x16_7);
-                _mm512_storeu_si512(ptr.add(8), input_x16_8);
-                _mm512_storeu_si512(ptr.add(9), input_x16_9);
-                _mm512_storeu_si512(ptr.add(10), input_x16_10);
-                _mm512_storeu_si512(ptr.add(11), input_x16_11);
-                _mm512_storeu_si512(ptr.add(12), input_x16_12);
-                _mm512_storeu_si512(ptr.add(13), input_x16_13);
-                _mm512_storeu_si512(ptr.add(14), input_x16_14);
-                _mm512_storeu_si512(ptr.add(15), input_x16_15);
+                // let ptr = buf.as_mut_ptr() as *mut __m512i;
+                // _mm512_storeu_si512(ptr, input_x16_0);
+                // _mm512_storeu_si512(ptr.add(1), input_x16_1);
+                // _mm512_storeu_si512(ptr.add(2), input_x16_2);
+                // _mm512_storeu_si512(ptr.add(3), input_x16_3);
+                // _mm512_storeu_si512(ptr.add(4), input_x16_4);
+                // _mm512_storeu_si512(ptr.add(5), input_x16_5);
+                // _mm512_storeu_si512(ptr.add(6), input_x16_6);
+                // _mm512_storeu_si512(ptr.add(7), input_x16_7);
+                // _mm512_storeu_si512(ptr.add(8), input_x16_8);
+                // _mm512_storeu_si512(ptr.add(9), input_x16_9);
+                // _mm512_storeu_si512(ptr.add(10), input_x16_10);
+                // _mm512_storeu_si512(ptr.add(11), input_x16_11);
+                // _mm512_storeu_si512(ptr.add(12), input_x16_12);
+                // _mm512_storeu_si512(ptr.add(13), input_x16_13);
+                // _mm512_storeu_si512(ptr.add(14), input_x16_14);
+                // _mm512_storeu_si512(ptr.add(15), input_x16_15);
             }
         }
     }
@@ -557,6 +565,20 @@ mod tests {
 
                 let mut arr_copy = random_arr;
                 sort_256u32_desc_avx512(&mut arr_copy, arr_size);
+
+                // {
+                //     let mut pad_storage = std::mem::MaybeUninit::<[u32; 256]>::uninit();
+                //     let pad_buf: &mut [u32; 256] = unsafe { &mut *pad_storage.as_mut_ptr() };
+                //     pad_buf.fill(u32::MAX);
+                //     pad_buf[0..arr_size].copy_from_slice(&random_arr[0..arr_size]);
+                //     sort_256u32_desc_avx512::<true>(pad_buf, arr_size);
+                //     assert_eq!(
+                //         &pad_buf[0..arr_size],
+                //         &arr_copy[0..arr_size],
+                //         "PAD_TAIL sort mismatch at arr_size {}",
+                //         arr_size
+                //     );
+                // }
 
                 arr_copy[0..arr_size].reverse();
 
