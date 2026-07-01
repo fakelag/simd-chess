@@ -189,9 +189,10 @@ fn main() {
         "selfplay" => {
             let mut arg_it = std::env::args().skip(2);
             let mut from = None;
-            let mut count = None;
+            let mut games = None;
             let mut threads = None;
             let mut out_path = None;
+            let mut max_positions = None;
             let mut positions_path = None;
 
             loop {
@@ -202,7 +203,10 @@ fn main() {
 
                 match arg.as_str() {
                     "--from" => from = Some(arg_it.next().unwrap().parse().unwrap()),
-                    "--count" => count = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--count" => games = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--max-positions" => {
+                        max_positions = Some(arg_it.next().unwrap().parse().unwrap())
+                    }
                     "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--positions" => positions_path = Some(arg_it.next().unwrap()),
                     "--out" => out_path = Some(arg_it.next().unwrap()),
@@ -213,7 +217,13 @@ fn main() {
             let mut selfplay = matchmaking::selfplay::SelfplayTrainer::new(out_path.as_deref());
 
             let positions_file_path = positions_path.expect("Expected positions path");
-            selfplay.play_annotated(threads.unwrap_or(1), &positions_file_path, from, count)
+            selfplay.play_annotated(
+                threads.unwrap_or(1),
+                &positions_file_path,
+                from,
+                games,
+                max_positions,
+            )
         }
         "train" => {
             let mut arg_it = std::env::args().skip(2);
