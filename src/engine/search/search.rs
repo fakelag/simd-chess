@@ -108,7 +108,6 @@ pub struct Search<'a, const F: EngineForm> {
     pv_table: Box<PvTable>,
     pv: [u16; PV_DEPTH],
     pv_length: u8,
-    pv_trace: bool,
 
     tt: &'a SyncUnsafeCell<TranspositionTable>,
     rt: RepetitionTable,
@@ -199,7 +198,7 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 self.root_best_nodes = 0;
                 let nodes_before = self.node_count;
 
-                let score = self.go(alpha, beta, depth);
+                let score = self.go(alpha, beta, depth, true);
 
                 if self.is_stopping {
                     break 'outer;
@@ -296,7 +295,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             depth: 0,
             pv: [0; PV_DEPTH],
             pv_length: 0,
-            pv_trace: false,
             history_moves: Box::new([[0; 64]; 16]),
             cut_moves: [[0; 2]; PV_DEPTH],
             move_stack: [(0, 0); PV_DEPTH],
@@ -343,7 +341,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     #[inline(always)]
     pub fn new_search(&mut self) {
         self.pv_length = 0;
-        self.pv_trace = false;
         self.is_stopping = false;
         self.node_count = 0;
         self.root_best_nodes = 0;
@@ -489,7 +486,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.info_print_enabled = on;
     }
 
-    fn go(&mut self, alpha: Eval, beta: Eval, depth: u8) -> Eval {
+    fn go(&mut self, alpha: Eval, beta: Eval, depth: u8, on_pv: bool) -> Eval {
         let ply = self.ply as usize & (PV_DEPTH - 1);
 
         self.node_count += 1;
@@ -506,14 +503,15 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut beta = beta;
         let mut depth = depth;
 
-        let pv_move = if self.pv_trace {
-            self.pv_trace = (self.pv_length as usize) > (ply + 1);
+        let pv_move = if on_pv && (ply as u8) < self.pv_length {
             self.pv[ply]
         } else {
             0
         };
 
         let prune_node = ply > 0 && pv_move == 0;
+
+        // @todo - try using !on_pv instead of the bounds check
         let non_pv_node = alpha == beta - 1;
 
         if ply > 0 {
@@ -616,7 +614,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 let r = 2 + depth / 3;
 
                 self.ply += 1;
-                let score = -self.go(-beta, -beta + 1, depth - r);
+                let score = -self.go(-beta, -beta + 1, depth - r, false);
                 self.ply -= 1;
 
                 self.chess.rollback_null_move(ep_square, self.tables);
@@ -767,7 +765,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
                 self.rt.pop_position();
                 let singular_beta = tt_score - 3 * depth as Eval;
-                let s_score = self.go(singular_beta - 1, singular_beta, depth / 2);
+                let s_score = self.go(singular_beta - 1, singular_beta, depth / 2, false);
 
                 self.excluded_move = saved_excluded;
                 self.cut_moves[ply] = saved_cut_moves;
@@ -899,7 +897,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             let new_depth = depth - 1 + extension;
 
             let score = if num_legal_moves == 0 {
-                -self.go(-beta, -alpha, new_depth)
+                -self.go(-beta, -alpha, new_depth, on_pv && mv == pv_move)
             } else if late_move_reduction {
                 let r = {
                     let base_r =
@@ -934,13 +932,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     r.clamp(1, new_depth as i16) as u8
                 };
 
-                let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r);
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r, false);
                 if proof_score > alpha {
                     // The move might be good, search it again with full depth
-                    let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
+                    let proof_score = -self.go(-alpha - 1, -alpha, new_depth, false);
 
                     if proof_score > alpha && proof_score < beta {
-                        -self.go(-beta, -alpha, new_depth)
+                        -self.go(-beta, -alpha, new_depth, false)
                     } else {
                         proof_score
                     }
@@ -949,10 +947,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
             } else {
                 // Null search with fallback to full search
-                let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth, false);
 
                 if proof_score > alpha && proof_score < beta {
-                    -self.go(-beta, -alpha, new_depth)
+                    -self.go(-beta, -alpha, new_depth, false)
                 } else {
                     proof_score
                 }
@@ -1371,7 +1369,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.pv_length = self.pv_table.lengths[0];
         let len = self.pv_length as usize;
         self.pv[0..len].copy_from_slice(&self.pv_table.moves[0][0..len]);
-        self.pv_trace = self.pv_length > 0;
         self.depth = depth;
         self.score = score;
     }
