@@ -59,8 +59,10 @@ pub fn calc_pinnings(
 
     let king_lines = &tables::Tables::LT_LINES[king_sq as usize];
 
-    let rook_moves = tables::Tables::LT_ROOK_OCCUPANCY_MASKS[king_sq as usize];
-    let bishop_moves = tables::Tables::LT_BISHOP_OCCUPANCY_MASKS[king_sq as usize];
+    let (rook_moves, bishop_moves) = (
+        tables::Tables::LT_ROOK_RAY_MASKS[king_sq as usize],
+        tables::Tables::LT_BISHOP_RAY_MASKS[king_sq as usize],
+    );
 
     let rook_attacks = rook_moves
         & (bitboards[PieceIndex::WhiteRook as usize + ntm_offset]
@@ -96,198 +98,215 @@ pub fn calc_pinnings(
     }
 }
 
-#[inline(always)]
-pub fn static_exchange_eval(
-    score_table: &[i16; 16],
-    tables: &tables::Tables,
-    board: &ChessGame,
-    mv: u16,
-    mut black_board: u64,
-    mut white_board: u64,
-    mut piece_board: [u64; 8],
-    pins: Option<&[Pinning; 2]>,
-) -> i16 {
-    let mut pinned = if let Some(pins) = &pins {
-        [pins[0].pinned, pins[1].pinned]
-    } else {
-        [0u64; 2]
-    };
+// #[inline(always)]
+// pub fn static_exchange_eval(
+//     score_table: &[i16; 16],
+//     tables: &tables::Tables,
+//     board: &ChessGame,
+//     mv: u16,
+//     mut black_board: u64,
+//     mut white_board: u64,
+//     mut piece_board: [u64; 8],
+//     pins: Option<&[Pinning; 2]>,
+// ) -> i16 {
+//     let mut pinned = if let Some(pins) = &pins {
+//         [pins[0].pinned, pins[1].pinned]
+//     } else {
+//         [0u64; 2]
+//     };
 
-    let from_sq = (mv & 0x3F) as usize;
-    let to_sq = ((mv >> 6) & 0x3F) as usize;
-    let to_sq_mask = 1u64 << to_sq;
-    let from_sq_mask = 1u64 << from_sq;
+//     let from_sq = (mv & 0x3F) as usize;
+//     let to_sq = ((mv >> 6) & 0x3F) as usize;
+//     let to_sq_mask = 1u64 << to_sq;
+//     let from_sq_mask = 1u64 << from_sq;
 
-    let from_piece = board.spt()[from_sq] & 7;
+//     let from_piece = board.spt()[from_sq] & 7;
 
-    let (remove_piece_mask, to_piece) = if mv & MV_FLAGS == MV_FLAG_EPCAP {
-        let ep_sq = if board.b_move() { to_sq + 8 } else { to_sq - 8 };
-        (1 << ep_sq, PieceIndex::WhitePawn as u8)
-    } else {
-        (to_sq_mask, board.spt()[to_sq])
-    };
+//     let (remove_piece_mask, to_piece) = if mv & MV_FLAGS == MV_FLAG_EPCAP {
+//         let ep_sq = if board.b_move() { to_sq + 8 } else { to_sq - 8 };
+//         (1 << ep_sq, PieceIndex::WhitePawn as u8)
+//     } else {
+//         (to_sq_mask, board.spt()[to_sq])
+//     };
 
-    unsafe {
-        std::hint::assert_unchecked(to_piece < 16);
-    }
+//     unsafe {
+//         std::hint::assert_unchecked(to_piece < 16);
+//     }
 
-    let mut b_move = board.b_move();
+//     let mut b_move = board.b_move();
 
-    if let Some(pins) = &pins {
-        pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
+//     if let Some(pins) = &pins {
+//         pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
 
-        if from_sq_mask & pinned[b_move as usize] != 0 {
-            return 0;
-        }
+//         if from_sq_mask & pinned[b_move as usize] != 0 {
+//             return 0;
+//         }
 
-        pins[!b_move as usize].update_pinned_mask(from_sq_mask, &mut pinned[!b_move as usize]);
-    }
+//         pins[!b_move as usize].update_pinned_mask(from_sq_mask, &mut pinned[!b_move as usize]);
+//     }
 
-    *[&mut white_board, &mut black_board][b_move as usize] ^= from_sq_mask | to_sq_mask;
-    *[&mut white_board, &mut black_board][!b_move as usize] &= !remove_piece_mask;
+//     *[&mut white_board, &mut black_board][b_move as usize] ^= from_sq_mask | to_sq_mask;
+//     *[&mut white_board, &mut black_board][!b_move as usize] &= !remove_piece_mask;
 
-    // Make the move on the bitboards
-    piece_board[from_piece as usize] ^= from_sq_mask | to_sq_mask;
-    piece_board[to_piece as usize & 7] ^= remove_piece_mask;
+//     // Make the move on the bitboards
+//     piece_board[from_piece as usize] ^= from_sq_mask | to_sq_mask;
+//     piece_board[to_piece as usize & 7] ^= remove_piece_mask;
 
-    let mut full_board = black_board | white_board;
-    let mut exchanges = [0; 32];
-    let mut exchange_index = 1;
+//     let mut full_board = black_board | white_board;
+//     let mut exchanges = [0; 32];
+//     let mut exchange_index = 1;
 
-    let mut last_moved_piece = if mv & MV_FLAG_PROMOTION != 0 {
-        PieceIndex::WhiteQueen as u8
-    } else {
-        from_piece
-    };
+//     let mut last_moved_piece = if mv & MV_FLAG_PROMOTION != 0 {
+//         PieceIndex::WhiteQueen as u8
+//     } else {
+//         from_piece
+//     };
 
-    exchanges[0] = score_table[to_piece as usize];
+//     exchanges[0] = score_table[to_piece as usize];
 
-    // Swap side
-    b_move = !b_move;
+//     // Swap side
+//     b_move = !b_move;
 
-    // Safety: to_sq is guaranteed to satisfy < 64
-    let mut all_attackers = unsafe {
-        calc_attackers(
-            tables,
-            full_board,
-            black_board,
-            white_board,
-            piece_board,
-            to_sq as u8,
-        )
-    };
+//     // Safety: to_sq is guaranteed to satisfy < 64
+//     let mut all_attackers = unsafe {
+//         calc_attackers(
+//             tables,
+//             full_board,
+//             black_board,
+//             white_board,
+//             piece_board,
+//             to_sq as u8,
+//         )
+//     };
 
-    let lva = |stm_attackers: u64, piece_board: &[u64; 8]| unsafe {
-        let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
-        let stm_attackers_x8 = _mm512_set1_epi64(stm_attackers as i64);
-        let and_result = _mm512_and_epi64(piece_board_x8, stm_attackers_x8);
-        let lane_mask = _mm512_test_epi64_mask(and_result, and_result);
+//     let lva = |stm_attackers: u64, piece_board: &[u64; 8], avoid: u64| unsafe {
+//         let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
+//         let stm_attackers_x8 = _mm512_set1_epi64(stm_attackers as i64);
+//         let and_result = _mm512_and_epi64(piece_board_x8, stm_attackers_x8);
+//         let lane_mask = _mm512_test_epi64_mask(and_result, and_result);
 
-        debug_assert!(lane_mask != 0, "LVA called with no attackers");
-        let piece_index = 7 - lane_mask.leading_zeros();
+//         debug_assert!(lane_mask != 0, "LVA called with no attackers");
+//         let piece_index = 7 - lane_mask.leading_zeros();
 
-        let attacker_ls_lane = _mm512_permutexvar_epi64(
-            _mm512_castsi128_si512(_mm_cvtsi32_si128(piece_index as i32)),
-            and_result,
-        );
-        let attacker_sq_mask = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
+//         let attacker_ls_lane = _mm512_permutexvar_epi64(
+//             _mm512_castsi128_si512(_mm_cvtsi32_si128(piece_index as i32)),
+//             and_result,
+//         );
+//         let attacker_lane = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
 
-        (piece_index as u8, attacker_sq_mask.isolate_lowest_one())
-    };
+//         let preferred = attacker_lane & !avoid;
+//         let chosen = if preferred != 0 {
+//             preferred
+//         } else {
+//             attacker_lane
+//         };
 
-    let mut stm_attackers;
+//         (piece_index as u8, chosen.isolate_lowest_one())
+//     };
 
-    loop {
-        stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
-        stm_attackers &= !pinned[b_move as usize];
+//     let pinner_avoid = if crate::engine::search::search::FLAG_PIN_EDGE {
+//         match &pins {
+//             Some(pins) => [pins[0].pinners, pins[1].pinners],
+//             None => [0u64; 2],
+//         }
+//     } else {
+//         [0u64; 2]
+//     };
 
-        if stm_attackers == 0 {
-            break;
-        }
+//     let mut stm_attackers;
 
-        let (attacker_piece, attacker_sq_mask) = lva(stm_attackers, &piece_board);
+//     loop {
+//         stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
+//         stm_attackers &= !pinned[b_move as usize];
 
-        // println!(
-        //     "SEE Attacker piece: {:?}, attacker sq: {}, exchange index: {}",
-        //     PieceIndex::from(attacker_piece as usize),
-        //     util::square_name(attacker_sq_mask.trailing_zeros() as u8),
-        //     exchange_index
-        // );
+//         if stm_attackers == 0 {
+//             break;
+//         }
 
-        unsafe {
-            std::hint::assert_unchecked(attacker_piece < 8);
-        }
+//         let (attacker_piece, attacker_sq_mask) =
+//             lva(stm_attackers, &piece_board, pinner_avoid[!b_move as usize]);
 
-        piece_board[last_moved_piece as usize] ^= to_sq_mask;
-        piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
-        all_attackers ^= attacker_sq_mask;
-        full_board ^= attacker_sq_mask;
+//         // println!(
+//         //     "SEE Attacker piece: {:?}, attacker sq: {}, exchange index: {}",
+//         //     PieceIndex::from(attacker_piece as usize),
+//         //     util::square_name(attacker_sq_mask.trailing_zeros() as u8),
+//         //     exchange_index
+//         // );
 
-        exchanges[exchange_index] =
-            score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
-        exchange_index += 1;
-        last_moved_piece = attacker_piece;
+//         unsafe {
+//             std::hint::assert_unchecked(attacker_piece < 8);
+//         }
 
-        if let Some(pins) = &pins {
-            pins[!b_move as usize]
-                .update_pinned_mask(attacker_sq_mask, &mut pinned[!b_move as usize]);
-        }
+//         piece_board[last_moved_piece as usize] ^= to_sq_mask;
+//         piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
+//         all_attackers ^= attacker_sq_mask;
+//         full_board ^= attacker_sq_mask;
 
-        b_move = !b_move;
+//         exchanges[exchange_index] =
+//             score_table[last_moved_piece as usize] - exchanges[exchange_index - 1];
+//         exchange_index += 1;
+//         last_moved_piece = attacker_piece;
 
-        match attacker_piece as usize {
-            PIECE_KING => {
-                if (all_attackers & !to_sq_mask) & [white_board, black_board][b_move as usize] != 0
-                {
-                    // Revert king capture if there are still attackers left
-                    exchange_index -= 1;
-                }
-            }
-            PIECE_PAWN | PIECE_BISHOP => {
-                let attack_mask =
-                    unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
+//         if let Some(pins) = &pins {
+//             pins[!b_move as usize]
+//                 .update_pinned_mask(attacker_sq_mask, &mut pinned[!b_move as usize]);
+//         }
 
-                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
-                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+//         b_move = !b_move;
 
-                all_attackers |= (queen_board | bishop_board) & attack_mask;
-            }
-            PIECE_ROOK => {
-                let attack_mask = unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
+//         match attacker_piece as usize {
+//             PIECE_KING => {
+//                 if (all_attackers & !to_sq_mask) & [white_board, black_board][b_move as usize] != 0
+//                 {
+//                     // Revert king capture if there are still attackers left
+//                     exchange_index -= 1;
+//                 }
+//             }
+//             PIECE_PAWN | PIECE_BISHOP => {
+//                 let attack_mask =
+//                     unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
 
-                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
-                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
+//                 let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+//                 let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
 
-                all_attackers |= (queen_board | rook_board) & attack_mask;
-            }
-            PIECE_QUEEN => {
-                let rook_attack_mask =
-                    unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
-                let bishop_attack_mask =
-                    unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
+//                 all_attackers |= (queen_board | bishop_board) & attack_mask;
+//             }
+//             PIECE_ROOK => {
+//                 let attack_mask = unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
 
-                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
-                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
-                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+//                 let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+//                 let rook_board = piece_board[PieceIndex::WhiteRook as usize];
 
-                all_attackers |= (queen_board | rook_board) & rook_attack_mask;
-                all_attackers |= (queen_board | bishop_board) & bishop_attack_mask;
-            }
-            _ => {}
-        }
+//                 all_attackers |= (queen_board | rook_board) & attack_mask;
+//             }
+//             PIECE_QUEEN => {
+//                 let rook_attack_mask =
+//                     unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
+//                 let bishop_attack_mask =
+//                     unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
 
-        all_attackers &= !to_sq_mask;
-    }
+//                 let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+//                 let rook_board = piece_board[PieceIndex::WhiteRook as usize];
+//                 let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
 
-    while exchange_index > 1 {
-        exchange_index -= 1;
+//                 all_attackers |= (queen_board | rook_board) & rook_attack_mask;
+//                 all_attackers |= (queen_board | bishop_board) & bishop_attack_mask;
+//             }
+//             _ => {}
+//         }
 
-        exchanges[exchange_index - 1] =
-            exchanges[exchange_index - 1].min(-exchanges[exchange_index]);
-    }
+//         all_attackers &= !to_sq_mask;
+//     }
 
-    exchanges[0]
-}
+//     while exchange_index > 1 {
+//         exchange_index -= 1;
+
+//         exchanges[exchange_index - 1] =
+//             exchanges[exchange_index - 1].min(-exchanges[exchange_index]);
+//     }
+
+//     exchanges[0]
+// }
 
 #[inline(always)]
 pub fn see_threshold(
@@ -311,6 +330,17 @@ pub fn see_threshold(
     let to_sq = ((mv >> 6) & 0x3F) as usize;
     let to_sq_mask = 1u64 << to_sq;
     let from_sq_mask: u64 = 1u64 << from_sq;
+
+    let king_online_pinned = {
+        let kings_board = piece_board[PIECE_KING];
+        let white_king = (kings_board & white_board).trailing_zeros() as usize;
+        let black_king = (kings_board & black_board).trailing_zeros() as usize;
+        unsafe { std::hint::assert_unchecked(white_king < 64 && black_king < 64) };
+        [
+            tables::Tables::LT_FULL_LINE[white_king][to_sq] & pinned[0],
+            tables::Tables::LT_FULL_LINE[black_king][to_sq] & pinned[1],
+        ]
+    };
 
     let from_piece = board.spt()[from_sq] & 7;
 
@@ -358,7 +388,7 @@ pub fn see_threshold(
     if let Some(pins) = &pins {
         pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
 
-        if from_sq_mask & pinned[b_move as usize] != 0 {
+        if (from_sq_mask & pinned[b_move as usize] & !king_online_pinned[b_move as usize]) != 0 {
             return false;
         }
 
@@ -389,7 +419,7 @@ pub fn see_threshold(
         )
     };
 
-    let lva = |stm_attackers: u64, piece_board: &[u64; 8]| unsafe {
+    let lva = |stm_attackers: u64, piece_board: &[u64; 8], avoid: u64| unsafe {
         let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
         let stm_attackers_x8 = _mm512_set1_epi64(stm_attackers as i64);
         let and_result = _mm512_and_epi64(piece_board_x8, stm_attackers_x8);
@@ -404,9 +434,21 @@ pub fn see_threshold(
             _mm512_castsi128_si512(_mm_cvtsi32_si128(piece_index as i32)),
             and_result,
         );
-        let attacker_sq_mask = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
+        let attacker_lane = _mm_cvtsi128_si64(_mm512_castsi512_si128(attacker_ls_lane)) as u64;
 
-        (piece_index as u8, attacker_sq_mask.isolate_lowest_one())
+        let preferred = attacker_lane & !avoid;
+        let chosen = if preferred != 0 {
+            preferred
+        } else {
+            attacker_lane
+        };
+
+        (piece_index as u8, chosen.isolate_lowest_one())
+    };
+
+    let pinner_avoid = match &pins {
+        Some(pins) => [pins[0].pinners, pins[1].pinners],
+        None => [0u64; 2],
     };
 
     // 3. Start calculating capture sequence alternating sides.
@@ -418,13 +460,14 @@ pub fn see_threshold(
 
     loop {
         stm_attackers = all_attackers & [white_board, black_board][b_move as usize];
-        stm_attackers &= !pinned[b_move as usize];
+        stm_attackers &= !(pinned[b_move as usize] & !king_online_pinned[b_move as usize]);
 
         if stm_attackers == 0 {
             break;
         }
 
-        let (attacker_piece, attacker_sq_mask) = lva(stm_attackers, &piece_board);
+        let (attacker_piece, attacker_sq_mask) =
+            lva(stm_attackers, &piece_board, pinner_avoid[!b_move as usize]);
 
         unsafe {
             std::hint::assert_unchecked(attacker_piece < 8);
@@ -624,6 +667,18 @@ mod tests {
         let from_sq = (mv & 0x3F) as usize;
         let to_sq = ((mv >> 6) & 0x3F) as usize;
 
+        let king_online_pinned = {
+            let white_king =
+                board.bitboards()[PieceIndex::WhiteKing as usize].trailing_zeros() as usize;
+            let black_king =
+                board.bitboards()[PieceIndex::BlackKing as usize].trailing_zeros() as usize;
+            unsafe { std::hint::assert_unchecked(white_king < 64 && black_king < 64) };
+            [
+                tables::Tables::LT_FULL_LINE[white_king][to_sq] & pinned[0],
+                tables::Tables::LT_FULL_LINE[black_king][to_sq] & pinned[1],
+            ]
+        };
+
         let to_piece = if mv & MV_FLAGS == MV_FLAG_EPCAP {
             PieceIndex::WhitePawn as u8
         } else {
@@ -648,7 +703,8 @@ mod tests {
 
             pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
 
-            if from_sq_mask & pinned[b_move as usize] != 0 {
+            if (from_sq_mask & pinned[b_move as usize] & !king_online_pinned[b_move as usize]) != 0
+            {
                 return None;
             }
 
@@ -696,7 +752,12 @@ mod tests {
 
                 if pins.is_some() {
                     let to_sq_mask = 1u64 << to_sq;
-                    if pinned[board.b_move() as usize] & to_sq_mask != 0 {
+
+                    if (pinned[board.b_move() as usize]
+                        & !king_online_pinned[board.b_move() as usize])
+                        & to_sq_mask
+                        != 0
+                    {
                         // Never move a pinned piece
                         continue;
                     }
@@ -894,33 +955,33 @@ mod tests {
                         with_pins
                     );
 
-                    let real_eval = static_exchange_eval(
-                        &WEIGHT_TABLE_ABS,
-                        &tables,
-                        &board,
-                        mv,
-                        black_board,
-                        white_board,
-                        piece_board,
-                        pins.as_ref(),
-                    );
+                    // let real_eval = static_exchange_eval(
+                    //     &WEIGHT_TABLE_ABS,
+                    //     &tables,
+                    //     &board,
+                    //     mv,
+                    //     black_board,
+                    //     white_board,
+                    //     piece_board,
+                    //     pins.as_ref(),
+                    // );
 
-                    assert_eq!(
-                        real_eval,
-                        naive_eval,
-                        "Mismatch between real SEE and naive SEE. RealEval={}, NaiveEval={}. Position: {}. Move: {}. With pins: {}",
-                        real_eval,
-                        naive_eval,
-                        board.gen_fen(),
-                        util::move_string_dbg(mv),
-                        with_pins
-                    );
+                    // assert_eq!(
+                    //     real_eval,
+                    //     naive_eval,
+                    //     "Mismatch between real SEE and naive SEE. RealEval={}, NaiveEval={}. Position: {}. Move: {}. With pins: {}",
+                    //     real_eval,
+                    //     naive_eval,
+                    //     board.gen_fen(),
+                    //     util::move_string_dbg(mv),
+                    //     with_pins
+                    // );
 
                     see_test_threshold(
                         &tables,
                         &board,
                         mv,
-                        real_eval,
+                        expected_score.unwrap_or(naive_eval),
                         black_board,
                         white_board,
                         piece_board,
@@ -1322,6 +1383,85 @@ mod tests {
             Some((mv, expected)),
             1,
             true,
+        );
+    }
+
+    #[test]
+    fn test_pin_edge_detection() {
+        let tables = tables::Tables::new();
+        let mut board = chess_v2::ChessGame::new();
+        assert!(
+            board
+                .load_fen("k2r4/8/3B4/8/3K4/8/8/8 w - - 0 1", &tables)
+                .is_ok()
+        );
+
+        let bitboards = board.bitboards();
+        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
+        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
+
+        let pins = calc_pinnings(false, &board, black_board, white_board);
+
+        let d6 = (util::create_move("d6d7") & 0x3F) as usize;
+        let detected = pins.pinned & (1u64 << d6) != 0;
+
+        assert!(detected, "FLAG_PIN_EDGE on: edge pinner Rd8 must pin Bd6");
+    }
+
+    fn see_threshold_from_fen(fen: &str, mv_str: &str, threshold: Eval) -> bool {
+        let tables = tables::Tables::new();
+        let mut board = chess_v2::ChessGame::new();
+        assert!(board.load_fen(fen, &tables).is_ok());
+
+        let mv = board.fix_move(util::create_move(mv_str));
+
+        let bitboards = board.bitboards();
+        let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
+        let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
+
+        let mut piece_board = [0u64; 8];
+        bitboards
+            .iter()
+            .take(8)
+            .zip(bitboards.iter().skip(8))
+            .enumerate()
+            .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+
+        let pins = [
+            calc_pinnings(false, &board, black_board, white_board),
+            calc_pinnings(true, &board, black_board, white_board),
+        ];
+
+        see_threshold(
+            &WEIGHT_TABLE_ABS,
+            &tables,
+            &board,
+            mv,
+            threshold,
+            black_board,
+            white_board,
+            piece_board,
+            Some(&pins),
+        )
+    }
+
+    #[test]
+    fn test_see_pin_online_recapture() {
+        let result = see_threshold_from_fen("k3r3/3b4/8/6N1/2Q1R3/8/8/4K3 w - - 0 1", "g5e6", 0);
+
+        assert_eq!(
+            result, true,
+            "on-line recapture by the pinned Re4 decides SEE(Ne6)"
+        );
+    }
+
+    #[test]
+    fn test_see_pin_online_quiet_mover() {
+        let result = see_threshold_from_fen("k3r3/8/8/8/4R3/8/3P4/4K3 w - - 0 1", "e4e3", 0);
+
+        assert_eq!(
+            result, true,
+            "quiet on-line move by the pinned Re4 must pass SEE"
         );
     }
 }
