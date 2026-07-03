@@ -48,6 +48,14 @@ const CORR_W_NP_NTM: Eval = 24;
 
 pub const PV_DEPTH: usize = 64;
 
+const FLAG_NMP_WINDOW_GATE: bool = true;
+const FLAG_TTCUT_WINDOW_GATE: bool = false;
+const FLAG_TTCUT_WINDOW_GATE_CUSTOM: bool = true;
+const FLAG_RFP_WINDOW_GATE: bool = true;
+
+const FLAG_IIR_GATE: bool = true;
+const FLAG_SE_GATE: bool = true;
+
 const HISTORY_MAX: i16 = i16::MAX - 0_017;
 const HISTORY_MIN: i16 = i16::MIN + 0_017;
 
@@ -510,8 +518,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         };
 
         let prune_node = ply > 0 && pv_move == 0;
-
-        // @todo - try using !on_pv instead of the bounds check
         let non_pv_node = alpha == beta - 1;
 
         if ply > 0 {
@@ -543,7 +549,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut tt_bound = BoundType::UpperBound;
 
         if let Some(ref probe) = tt_probe {
-            if prune_node {
+            let tt_cut = if FLAG_TTCUT_WINDOW_GATE {
+                non_pv_node
+            } else if FLAG_TTCUT_WINDOW_GATE_CUSTOM {
+                pv_move == 0
+            } else {
+                prune_node
+            };
+            if tt_cut {
                 if let Some(score) = probe.score {
                     return Self::score_from_tt(score, self.ply);
                 }
@@ -560,8 +573,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             EngineForm::TacticalB => true,
             _ => true,
         };
+        let iir_gate = if FLAG_IIR_GATE { ply > 0 } else { prune_node };
         depth -= if flag_enable_iir {
-            (depth >= 4 && tt_move_index == 0xFF && prune_node) as u8
+            (depth >= 4 && tt_move_index == 0xFF && iir_gate) as u8
         } else {
             0
         };
@@ -585,13 +599,20 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             false
         };
 
-        if prune_node && !in_check {
+        if !in_check {
             let flag_enable_rfp = match F {
                 EngineForm::TacticalA => false,
                 EngineForm::TacticalB => true,
                 _ => true,
             };
-            if flag_enable_rfp && non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
+
+            let rfp_gate = if FLAG_RFP_WINDOW_GATE {
+                non_pv_node
+            } else {
+                prune_node
+            };
+
+            if flag_enable_rfp && rfp_gate && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
                 let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
 
                 if corrected_eval - eval_margin >= beta {
@@ -605,7 +626,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 _ => true,
             };
 
+            let nmp_gate = if FLAG_NMP_WINDOW_GATE {
+                non_pv_node
+            } else {
+                prune_node
+            };
+
             if flag_enable_nmp
+                && nmp_gate
                 && depth >= 3
                 && self.chess.has_non_pawn_mat(self.chess.b_move() as usize)
             {
@@ -730,8 +758,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             EngineForm::TacticalB => true,
             _ => true,
         };
+
+        let se_gate = if FLAG_SE_GATE { true } else { prune_node };
+
         let singular_move = if flag_enable_se
-            && prune_node
+            && se_gate
             && depth >= 8
             && tt_move_index != 0xFF
             && tt_depth >= depth.saturating_sub(3)
@@ -774,9 +805,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     return 0;
                 }
 
+                let se_multicut_gate = if FLAG_SE_GATE { non_pv_node } else { true };
+
                 if s_score < singular_beta {
                     extension = 1;
-                } else if singular_beta >= beta {
+                } else if se_multicut_gate && singular_beta >= beta {
                     // Multi-cut: even without the TT move, score >= beta
                     return singular_beta;
                 }
