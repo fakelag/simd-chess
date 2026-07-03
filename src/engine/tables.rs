@@ -518,6 +518,114 @@ impl Tables {
         moves
     };
 
+    // Edge-inclusive king rays, split by slider type. Unlike LT_*_OCCUPANCY_MASKS these keep the
+    // board-edge squares, so a pinner sitting on an edge is detectable.
+    pub const LT_ROOK_RAY_MASKS: [u64; 64] = const {
+        let mut moves = [0; 64];
+        let mut square = 0;
+
+        while square < 64 {
+            let file = square as u64 % 8;
+            let rank = square as u64 / 8;
+
+            let mut r = 0;
+            while r < 8 {
+                moves[square] |= 1 << (r * 8 + file);
+                r += 1;
+            }
+
+            let mut f = 0;
+            while f < 8 {
+                moves[square] |= 1 << (rank * 8 + f);
+                f += 1;
+            }
+
+            moves[square] &= !(1 << square);
+
+            square += 1;
+        }
+
+        moves
+    };
+
+    pub const LT_BISHOP_RAY_MASKS: [u64; 64] = const {
+        let mut moves = [0; 64];
+        let mut square = 0;
+
+        while square < 64 {
+            let rank = square as i64 / 8;
+            let file = square as i64 % 8;
+
+            let dirs = [(1i64, -1i64), (1, 1), (-1, 1), (-1, -1)];
+            let mut d = 0;
+            while d < 4 {
+                let (dr, df) = dirs[d];
+                let mut r = rank + dr;
+                let mut f = file + df;
+                while r >= 0 && r < 8 && f >= 0 && f < 8 {
+                    moves[square] |= 1 << (r * 8 + f);
+                    r += dr;
+                    f += df;
+                }
+                d += 1;
+            }
+
+            square += 1;
+        }
+
+        moves
+    };
+
+    // Full edge-to-edge line through two collinear squares (rank/file/diagonal), else 0.
+    pub const LT_FULL_LINE: [[u64; 64]; 64] = const {
+        let mut result = [[0u64; 64]; 64];
+
+        let mut a = 0;
+        while a < 64 {
+            let ar = (a / 8) as i64;
+            let af = (a % 8) as i64;
+
+            let mut b = 0;
+            while b < 64 {
+                let br = (b / 8) as i64;
+                let bf = (b % 8) as i64;
+                let dr = br - ar;
+                let df = bf - af;
+
+                if a != b && (dr == 0 || df == 0 || dr == df || dr == -df) {
+                    let sr = dr.signum();
+                    let sf = df.signum();
+
+                    let mut line = 0u64;
+
+                    let mut r = ar;
+                    let mut f = af;
+                    while r >= 0 && r < 8 && f >= 0 && f < 8 {
+                        line |= 1u64 << ((r * 8 + f) as u32);
+                        r += sr;
+                        f += sf;
+                    }
+
+                    let mut r = ar - sr;
+                    let mut f = af - sf;
+                    while r >= 0 && r < 8 && f >= 0 && f < 8 {
+                        line |= 1u64 << ((r * 8 + f) as u32);
+                        r -= sr;
+                        f -= sf;
+                    }
+
+                    result[a][b] = line;
+                }
+
+                b += 1;
+            }
+
+            a += 1;
+        }
+
+        result
+    };
+
     #[cfg_attr(any(), rustfmt::skip)]
     pub const EVAL_TABLES_INV_I8_OLD: [[i8; 64]; util::PieceId::PieceMax as usize + 2] = const {
         /*
