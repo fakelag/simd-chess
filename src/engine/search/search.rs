@@ -23,6 +23,8 @@ use crate::{
 const EVAL_NNUE: bool = true;
 const EVAL_CACHE: bool = false;
 
+const FLAG_NMP_MATE_CLAMP: bool = false;
+
 macro_rules! net_path {
     () => {
         "../../../nnue/w2-10M-512-b8.bin"
@@ -626,7 +628,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
 
                 if score >= beta {
-                    return score;
+                    if !FLAG_NMP_MATE_CLAMP || !is_mate(score) {
+                        return score;
+                    }
                 }
             }
         }
