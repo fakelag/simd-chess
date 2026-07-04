@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::engine::search::eval::{Eval, SCORE_INF, is_mate};
+use crate::engine::search::search::FLAG_STAB_NODE_GATE;
 use crate::engine::search::search_params::SearchParams;
 
 const MOVE_OVERHEAD_MS: u64 = 10;
@@ -173,7 +174,7 @@ impl TimeManager {
         }
 
         if r.best_move == self.prev_best_move {
-            self.stability += 1;
+            self.stability += (!FLAG_STAB_NODE_GATE || r.iter_nodes >= 512) as u32;
         } else {
             self.stability = 0;
             self.prev_best_move = r.best_move;
