@@ -1,5 +1,5 @@
-use std::arch::x86_64::*;
 use std::cell::SyncUnsafeCell;
+use std::mem::MaybeUninit;
 
 use crate::{
     chess_v2::*,
@@ -24,6 +24,8 @@ const EVAL_NNUE: bool = true;
 const EVAL_CACHE: bool = false;
 
 const FLAG_NMP_MATE_CLAMP: bool = false;
+
+pub const FLAG_MALUS_ALLMOVES: bool = false;
 
 macro_rules! net_path {
     () => {
@@ -50,8 +52,8 @@ const CORR_W_NP_NTM: Eval = 24;
 
 pub const PV_DEPTH: usize = 64;
 
-const HISTORY_MAX: i16 = i16::MAX - 0_017;
-const HISTORY_MIN: i16 = i16::MIN + 0_017;
+pub const HISTORY_MAX: i16 = SCORE_INF; // i16::MAX - 0_017;
+pub const HISTORY_MIN: i16 = -SCORE_INF; // i16::MIN + 0_017;
 
 const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
 const SEE_CAPTURE_MARGIN: Eval = 100;
@@ -638,9 +640,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.rt
             .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
 
-        let mut move_list = [0u32; 256];
-        let mut original_move_list = [0u16; 256];
-
         let cont_idx_ply1 = if ply >= 1 {
             let (p, d) = self.move_stack[ply - 1];
             debug_assert!(p < 12);
@@ -669,67 +668,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             None
         };
 
-        let see_info = if depth > 1 {
-            let bitboards = self.chess.bitboards();
-            let black_board = bitboards.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
-            let white_board = bitboards.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
-            let mut pieces_board = [0u64; 8];
-            bitboards
-                .iter()
-                .take(8)
-                .zip(bitboards.iter().skip(8))
-                .enumerate()
-                .for_each(|(i, (w, b))| pieces_board[i] = *w | *b);
-            let pins = [
-                see::calc_pinnings(false, &self.chess, black_board, white_board),
-                see::calc_pinnings(true, &self.chess, black_board, white_board),
-            ];
-            Some(SeeInfo {
-                black_board,
-                white_board,
-                pieces_board,
-                pins,
-            })
-        } else {
-            None
-        };
-
-        let move_count = {
-            let cont_hist = ContHistRef {
-                ply1: cont_idx_ply1.map(|idx| &self.cont_history[0][idx]),
-                ply2: cont_idx_ply2.map(|idx| &self.cont_history[1][idx]),
-            };
-
-            if let Some(see_info) = &see_info {
-                let mut moves = SeeOrdering::<HISTORY_MIN, HISTORY_MAX>::new(
-                    pv_move,
-                    tt_move_index,
-                    self.cut_moves[ply],
-                );
-                moves.gen_moves(
-                    &self.chess,
-                    self.tables,
-                    &self.history_moves,
-                    &cont_hist,
-                    see_info,
-                    &mut original_move_list,
-                    &mut move_list,
-                )
-            } else {
-                let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(
-                    pv_move,
-                    tt_move_index,
-                    self.cut_moves[ply],
-                );
-                moves.gen_moves(
-                    &self.chess,
-                    &self.history_moves,
-                    &cont_hist,
-                    &mut original_move_list,
-                    &mut move_list,
-                )
-            }
-        };
+        let mut moves = Movegen::new(
+            &self.chess,
+            pv_move,
+            tt_move_index,
+            self.cut_moves[ply],
+            depth,
+        );
 
         let flag_enable_se = match F {
             EngineForm::TacticalA => false,
@@ -744,7 +689,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             && tt_bound != BoundType::UpperBound
             && !is_mate(tt_score)
         {
-            original_move_list[tt_move_index as usize]
+            moves.tt_move()
         } else {
             0
         };
@@ -755,8 +700,27 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let board_copy = self.chess.clone();
 
-        for mv_index in 0..move_count {
-            let mv = move_list[mv_index] as u16;
+        let mut tried_quiet_moves = MaybeUninit::<[u16; 218]>::uninit();
+        let mut tried_quiet_count = 0;
+
+        while let Some((mv, phase)) = moves.next(
+            &self.chess,
+            self.tables,
+            &ContHistRef {
+                ply1: cont_idx_ply1.map(|idx| &self.cont_history[0][idx]),
+                ply2: cont_idx_ply2.map(|idx| &self.cont_history[1][idx]),
+            },
+            &self.history_moves,
+        ) {
+            if FLAG_MALUS_ALLMOVES && (mv & MV_FLAG_CAP) == 0 {
+                unsafe {
+                    debug_assert!(tried_quiet_count < 218); // Max 218 quiets in a legal position
+                    (tried_quiet_moves.as_mut_ptr() as *mut u16)
+                        .add(tried_quiet_count)
+                        .write(mv);
+                }
+                tried_quiet_count += 1;
+            }
 
             if mv == self.excluded_move {
                 continue;
@@ -802,15 +766,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 && !in_check
                 && depth <= SEE_QUIET_PRUNE_MAX_DEPTH.max(SEE_CAPTURE_PRUNE_MAX_DEPTH)
             {
-                if let Some(see_info) = &see_info {
+                if let Some(see_info) = moves.see_info() {
                     let is_capture = (mv & MV_FLAG_CAP) != 0;
 
                     // Capture SEE pruning: depth-scaled linear threshold.
                     // Fast path: good captures (SEE >= 0 from ordering) always pass
                     // any negative threshold, so skip the see_threshold call entirely.
                     if is_capture && depth <= SEE_CAPTURE_PRUNE_MAX_DEPTH {
-                        let sort_score = (move_list[mv_index] >> 16) as u16;
-                        if sort_score < SEE_ORDERING_BAD_CAP_LIMIT {
+                        if phase == MovegenPhase::MoveBadCap {
                             let threshold = -(SEE_CAPTURE_MARGIN * depth as Eval);
                             if !see::see_threshold(
                                 &WEIGHT_TABLE_ABS,
@@ -899,6 +862,18 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             let root_nodes_before = self.node_count;
 
             self.ply += 1;
+
+            let is_non_capture = (mv & MV_FLAG_CAP) == 0;
+
+            if is_non_capture && !FLAG_MALUS_ALLMOVES {
+                unsafe {
+                    debug_assert!(tried_quiet_count < 218); // Max 218 quiets in a legal position
+                    (tried_quiet_moves.as_mut_ptr() as *mut u16)
+                        .add(tried_quiet_count)
+                        .write(mv);
+                    tried_quiet_count += 1;
+                }
+            }
 
             let new_depth = depth - 1 + extension;
 
@@ -1017,8 +992,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
 
             if score >= beta {
-                let is_non_capture = (mv & MV_FLAG_CAP) == 0;
-
                 if is_non_capture && self.excluded_move == 0 {
                     let src_piece = self.chess.spt()[(mv & 0x3F) as usize] as usize;
                     let dst_square = ((mv >> 6) & 0x3F) as usize;
@@ -1053,17 +1026,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                         depth as i16 * depth as i16,
                     );
 
-                    for j in 0..mv_index {
-                        let prev_mv = move_list[j] as u16;
+                    for j in 0..tried_quiet_count - (is_non_capture as usize) {
+                        let prev_mv =
+                            unsafe { (tried_quiet_moves.as_ptr() as *const u16).add(j).read() };
 
                         debug_assert!(prev_mv != 0);
                         debug_assert!(prev_mv != mv);
-
-                        let is_capture = prev_mv & MV_FLAG_CAP != 0;
-
-                        if is_capture {
-                            continue;
-                        }
+                        debug_assert!(prev_mv & MV_FLAG_CAP == 0);
 
                         let src_piece = self.chess.spt()[(prev_mv & 0x3F) as usize] as usize;
                         let dst_square = ((prev_mv >> 6) & 0x3F) as usize;
@@ -1107,7 +1076,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                         self.chess.zobrist_key(),
                         store_score,
                         depth,
-                        || Self::find_move_index_avx512(best_move, &original_move_list),
+                        || moves.find_move_index_avx512(best_move),
                         BoundType::LowerBound,
                     );
                 }
@@ -1145,7 +1114,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 self.chess.zobrist_key(),
                 store_score,
                 depth,
-                || Self::find_move_index_avx512(best_move, &original_move_list),
+                || moves.find_move_index_avx512(best_move),
                 bound_type,
             );
         }
@@ -1294,29 +1263,22 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let mut alpha = alpha;
 
-        let mut moves = MvvlvaOrdering::<HISTORY_MIN, HISTORY_MAX>::new(0, 0xFF, [0; 2]);
+        let mut moves = Movegen::new(&self.chess, 0, 0xFF, [0; 2], 0);
 
         let mut best_score = -SCORE_INF;
         let mut num_legal_moves = 0;
 
         let board_copy = self.chess.clone();
 
-        let mut move_list = [0u32; 256];
-        let mut original_move_list = [0u16; 256];
-        let no_cont = ContHistRef {
-            ply1: None,
-            ply2: None,
-        };
-        for i in 0..moves.gen_moves(
+        while let Some((mv, _)) = moves.next(
             &self.chess,
+            self.tables,
+            &ContHistRef {
+                ply1: None,
+                ply2: None,
+            },
             &self.history_moves,
-            &no_cont,
-            &mut original_move_list,
-            &mut move_list,
         ) {
-            let mv_index = i;
-            let mv = move_list[mv_index] as u16;
-
             let nnue_update = unsafe {
                 // Safety: mv is generated by gen_moves_avx512, so it is guaranteed to be valid
                 self.chess.make_move_nnue(mv, self.tables)
@@ -1839,44 +1801,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         return (legal_move, legal_move);
     }
-
-    #[inline(always)]
-    pub fn find_move_index_avx512(mv: u16, move_list: &[u16; 256]) -> u8 {
-        unsafe {
-            let mv_list_ptr = move_list.as_ptr() as *const __m512i;
-            let mv_x32 = _mm512_set1_epi16(mv as i16);
-
-            let p0_x32 = _mm512_loadu_si512(mv_list_ptr);
-            let cmp_mask_0 = _mm512_cmpeq_epi16_mask(p0_x32, mv_x32) as u32;
-
-            if std::hint::likely(cmp_mask_0 != 0) {
-                return cmp_mask_0.trailing_zeros() as u8;
-            }
-
-            32 + move_list
-                .get_unchecked(32..)
-                .iter()
-                .position(|&m| m == mv)
-                .unwrap_unchecked() as u8
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn find_move_index_all_positions() {
-        for i in 0..256usize {
-            let mut move_list = [0xAAAAu16; 256];
-            move_list[i] = 0xBBBB;
-
-            let result =
-                Search::<{ EngineForm::Strategy }>::find_move_index_avx512(0xBBBB, &move_list);
-            assert_eq!(result, i as u8, "failed at index {i}");
-        }
-    }
 
     #[test]
     fn test_tt_mate_score() {

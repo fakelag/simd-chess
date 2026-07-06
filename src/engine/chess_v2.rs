@@ -1570,24 +1570,22 @@ impl ChessGame {
 
         let mut node_count = 0;
 
-        let mut move_list = [0u16; 220];
-        let move_count = self.gen_moves_avx512::<false, _>(&mut move_list[2..]);
+        let mut move_list = [0u16; 256];
+        let move_count = self.gen_moves_avx512_v2::<false, _>(&mut move_list);
 
         let board_copy = self.clone();
 
-        let mut i = 2;
-        while i < move_count + 2 {
+        for i in 0..move_count {
             let mv = move_list[i];
-            i += 1;
 
-            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
-                i -= 3;
+            // if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
+            //     i -= 3;
 
-                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
-                move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
-            }
+            //     let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+            //     move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
+            //     move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
+            //     move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
+            // }
 
             let nnue_update = unsafe { self.make_move_nnue(mv, tables) };
 
@@ -2772,6 +2770,416 @@ impl ChessGame {
                 _mm_cvtsi128_si64(_mm512_extracti64x2_epi64(all_checkers_low, 2)) as u64;
 
             (checkers_sq_0, checkers_sq_1)
+        }
+    }
+
+    #[inline(always)]
+    pub fn gen_moves_avx512_v2<const CAPTURE_ONLY: bool, MoveType: From<u16> + Into<u16> + Copy>(
+        &self,
+        move_list: &mut [MoveType],
+    ) -> usize {
+        let mut mv_cursor = 0usize;
+
+        unsafe {
+            let friendly_move_offset = (self.b_move as usize) << 3;
+            let opponent_move_offset = (!self.b_move as usize) << 3;
+
+            let const_nonslider_selector = _mm512_set_epi64(
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhitePawn as i64,
+                PieceIndex::WhiteKnight as i64,
+                PieceIndex::WhiteKnight as i64,
+                PieceIndex::WhiteKing as i64,
+            );
+            let const_nonslider_split = _mm512_set_epi64(
+                0x4040404040404040u64 as i64,
+                0x2020202020202020u64 as i64,
+                0x404040404040404u64 as i64,
+                0x1212121212121212u64 as i64,
+                0x8989898989898989u64 as i64,
+                0xF0F0F0F0F0F0F0F0u64 as i64,
+                0x0F0F0F0F0F0F0F0Fu64 as i64,
+                0xFFFFFFFF_FFFFFFFFu64 as i64,
+            );
+            const PAWN_LANES: u8 = 0b11111000;
+            const KING_LANES: u8 = 0b00000001;
+            const KNIGHT_LANES: u8 = 0b00000110;
+
+            let const_slider_selector = _mm512_set_epi64(
+                PieceIndex::WhiteQueen as i64,
+                PieceIndex::WhiteQueen as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteRook as i64,
+                PieceIndex::WhiteBishop as i64,
+                PieceIndex::WhiteBishop as i64,
+            );
+
+            let const_slider_split = _mm512_set_epi64(
+                0xFFFFFFFF_FFFFFFFFu64 as i64,
+                0xFFFFFFFF_FFFFFFFFu64 as i64,
+                0x050A050A050A050Au64 as i64,
+                0x0A050A050A050A05u64 as i64,
+                0x50A050A050A050A0u64 as i64,
+                0xA050A050A050A050u64 as i64,
+                0xAA55AA55AA55AA55u64 as i64,
+                0x55AA55AA55AA55AAu64 as i64,
+            );
+            const BISHOP_LANES: u8 = 0b10000011;
+            const ROOK_LANES: u8 = 0b01111100;
+
+            let bitboard_x8 = _mm512_load_si512(
+                self.board.bitboards.as_ptr().add(friendly_move_offset) as *const __m512i,
+            );
+
+            let mut sliders_x8 = _mm512_and_epi64(
+                _mm512_permutex2var_epi64(bitboard_x8, const_slider_selector, bitboard_x8),
+                const_slider_split,
+            );
+
+            let mut non_sliders_x8 = _mm512_and_epi64(
+                _mm512_permutex2var_epi64(bitboard_x8, const_nonslider_selector, bitboard_x8),
+                const_nonslider_split,
+            );
+
+            let full_board = self.occupancy;
+
+            let friendly_board = _mm512_reduce_or_epi64(bitboard_x8) as u64;
+            let opponent_board = self.board.bitboards
+                [opponent_move_offset..opponent_move_offset + 8]
+                .iter()
+                .fold(0, |acc, &bb| acc | bb);
+
+            let opponent_ep_x8 = _mm512_set1_epi64((1u64 << self.en_passant >> 1 << 1) as i64);
+
+            let const_63_x8 = _mm512_set1_epi64(63);
+            let const_1_x8 = _mm512_set1_epi64(1);
+            let const_n1_x8 = _mm512_set1_epi64(-1);
+            let const_zero_x8 = _mm512_setzero_si512();
+
+            // Flags
+            let const_promotion_flag_x8 = _mm512_set1_epi64(MV_FLAGS_PR_QUEEN as u64 as i64);
+            let const_epcap_flag_x8 = _mm512_set1_epi64(MV_FLAG_EPCAP as u64 as i64);
+            let const_cap_flag_x8 = _mm512_set1_epi64(MV_FLAG_CAP as u64 as i64);
+            let const_dpp_flag_x8 = _mm512_set1_epi64(MV_FLAG_DPP as u64 as i64);
+
+            let b_move_rank_offset = (56 * (self.b_move as u64)) as u8;
+
+            let full_board_x8 = _mm512_set1_epi64(full_board as i64);
+            let full_board_inv_x8 = _mm512_set1_epi64(!full_board as i64);
+            let friendly_board_inv_x8 = _mm512_set1_epi64(!friendly_board as i64);
+            let opponent_board_x8 = _mm512_set1_epi64(opponent_board as i64);
+            let pawn_promotion_rank_x8 =
+                _mm512_set1_epi64((0xFF00000000000000u64 >> b_move_rank_offset) as i64);
+            let pawn_double_push_rank_x8 =
+                _mm512_set1_epi64((0xFF000000u64 << ((self.b_move as usize) << 3)) as i64);
+
+            let pawn_push_offset_ranks =
+                (opponent_move_offset as u64 + b_move_rank_offset as u64) as i64;
+            let pawn_push_rank_rolv_offset_x8 = _mm512_set1_epi64(pawn_push_offset_ranks); // white=8, black=56
+
+            let mut one_of_each_slider_index_x8 =
+                _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
+            let mut one_of_each_non_slider_index_x8 =
+                _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
+            let mut active_pieces_non_slider_mask =
+                _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
+            let mut active_pieces_slider_mask =
+                _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
+
+            macro_rules! push_moves {
+                ($mask:expr, $moves_epi64_x8:ident) => {{
+                    let mask = $mask;
+                    match std::mem::size_of::<MoveType>() {
+                        2 => {
+                            let moves_epi16_x8 = _mm512_cvtepi64_epi16($moves_epi64_x8);
+                            _mm_mask_compressstoreu_epi16(
+                                move_list.as_mut_ptr().add(mv_cursor) as *mut i16,
+                                mask,
+                                moves_epi16_x8,
+                            );
+                        }
+                        4 => {
+                            let moves_epi32_x8 = _mm512_cvtepi64_epi32($moves_epi64_x8);
+                            _mm256_mask_compressstoreu_epi32(
+                                move_list.as_mut_ptr().add(mv_cursor) as *mut i32,
+                                mask,
+                                moves_epi32_x8,
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
+                    mv_cursor += mask.count_ones() as usize;
+                }};
+            }
+
+            let mut has_promotions = 0;
+
+            loop {
+                let pawn_mask = PAWN_LANES & active_pieces_non_slider_mask;
+
+                let one_of_each_non_slider_sq_mask_x8 =
+                    _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8);
+
+                let mut slider_moves_x8 = Self::calc_slider_moves_avx512_x8(
+                    full_board_x8,
+                    one_of_each_slider_index_x8,
+                    ROOK_LANES & active_pieces_slider_mask,
+                    BISHOP_LANES & active_pieces_slider_mask,
+                );
+
+                let mut non_slider_moves_x8 = Self::calc_non_slider_moves_avx512_x8(
+                    self.b_move,
+                    one_of_each_non_slider_sq_mask_x8,
+                    KNIGHT_LANES,
+                    KING_LANES,
+                    PAWN_LANES,
+                    active_pieces_non_slider_mask,
+                );
+
+                if CAPTURE_ONLY {
+                    // Mask out moves that don't capture opponent pieces
+                    slider_moves_x8 = _mm512_and_si512(slider_moves_x8, opponent_board_x8);
+                    non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, opponent_board_x8);
+                } else {
+                    slider_moves_x8 = _mm512_and_si512(slider_moves_x8, friendly_board_inv_x8);
+                    non_slider_moves_x8 =
+                        _mm512_and_si512(non_slider_moves_x8, friendly_board_inv_x8);
+                }
+
+                // Pawn push moves
+                if !CAPTURE_ONLY {
+                    let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
+                        pawn_mask,
+                        _mm512_rolv_epi64(
+                            one_of_each_non_slider_sq_mask_x8,
+                            pawn_push_rank_rolv_offset_x8,
+                        ),
+                        full_board_inv_x8,
+                    );
+                    let promotion_mask =
+                        _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
+                    has_promotions |= promotion_mask;
+
+                    let pawn_push_double_bit_x8 = _mm512_and_epi64(
+                        _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
+                        _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
+                    );
+                    let pawn_push_single_dst_sq_x8 = _mm512_slli_epi64(
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_single_bit_x8)),
+                        6,
+                    );
+                    let pawn_push_double_dst_sq_x8 = _mm512_slli_epi64(
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_double_bit_x8)),
+                        6,
+                    );
+                    let pawn_push_single_mask = pawn_mask
+                        & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
+                    let pawn_push_double_mask = pawn_mask
+                        & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
+
+                    let mut pawn_push_single_move_x8 = _mm512_or_epi64(
+                        pawn_push_single_dst_sq_x8,
+                        one_of_each_non_slider_index_x8,
+                    );
+
+                    pawn_push_single_move_x8 = _mm512_mask_or_epi64(
+                        pawn_push_single_move_x8,
+                        promotion_mask,
+                        pawn_push_single_move_x8,
+                        const_promotion_flag_x8,
+                    );
+
+                    let pawn_push_double_move_x8 = _mm512_or_epi64(
+                        pawn_push_double_dst_sq_x8,
+                        _mm512_or_epi64(one_of_each_non_slider_index_x8, const_dpp_flag_x8),
+                    );
+
+                    push_moves!(pawn_push_single_mask, pawn_push_single_move_x8);
+                    push_moves!(pawn_push_double_mask, pawn_push_double_move_x8);
+                }
+
+                let mut non_slider_dst_sq_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_slider_moves_x8));
+                let mut slider_dst_sq_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(slider_moves_x8));
+                loop {
+                    // Dst square bits for masking
+                    let non_slider_dst_sq_bit_x8 =
+                        _mm512_sllv_epi64(const_1_x8, non_slider_dst_sq_x8);
+
+                    let mut non_slider_full_move_x8 = _mm512_or_epi64(
+                        _mm512_slli_epi64(non_slider_dst_sq_x8, 6),
+                        one_of_each_non_slider_index_x8,
+                    );
+
+                    // Promotion flag for pawn moves on the last rank
+                    let promotion_mask = pawn_mask
+                        & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, pawn_promotion_rank_x8);
+                    has_promotions |= promotion_mask;
+
+                    // EP flag for en passant captures
+                    let ep_mask = pawn_mask
+                        & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_ep_x8);
+
+                    // Capture flag
+                    let cap_mask =
+                        _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, opponent_board_x8);
+
+                    non_slider_full_move_x8 = _mm512_mask_or_epi64(
+                        non_slider_full_move_x8,
+                        promotion_mask,
+                        non_slider_full_move_x8,
+                        const_promotion_flag_x8,
+                    );
+                    non_slider_full_move_x8 = _mm512_mask_or_epi64(
+                        non_slider_full_move_x8,
+                        ep_mask,
+                        non_slider_full_move_x8,
+                        const_epcap_flag_x8,
+                    );
+                    non_slider_full_move_x8 = _mm512_mask_or_epi64(
+                        non_slider_full_move_x8,
+                        cap_mask,
+                        non_slider_full_move_x8,
+                        const_cap_flag_x8,
+                    );
+
+                    let quiet_mask = !pawn_mask
+                        & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, full_board_inv_x8);
+                    let cap_or_ep_mask = cap_mask | ep_mask;
+
+                    push_moves!(cap_or_ep_mask | quiet_mask, non_slider_full_move_x8);
+
+                    let slider_dst_sq_bit_x8 = _mm512_sllv_epi64(const_1_x8, slider_dst_sq_x8);
+
+                    let s_all_mask = _mm512_cmpneq_epi64_mask(slider_dst_sq_x8, const_n1_x8);
+
+                    let s_cap_mask =
+                        _mm512_test_epi64_mask(slider_dst_sq_bit_x8, opponent_board_x8);
+
+                    let slider_full_move_x8 = _mm512_or_epi64(
+                        _mm512_slli_epi64(slider_dst_sq_x8, 6),
+                        _mm512_mask_or_epi64(
+                            one_of_each_slider_index_x8,
+                            s_cap_mask,
+                            one_of_each_slider_index_x8,
+                            const_cap_flag_x8,
+                        ),
+                    );
+
+                    push_moves!(s_all_mask, slider_full_move_x8);
+
+                    non_slider_moves_x8 =
+                        _mm512_xor_epi64(non_slider_moves_x8, non_slider_dst_sq_bit_x8);
+                    slider_moves_x8 = _mm512_xor_epi64(slider_moves_x8, slider_dst_sq_bit_x8);
+
+                    non_slider_dst_sq_x8 =
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_slider_moves_x8));
+                    slider_dst_sq_x8 =
+                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(slider_moves_x8));
+
+                    let non_slider_dst_sq_mask =
+                        _mm512_cmpneq_epi64_mask(non_slider_dst_sq_x8, const_n1_x8);
+
+                    let slider_dst_sq_mask =
+                        _mm512_cmpneq_epi64_mask(slider_dst_sq_x8, const_n1_x8);
+
+                    if (non_slider_dst_sq_mask | slider_dst_sq_mask) == 0 {
+                        // No more moves left
+                        break;
+                    }
+                }
+
+                // Pop pieces
+                non_sliders_x8 = _mm512_xor_epi64(
+                    non_sliders_x8,
+                    _mm512_sllv_epi64(const_1_x8, one_of_each_non_slider_index_x8),
+                );
+                sliders_x8 = _mm512_xor_epi64(
+                    sliders_x8,
+                    _mm512_sllv_epi64(const_1_x8, one_of_each_slider_index_x8),
+                );
+
+                one_of_each_slider_index_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(sliders_x8));
+                one_of_each_non_slider_index_x8 =
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(non_sliders_x8));
+                active_pieces_non_slider_mask =
+                    _mm512_cmpneq_epi64_mask(one_of_each_non_slider_index_x8, const_n1_x8);
+                active_pieces_slider_mask =
+                    _mm512_cmpneq_epi64_mask(one_of_each_slider_index_x8, const_n1_x8);
+
+                if (active_pieces_non_slider_mask | active_pieces_slider_mask) == 0 {
+                    break;
+                }
+            }
+
+            if std::hint::unlikely(has_promotions != 0) {
+                let original_count = mv_cursor;
+                for i in 0..original_count {
+                    let mv: u16 = move_list[i].into();
+
+                    if std::hint::likely((mv & MV_FLAGS_PR_MASK) != MV_FLAGS_PR_QUEEN) {
+                        continue;
+                    }
+
+                    let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+
+                    let mv_k = mv_unpromoted | MV_FLAGS_PR_KNIGHT;
+                    let mv_b = mv_unpromoted | MV_FLAGS_PR_BISHOP;
+                    let mv_r = mv_unpromoted | MV_FLAGS_PR_ROOK;
+
+                    macro_rules! add_move {
+                        ($move:expr) => {
+                            *move_list.get_unchecked_mut(mv_cursor) = ($move).into();
+                            mv_cursor += 1;
+                        };
+                    }
+
+                    add_move!(mv_k);
+
+                    if !CAPTURE_ONLY {
+                        // Quiescence search can't encounter new captures after queen or knight promotions
+                        add_move!(mv_b);
+                        add_move!(mv_r);
+                    }
+                }
+            }
+
+            // Castling moves
+            if !CAPTURE_ONLY {
+                let king_bitboard =
+                    self.board.bitboards[PieceIndex::WhiteKing as usize + friendly_move_offset];
+                let king_square = king_bitboard.trailing_zeros() as u16;
+
+                let can_castle_kingside = self.is_kingside_castle_allowed(self.b_move) as usize;
+                let can_castle_kingside_mask = 0u16.wrapping_sub(can_castle_kingside as u16);
+
+                let can_castle_queenside = self.is_queenside_castle_allowed(self.b_move) as usize;
+                let can_castle_queenside_mask = 0u16.wrapping_sub(can_castle_queenside as u16);
+
+                *move_list.get_unchecked_mut(mv_cursor as usize) = MoveType::from(
+                    (((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING)
+                        & can_castle_kingside_mask,
+                );
+                mv_cursor += can_castle_kingside;
+
+                *move_list.get_unchecked_mut(mv_cursor as usize) = MoveType::from(
+                    (((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN)
+                        & can_castle_queenside_mask,
+                );
+                mv_cursor += can_castle_queenside;
+            }
+
+            // Move count should never overflow 256
+            std::hint::assert_unchecked(mv_cursor < 256);
+
+            mv_cursor
         }
     }
 }
