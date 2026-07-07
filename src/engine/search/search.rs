@@ -25,7 +25,8 @@ const EVAL_CACHE: bool = false;
 
 const FLAG_NMP_MATE_CLAMP: bool = false;
 
-pub const FLAG_MALUS_ALLMOVES: bool = false;
+pub const FLAG_SEE_PIN_MULTI: bool = false;
+pub const FLAG_SEE_PIN_STRICT: bool = false;
 
 macro_rules! net_path {
     () => {
@@ -58,30 +59,12 @@ pub const PV_DEPTH: usize = 64;
 pub const HISTORY_MAX: i16 = SCORE_INF; // i16::MAX - 0_017;
 pub const HISTORY_MIN: i16 = -SCORE_INF; // i16::MIN + 0_017;
 
-const FLAG_NO_PV_TRACE: bool = true;
-const FLAG_NO_PV_TRACE_SE_GATE: bool = false;
-pub const FLAG_STAB_NODE_GATE: bool = false;
-
-const FLAG_BISECT_NMP_NONPV: bool = false; // restore NMP protection on full-window nodes
-const FLAG_BISECT_TTCUT_NONPV: bool = true; // same for TT score cutoffs
-
-const _: () = assert!(!FLAG_BISECT_NMP_NONPV || FLAG_NO_PV_TRACE);
-const _: () = assert!(!FLAG_BISECT_TTCUT_NONPV || FLAG_NO_PV_TRACE);
-const _: () = assert!(!FLAG_NO_PV_TRACE_SE_GATE || FLAG_NO_PV_TRACE);
-
 const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
 const SEE_CAPTURE_MARGIN: Eval = 100;
 const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 8;
 const SEE_QUIET_MARGIN: Eval = 12;
 const SEE_HISTORY_DIVISOR: Eval = 128;
 const SEE_QS_THRESHOLD: Eval = -20;
-
-pub struct SeeInfo {
-    pub black_board: u64,
-    pub white_board: u64,
-    pub pieces_board: [u64; 8],
-    pub pins: [see::Pinning; 2],
-}
 
 #[derive(Debug)]
 pub struct PvTable {
@@ -218,7 +201,7 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 self.root_best_nodes = 0;
                 let nodes_before = self.node_count;
 
-                let score = self.go(alpha, beta, depth, true);
+                let score = self.go(alpha, beta, depth);
 
                 if self.is_stopping {
                     break 'outer;
@@ -441,9 +424,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             return;
         }
 
+        let mut pv_moves: Vec<u16> = self.pv[0..self.pv_length as usize].to_vec();
+
+        self.extend_pv_from_tt(&mut pv_moves);
+
         let ms = search_start.elapsed().as_millis() as u64;
         let nps = self.node_count * 1000 / ms.max(1);
-        let pv = self.pv[0..self.pv_length as usize]
+        let pv = pv_moves
             .iter()
             .map(|mv| util::move_string(*mv))
             .collect::<Vec<_>>()
@@ -512,7 +499,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.info_print_enabled = on;
     }
 
-    fn go(&mut self, alpha: Eval, beta: Eval, depth: u8, on_pv: bool) -> Eval {
+    fn go(&mut self, alpha: Eval, beta: Eval, depth: u8) -> Eval {
         let ply = self.ply as usize & (PV_DEPTH - 1);
 
         self.node_count += 1;
@@ -529,13 +516,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut beta = beta;
         let mut depth = depth;
 
-        let pv_move = if !FLAG_NO_PV_TRACE && on_pv && (ply as u8) < self.pv_length {
-            self.pv[ply]
-        } else {
-            0
-        };
-
-        let prune_node = ply > 0 && pv_move == 0;
+        let prune_node = ply > 0;
         let non_pv_node = alpha == beta - 1;
 
         if ply > 0 {
@@ -554,7 +535,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
         depth += in_check as u8;
 
-        let tt_probe = if self.excluded_move == 0 {
+        let excluded_move = std::mem::take(&mut self.excluded_move);
+
+        let tt_probe = if excluded_move == 0 {
             self.tt_mut()
                 .probe(self.chess.zobrist_key(), depth, alpha, beta)
         } else {
@@ -567,12 +550,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut tt_bound = BoundType::UpperBound;
 
         if let Some(ref probe) = tt_probe {
-            let tt_cut = if FLAG_BISECT_TTCUT_NONPV {
-                non_pv_node
-            } else {
-                prune_node
-            };
-            if tt_cut {
+            if prune_node {
                 if let Some(score) = probe.score {
                     return Self::score_from_tt(score, self.ply);
                 }
@@ -614,38 +592,25 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             false
         };
 
-        let flag_enable_rfp = match F {
-            EngineForm::TacticalA => false,
-            EngineForm::TacticalB => true,
-            _ => true,
-        };
-
-        if flag_enable_rfp
-            && non_pv_node
-            && prune_node
-            && !in_check
-            && !is_mate(alpha)
-            && !is_mate(beta)
-            && depth < 8
-        {
-            let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
-
-            if corrected_eval - eval_margin >= beta {
-                return corrected_eval - eval_margin;
-            }
-        }
-
-        let nmp_gate = if FLAG_BISECT_NMP_NONPV {
-            non_pv_node
-        } else {
-            prune_node
-        };
-        if !in_check && nmp_gate {
+        if !in_check && prune_node {
+            let flag_enable_rfp = match F {
+                EngineForm::TacticalA => false,
+                EngineForm::TacticalB => true,
+                _ => true,
+            };
             let flag_enable_nmp = match F {
                 EngineForm::TacticalA => true,
                 EngineForm::TacticalB => true,
                 _ => true,
             };
+
+            if flag_enable_rfp && non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
+                let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
+
+                if corrected_eval - eval_margin >= beta {
+                    return corrected_eval - eval_margin;
+                }
+            }
 
             if flag_enable_nmp
                 && depth >= 3
@@ -656,7 +621,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 let r = 2 + depth / 3;
 
                 self.ply += 1;
-                let score = -self.go(-beta, -beta + 1, depth - r, false);
+                let score = -self.go(-beta, -beta + 1, depth - r);
                 self.ply -= 1;
 
                 self.chess.rollback_null_move(ep_square, self.tables);
@@ -705,12 +670,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         };
 
         let move_buffer = unsafe {
-            &mut *self.movegen_stack[self.get_move_buffer_index::<false>(self.excluded_move)].get()
+            &mut *self.movegen_stack[self.get_move_buffer_index::<false>(excluded_move)].get()
         };
 
         let mut moves = Movegen::new(
             &self.chess,
-            pv_move,
             tt_move_index,
             self.cut_moves[ply],
             depth,
@@ -723,14 +687,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             _ => true,
         };
 
-        let se_gate = if FLAG_NO_PV_TRACE_SE_GATE {
-            ply > 0 && non_pv_node
-        } else {
-            prune_node
-        };
-
         let singular_move = if flag_enable_se
-            && se_gate
+            && prune_node
             && depth >= 8
             && tt_move_index != 0xFF
             && tt_depth >= depth.saturating_sub(3)
@@ -761,30 +719,22 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             &self.history_moves,
             move_buffer,
         ) {
-            if FLAG_MALUS_ALLMOVES && (mv & MV_FLAG_CAP) == 0 {
-                unsafe {
-                    debug_assert!(tried_quiet_count < 218); // Max 218 quiets in a legal position
-                    (tried_quiet_moves.as_mut_ptr() as *mut u16)
-                        .add(tried_quiet_count)
-                        .write(mv);
-                }
-                tried_quiet_count += 1;
-            }
-
-            if mv == self.excluded_move {
+            if mv == excluded_move {
                 continue;
             }
 
             let mut extension: u8 = 0;
             if mv == singular_move {
-                let saved_excluded = self.excluded_move;
+                let saved_excluded = excluded_move;
                 let saved_cut_moves = self.cut_moves[ply];
+
+                debug_assert!(saved_excluded == 0);
 
                 self.excluded_move = mv;
 
                 self.rt.pop_position();
                 let singular_beta = tt_score - 3 * depth as Eval;
-                let s_score = self.go(singular_beta - 1, singular_beta, depth / 2, false);
+                let s_score = self.go(singular_beta - 1, singular_beta, depth / 2);
 
                 self.excluded_move = saved_excluded;
                 self.cut_moves[ply] = saved_cut_moves;
@@ -914,7 +864,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             let is_non_capture = (mv & MV_FLAG_CAP) == 0;
 
-            if is_non_capture && !FLAG_MALUS_ALLMOVES {
+            if is_non_capture {
                 unsafe {
                     debug_assert!(tried_quiet_count < 218); // Max 218 quiets in a legal position
                     (tried_quiet_moves.as_mut_ptr() as *mut u16)
@@ -927,7 +877,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             let new_depth = depth - 1 + extension;
 
             let score = if num_legal_moves == 0 {
-                -self.go(-beta, -alpha, new_depth, on_pv && mv == pv_move)
+                -self.go(-beta, -alpha, new_depth)
             } else if late_move_reduction {
                 let r = {
                     let base_r =
@@ -962,13 +912,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     r.clamp(1, new_depth as i16) as u8
                 };
 
-                let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r, false);
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r);
                 if proof_score > alpha {
                     // The move might be good, search it again with full depth
-                    let proof_score = -self.go(-alpha - 1, -alpha, new_depth, false);
+                    let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
 
                     if proof_score > alpha && proof_score < beta {
-                        -self.go(-beta, -alpha, new_depth, false)
+                        -self.go(-beta, -alpha, new_depth)
                     } else {
                         proof_score
                     }
@@ -977,10 +927,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
             } else {
                 // Null search with fallback to full search
-                let proof_score = -self.go(-alpha - 1, -alpha, new_depth, false);
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
 
                 if proof_score > alpha && proof_score < beta {
-                    -self.go(-beta, -alpha, new_depth, false)
+                    -self.go(-beta, -alpha, new_depth)
                 } else {
                     proof_score
                 }
@@ -1041,7 +991,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
 
             if score >= beta {
-                if is_non_capture && self.excluded_move == 0 {
+                if is_non_capture && excluded_move == 0 {
                     let src_piece = self.chess.spt()[(mv & 0x3F) as usize] as usize;
                     let dst_square = ((mv >> 6) & 0x3F) as usize;
 
@@ -1113,13 +1063,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     }
                 }
 
-                if self.excluded_move == 0 && !in_check && best_move & MV_FLAG_CAP == 0 {
+                if excluded_move == 0 && !in_check && best_move & MV_FLAG_CAP == 0 {
                     if score >= static_eval {
                         self.update_correction_heuristics(score, static_eval, depth as Eval);
                     }
                 }
 
-                if self.excluded_move == 0 {
+                if excluded_move == 0 {
                     let store_score = Self::score_to_tt(score, self.ply);
                     self.tt_mut().store(
                         self.chess.zobrist_key(),
@@ -1135,7 +1085,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
         self.rt.pop_position();
 
-        if self.excluded_move == 0 && !in_check && best_move & MV_FLAG_CAP == 0 {
+        if excluded_move == 0 && !in_check && best_move & MV_FLAG_CAP == 0 {
             let update_score = match bound_type {
                 BoundType::UpperBound if best_move == 0 => Some(0),
                 BoundType::UpperBound if best_score <= static_eval => Some(best_score),
@@ -1157,7 +1107,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             return 0;
         }
 
-        if self.excluded_move == 0 {
+        if excluded_move == 0 {
             let store_score = Self::score_to_tt(best_score, self.ply);
             self.tt_mut().store(
                 self.chess.zobrist_key(),
@@ -1316,7 +1266,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let move_buffer =
             unsafe { &mut *self.movegen_stack[self.get_move_buffer_index::<true>(0)].get() };
 
-        let mut moves = Movegen::new(&self.chess, 0, 0xFF, [0; 2], 0, move_buffer);
+        let mut moves = Movegen::new(&self.chess, 0xFF, [0; 2], 0, move_buffer);
 
         let mut best_score = -SCORE_INF;
         let mut num_legal_moves = 0;
@@ -1868,6 +1818,69 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
 
         return (legal_move, legal_move);
+    }
+
+    fn extend_pv_from_tt(&self, out: &mut Vec<u16>) {
+        let mut board = self.chess.clone();
+        let mut rt = self.rt.clone();
+
+        let mut board_keys = [0u64; PV_DEPTH];
+        let mut board_keys_cursor = 0usize;
+
+        for &mv in out.iter() {
+            if !unsafe { board.make_move(mv, self.tables) }
+                || board.in_check(self.tables, !board.b_move())
+            {
+                return;
+            }
+
+            rt.push_position(board.zobrist_key(), board.half_moves() == 0);
+
+            board_keys[board_keys_cursor] = board.zobrist_key();
+            board_keys_cursor += 1;
+        }
+
+        if board.half_moves() >= 100 || rt.is_repeated(board.zobrist_key()) {
+            return;
+        }
+
+        while out.len() < PV_DEPTH {
+            let mv_index = match self
+                .tt_mut()
+                .probe(board.zobrist_key(), 0, -SCORE_INF, SCORE_INF)
+            {
+                Some(p) if p.mv_index != 0xFF => p.mv_index,
+                _ => break,
+            };
+
+            let mv = match Self::move_from_tt_index(&mut board, mv_index) {
+                Some(mv) => mv,
+                None => break,
+            };
+
+            if !unsafe { board.make_move(mv, self.tables) }
+                || board.in_check(self.tables, !board.b_move())
+                || board_keys[..board_keys_cursor].contains(&board.zobrist_key())
+            {
+                break;
+            }
+
+            if board.half_moves() >= 100 || rt.is_repeated(board.zobrist_key()) {
+                break;
+            }
+
+            rt.push_position(board.zobrist_key(), board.half_moves() == 0);
+
+            board_keys[board_keys_cursor] = board.zobrist_key();
+            board_keys_cursor += 1;
+            out.push(mv);
+        }
+    }
+
+    fn move_from_tt_index(board: &mut ChessGame, tt_index: u8) -> Option<u16> {
+        let mut move_list = [0u16; 256];
+        let move_count = board.gen_moves_avx512::<false, _>(&mut move_list);
+        ((tt_index as usize) < move_count).then(|| move_list[tt_index as usize])
     }
 }
 

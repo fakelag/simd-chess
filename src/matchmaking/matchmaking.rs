@@ -169,17 +169,6 @@ impl Matchmaking {
 
             if move_ok && !board_copy.in_check(&self.tables, !board_copy.b_move()) {
                 self.legal_moves.push(mv);
-
-                if (mv & chess_v2::MV_FLAGS_PR_MASK) == chess_v2::MV_FLAGS_PR_QUEEN {
-                    // Add underpromotions as legal moves too
-                    let mv_unpromoted = mv & !chess_v2::MV_FLAGS_PR_MASK;
-                    self.legal_moves
-                        .push(mv_unpromoted | chess_v2::MV_FLAGS_PR_ROOK);
-                    self.legal_moves
-                        .push(mv_unpromoted | chess_v2::MV_FLAGS_PR_BISHOP);
-                    self.legal_moves
-                        .push(mv_unpromoted | chess_v2::MV_FLAGS_PR_KNIGHT);
-                }
             }
         }
     }

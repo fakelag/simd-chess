@@ -433,6 +433,19 @@ pub fn print_m512_epi64(a: &__m512i) {
     println!("{:x?}", arr);
 }
 
+pub fn print_m512_epi32_moves(a: &__m512i) {
+    let mut arr: [u32; 16] = [0u32; 16];
+    unsafe {
+        _mm512_storeu_si512(arr.as_mut_ptr() as *mut __m512i, *a);
+    }
+    println!(
+        "{:?}",
+        arr.iter()
+            .map(|&m| move_string_dbg(m as u16))
+            .collect::<Vec<_>>()
+    );
+}
+
 pub fn print_m512_epi8(a: &__m512i) {
     let mut arr = [0u8; 64];
     unsafe {
