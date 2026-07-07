@@ -58,6 +58,17 @@ pub const PV_DEPTH: usize = 64;
 pub const HISTORY_MAX: i16 = SCORE_INF; // i16::MAX - 0_017;
 pub const HISTORY_MIN: i16 = -SCORE_INF; // i16::MIN + 0_017;
 
+const FLAG_NO_PV_TRACE: bool = true;
+const FLAG_NO_PV_TRACE_SE_GATE: bool = false;
+pub const FLAG_STAB_NODE_GATE: bool = false;
+
+const FLAG_BISECT_NMP_NONPV: bool = false; // restore NMP protection on full-window nodes
+const FLAG_BISECT_TTCUT_NONPV: bool = true; // same for TT score cutoffs
+
+const _: () = assert!(!FLAG_BISECT_NMP_NONPV || FLAG_NO_PV_TRACE);
+const _: () = assert!(!FLAG_BISECT_TTCUT_NONPV || FLAG_NO_PV_TRACE);
+const _: () = assert!(!FLAG_NO_PV_TRACE_SE_GATE || FLAG_NO_PV_TRACE);
+
 const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
 const SEE_CAPTURE_MARGIN: Eval = 100;
 const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 8;
@@ -115,7 +126,6 @@ pub struct Search<'a, const F: EngineForm> {
     pv_table: Box<PvTable>,
     pv: [u16; PV_DEPTH],
     pv_length: u8,
-    pv_trace: bool,
 
     tt: &'a SyncUnsafeCell<TranspositionTable>,
     rt: RepetitionTable,
@@ -208,7 +218,7 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 self.root_best_nodes = 0;
                 let nodes_before = self.node_count;
 
-                let score = self.go(alpha, beta, depth);
+                let score = self.go(alpha, beta, depth, true);
 
                 if self.is_stopping {
                     break 'outer;
@@ -305,7 +315,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             depth: 0,
             pv: [0; PV_DEPTH],
             pv_length: 0,
-            pv_trace: false,
             history_moves: Box::new([[0; 64]; 16]),
             cut_moves: [[0; 2]; PV_DEPTH],
             move_stack: [(0, 0); PV_DEPTH],
@@ -358,7 +367,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     #[inline(always)]
     pub fn new_search(&mut self) {
         self.pv_length = 0;
-        self.pv_trace = false;
         self.is_stopping = false;
         self.node_count = 0;
         self.root_best_nodes = 0;
@@ -504,7 +512,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.info_print_enabled = on;
     }
 
-    fn go(&mut self, alpha: Eval, beta: Eval, depth: u8) -> Eval {
+    fn go(&mut self, alpha: Eval, beta: Eval, depth: u8, on_pv: bool) -> Eval {
         let ply = self.ply as usize & (PV_DEPTH - 1);
 
         self.node_count += 1;
@@ -521,8 +529,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut beta = beta;
         let mut depth = depth;
 
-        let pv_move = if self.pv_trace {
-            self.pv_trace = (self.pv_length as usize) > (ply + 1);
+        let pv_move = if !FLAG_NO_PV_TRACE && on_pv && (ply as u8) < self.pv_length {
             self.pv[ply]
         } else {
             0
@@ -560,7 +567,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut tt_bound = BoundType::UpperBound;
 
         if let Some(ref probe) = tt_probe {
-            if prune_node {
+            let tt_cut = if FLAG_BISECT_TTCUT_NONPV {
+                non_pv_node
+            } else {
+                prune_node
+            };
+            if tt_cut {
                 if let Some(score) = probe.score {
                     return Self::score_from_tt(score, self.ply);
                 }
@@ -602,20 +614,33 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             false
         };
 
-        if prune_node && !in_check {
-            let flag_enable_rfp = match F {
-                EngineForm::TacticalA => false,
-                EngineForm::TacticalB => true,
-                _ => true,
-            };
-            if flag_enable_rfp && non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
-                let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
+        let flag_enable_rfp = match F {
+            EngineForm::TacticalA => false,
+            EngineForm::TacticalB => true,
+            _ => true,
+        };
 
-                if corrected_eval - eval_margin >= beta {
-                    return corrected_eval - eval_margin;
-                }
+        if flag_enable_rfp
+            && non_pv_node
+            && prune_node
+            && !in_check
+            && !is_mate(alpha)
+            && !is_mate(beta)
+            && depth < 8
+        {
+            let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
+
+            if corrected_eval - eval_margin >= beta {
+                return corrected_eval - eval_margin;
             }
+        }
 
+        let nmp_gate = if FLAG_BISECT_NMP_NONPV {
+            non_pv_node
+        } else {
+            prune_node
+        };
+        if !in_check && nmp_gate {
             let flag_enable_nmp = match F {
                 EngineForm::TacticalA => true,
                 EngineForm::TacticalB => true,
@@ -631,7 +656,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 let r = 2 + depth / 3;
 
                 self.ply += 1;
-                let score = -self.go(-beta, -beta + 1, depth - r);
+                let score = -self.go(-beta, -beta + 1, depth - r, false);
                 self.ply -= 1;
 
                 self.chess.rollback_null_move(ep_square, self.tables);
@@ -697,8 +722,15 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             EngineForm::TacticalB => true,
             _ => true,
         };
+
+        let se_gate = if FLAG_NO_PV_TRACE_SE_GATE {
+            ply > 0 && non_pv_node
+        } else {
+            prune_node
+        };
+
         let singular_move = if flag_enable_se
-            && prune_node
+            && se_gate
             && depth >= 8
             && tt_move_index != 0xFF
             && tt_depth >= depth.saturating_sub(3)
@@ -752,7 +784,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
                 self.rt.pop_position();
                 let singular_beta = tt_score - 3 * depth as Eval;
-                let s_score = self.go(singular_beta - 1, singular_beta, depth / 2);
+                let s_score = self.go(singular_beta - 1, singular_beta, depth / 2, false);
 
                 self.excluded_move = saved_excluded;
                 self.cut_moves[ply] = saved_cut_moves;
@@ -895,7 +927,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             let new_depth = depth - 1 + extension;
 
             let score = if num_legal_moves == 0 {
-                -self.go(-beta, -alpha, new_depth)
+                -self.go(-beta, -alpha, new_depth, on_pv && mv == pv_move)
             } else if late_move_reduction {
                 let r = {
                     let base_r =
@@ -930,13 +962,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     r.clamp(1, new_depth as i16) as u8
                 };
 
-                let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r);
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r, false);
                 if proof_score > alpha {
                     // The move might be good, search it again with full depth
-                    let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
+                    let proof_score = -self.go(-alpha - 1, -alpha, new_depth, false);
 
                     if proof_score > alpha && proof_score < beta {
-                        -self.go(-beta, -alpha, new_depth)
+                        -self.go(-beta, -alpha, new_depth, false)
                     } else {
                         proof_score
                     }
@@ -945,10 +977,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
             } else {
                 // Null search with fallback to full search
-                let proof_score = -self.go(-alpha - 1, -alpha, new_depth);
+                let proof_score = -self.go(-alpha - 1, -alpha, new_depth, false);
 
                 if proof_score > alpha && proof_score < beta {
-                    -self.go(-beta, -alpha, new_depth)
+                    -self.go(-beta, -alpha, new_depth, false)
                 } else {
                     proof_score
                 }
@@ -1374,7 +1406,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.pv_length = self.pv_table.lengths[0];
         let len = self.pv_length as usize;
         self.pv[0..len].copy_from_slice(&self.pv_table.moves[0][0..len]);
-        self.pv_trace = self.pv_length > 0;
         self.depth = depth;
         self.score = score;
     }
