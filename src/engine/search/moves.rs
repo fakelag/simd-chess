@@ -668,22 +668,26 @@ pub struct See {
     pub pins: [see::Pinning; 2],
 }
 
+#[repr(align(64))]
+pub struct MoveBuffer {
+    move_list: [u16; 256],
+    move_list_quiets: [u32; 256],
+    move_list_caps: [u32; 128], // Max number of captures is 74
+    pub see_info: Option<See>,
+}
+
+#[repr(align(64))]
 pub struct Movegen {
     phase: MovegenPhase,
     tt_move: u16,
     pv_move: u16,
     cut_moves: [u16; 2],
-    move_list: MaybeUninit<[u16; 256]>,
 
-    see_info: Option<See>,
+    quiet_index: u8,
+    quiet_count: u8,
 
-    move_list_quiets: MaybeUninit<[u32; 256]>,
-    quiet_index: usize,
-    quiet_count: usize,
-
-    move_list_caps: MaybeUninit<[u32; 128]>, // Max number of captures is 74
-    cap_index: usize,
-    cap_count: usize,
+    cap_index: u8,
+    cap_count: u8,
 
     cut_0: Option<NonZero<u16>>,
     cut_1: Option<NonZero<u16>>,
@@ -725,6 +729,7 @@ impl Movegen {
         tt_index: u8,
         cut_moves: [u16; 2],
         depth: u8,
+        buffer: &mut MoveBuffer,
     ) -> Self {
         let skip_pv = (pv_move == 0) as u8;
 
@@ -733,28 +738,28 @@ impl Movegen {
             tt_move: 0,
             pv_move,
             cut_moves,
-            move_list_quiets: MaybeUninit::uninit(),
             quiet_count: 0,
             quiet_index: 0,
-            move_list_caps: MaybeUninit::uninit(),
             cap_count: 0,
             cap_index: 0,
-            move_list: MaybeUninit::uninit(),
             cut_0: None,
             cut_1: None,
             move_count: 0,
-            see_info: None,
             depth,
         };
 
-        zero_fill_avx512::<8>(s.move_list.as_mut_ptr() as *mut u8);
+        buffer.see_info = None;
+
+        let move_list_ptr = buffer.move_list.as_mut_ptr();
+
+        zero_fill_avx512::<8>(move_list_ptr as *mut u8);
 
         s.move_count = chess.gen_moves_avx512_v2::<false, _>(unsafe {
-            std::slice::from_raw_parts_mut(s.move_list.as_mut_ptr() as *mut u16, 256)
+            std::slice::from_raw_parts_mut(move_list_ptr as *mut u16, 256)
         });
 
         if tt_index < s.move_count as u8 {
-            s.tt_move = unsafe { *(s.move_list.as_ptr() as *const u16).add(tt_index as usize) };
+            s.tt_move = unsafe { *(move_list_ptr as *const u16).add(tt_index as usize) };
         } else {
             s.phase = (s.phase as u8 + (s.phase == MovegenPhase::MoveTt) as u8).into();
         }
@@ -866,7 +871,7 @@ impl Movegen {
     }
 
     #[inline(always)]
-    fn calc_see_info(&mut self, board: &chess_v2::ChessGame) {
+    fn calc_see_info(&mut self, board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
         if self.depth <= 1 {
             return;
         }
@@ -886,7 +891,7 @@ impl Movegen {
             see::calc_pinnings(true, board, black_board, white_board),
         ];
 
-        self.see_info = Some(See {
+        out.see_info = Some(See {
             black_board,
             white_board,
             pieces_board,
@@ -901,6 +906,7 @@ impl Movegen {
         tables: &tables::Tables,
         cont_hist: &ContHistRef,
         history_moves: &[[i16; 64]; 16],
+        buffer: &mut MoveBuffer,
     ) -> Option<(u16, MovegenPhase)> {
         loop {
             let phase = self.phase;
@@ -909,8 +915,9 @@ impl Movegen {
                     let mut has_pv = 0u32;
 
                     for i in 0..=self.move_count / 32 {
-                        let moves_x32 =
-                            _mm512_loadu_epi16((self.move_list.as_ptr() as *const i16).add(i * 32));
+                        let moves_x32 = _mm512_loadu_epi16(
+                            (buffer.move_list.as_ptr() as *const i16).add(i * 32),
+                        );
 
                         has_pv |= _mm512_cmpeq_epi16_mask(
                             moves_x32,
@@ -936,14 +943,15 @@ impl Movegen {
                     let cut_0 = self.cut_moves[0] as i16;
                     let cut_1 = self.cut_moves[1] as i16;
 
-                    zero_fill_avx512::<8>(self.move_list_caps.as_mut_ptr() as *mut u8);
-                    zero_fill_avx512::<16>(self.move_list_quiets.as_mut_ptr() as *mut u8);
+                    zero_fill_avx512::<8>(buffer.move_list_caps.as_mut_ptr() as *mut u8);
+                    zero_fill_avx512::<16>(buffer.move_list_quiets.as_mut_ptr() as *mut u8);
 
-                    self.calc_see_info(board);
+                    self.calc_see_info(board, buffer);
 
                     for i in 0..=self.move_count / 32 {
-                        let moves_x32 =
-                            _mm512_loadu_epi16((self.move_list.as_ptr() as *const i16).add(i * 32));
+                        let moves_x32 = _mm512_loadu_epi16(
+                            (buffer.move_list.as_ptr() as *const i16).add(i * 32),
+                        );
 
                         let skip_mask = _mm512_cmpeq_epi16_mask(
                             moves_x32,
@@ -986,52 +994,51 @@ impl Movegen {
 
                         let c0_mask = (cap_emit_mask & 0xFFFF) as u16;
                         let c1_mask = (cap_emit_mask >> 16) as u16;
-                        let c_list_ptr = self.move_list_caps.as_mut_ptr() as *mut i32;
+                        let c_list_ptr = buffer.move_list_caps.as_mut_ptr() as *mut i32;
 
                         _mm512_mask_compressstoreu_epi32(
-                            c_list_ptr.add(self.cap_count),
+                            c_list_ptr.add(self.cap_count as usize),
                             c0_mask,
                             moves_x16_0,
                         );
                         _mm512_mask_compressstoreu_epi32(
-                            c_list_ptr.add(c0_mask.count_ones() as usize + self.cap_count),
+                            c_list_ptr.add(c0_mask.count_ones() as usize + self.cap_count as usize),
                             c1_mask,
                             moves_x16_1,
                         );
-                        self.cap_count += cap_emit_mask.count_ones() as usize;
+                        self.cap_count += cap_emit_mask.count_ones() as u8;
 
                         let quiet_emit_mask =
                             !cap_emit_mask & nonzero_mask & !cut_mask_0 & !cut_mask_1 & !skip_mask;
                         let q0_mask = (quiet_emit_mask & 0xFFFF) as u16;
                         let q1_mask = (quiet_emit_mask >> 16) as u16;
-                        let q_list_ptr = self.move_list_quiets.as_mut_ptr() as *mut i32;
+                        let q_list_ptr = buffer.move_list_quiets.as_mut_ptr() as *mut i32;
 
                         _mm512_mask_compressstoreu_epi32(
-                            q_list_ptr.add(self.quiet_count),
+                            q_list_ptr.add(self.quiet_count as usize),
                             q0_mask,
                             moves_x16_0,
                         );
                         _mm512_mask_compressstoreu_epi32(
-                            q_list_ptr.add(q0_mask.count_ones() as usize + self.quiet_count),
+                            q_list_ptr
+                                .add(q0_mask.count_ones() as usize + self.quiet_count as usize),
                             q1_mask,
                             moves_x16_1,
                         );
-                        self.quiet_count += quiet_emit_mask.count_ones() as usize;
+                        self.quiet_count += quiet_emit_mask.count_ones() as u8;
                     }
 
                     for i in 0..self.cap_count {
-                        let mv = self.move_list_caps.assume_init_mut().get_unchecked_mut(i);
-                        *mv = Self::score_capture_see(*mv, &self.see_info, tables, board);
+                        let mv = buffer.move_list_caps.get_unchecked_mut(i as usize);
+                        *mv = Self::score_capture_see(*mv, &buffer.see_info, tables, board);
                     }
 
                     sorting::u32::sort_u32_desc_avx512(
-                        self.move_list_caps.assume_init_mut(),
-                        self.cap_count,
+                        &mut buffer.move_list_caps,
+                        self.cap_count as usize,
                     );
 
                     self.phase = MovegenPhase::MoveGoodCap;
-
-                    // @todo perf - Check recursive call and label vs current loop
                     continue;
                 },
                 MovegenPhase::MoveGoodCap => unsafe {
@@ -1040,10 +1047,7 @@ impl Movegen {
                         continue;
                     }
 
-                    let mv_cap = self
-                        .move_list_caps
-                        .assume_init_mut()
-                        .get_unchecked(self.cap_index);
+                    let mv_cap = buffer.move_list_caps.get_unchecked(self.cap_index as usize);
 
                     let is_bad_cap = (*mv_cap >> 16) < (Self::SORT_GOOD_CAPTURES_BASE as u32);
 
@@ -1071,11 +1075,11 @@ impl Movegen {
                 }
                 MovegenPhase::MoveQuietGen => unsafe {
                     for i in 0..self.quiet_count {
-                        let mv = self.move_list_quiets.assume_init_mut().get_unchecked_mut(i);
+                        let mv = buffer.move_list_quiets.get_unchecked_mut(i as usize);
                         *mv = Self::score_quiet(*mv, board.spt(), history_moves, cont_hist);
                     }
 
-                    Self::sort_noinline(self.move_list_quiets.assume_init_mut(), self.quiet_count);
+                    Self::sort_noinline(&mut buffer.move_list_quiets, self.quiet_count as usize);
 
                     self.phase = MovegenPhase::MoveQuiet;
                     continue;
@@ -1086,10 +1090,9 @@ impl Movegen {
                         continue;
                     }
 
-                    let mv_quiet = self
+                    let mv_quiet = buffer
                         .move_list_quiets
-                        .assume_init_mut()
-                        .get_unchecked(self.quiet_index);
+                        .get_unchecked(self.quiet_index as usize);
 
                     self.quiet_index += 1;
                     return Some((*mv_quiet as u16, phase));
@@ -1099,10 +1102,7 @@ impl Movegen {
                         return None;
                     }
 
-                    let mv_cap = self
-                        .move_list_caps
-                        .assume_init_mut()
-                        .get_unchecked(self.cap_index);
+                    let mv_cap = buffer.move_list_caps.get_unchecked(self.cap_index as usize);
 
                     self.cap_index += 1;
                     return Some((*mv_cap as u16, phase));
@@ -1117,20 +1117,15 @@ impl Movegen {
     }
 
     #[inline(always)]
-    pub fn see_info(&self) -> Option<&See> {
-        self.see_info.as_ref()
-    }
-
-    #[inline(always)]
     pub fn tt_move(&self) -> u16 {
         self.tt_move
     }
 
     #[inline(always)]
-    pub fn find_move_index_avx512(&self, mv: u16) -> u8 {
+    pub fn find_move_index_avx512(&self, mv: u16, buffer: &MoveBuffer) -> u8 {
         // Safety: mv is an emitted move, so its index is within the initialized
         // [0, move_count) prefix and the scan can never reach uninitialized data.
-        Self::move_index_avx512(mv, unsafe { self.move_list.assume_init_ref() })
+        Self::move_index_avx512(mv, &buffer.move_list)
     }
 
     #[inline(always)]
