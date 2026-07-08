@@ -59,8 +59,8 @@ const CORR_W_NP_NTM: Eval = 24;
 
 pub const PV_DEPTH: usize = 64;
 
-pub const HISTORY_MAX: i16 = SCORE_INF; // i16::MAX - 0_017;
-pub const HISTORY_MIN: i16 = -SCORE_INF; // i16::MIN + 0_017;
+pub const HISTORY_MAX: i16 = SCORE_INF;
+pub const HISTORY_MIN: i16 = -SCORE_INF;
 
 const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
 const SEE_CAPTURE_MARGIN: Eval = 100;

@@ -1571,15 +1571,6 @@ impl ChessGame {
         for i in 0..move_count {
             let mv = move_list[i];
 
-            // if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
-            //     i -= 3;
-
-            //     let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-            //     move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
-            //     move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-            //     move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
-            // }
-
             let nnue_update = unsafe { self.make_move_nnue(mv, tables) };
 
             if nnue_update.is_some() && !self.in_check(tables, !self.b_move) {
