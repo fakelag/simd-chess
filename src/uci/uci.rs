@@ -95,7 +95,7 @@ pub fn chess_uci(
             Some("debug") => match input.next() {
                 Some("on") => debug_enabled = true,
                 Some("off") => debug_enabled = false,
-                _ => panic!("Expected 'on' or 'off' after debug command"),
+                _ => println!("info string expected 'on' or 'off' after debug command"),
             },
             Some("ucinewgame") => {
                 tx_search.send(UciCommand::NewGame)?;
@@ -214,7 +214,11 @@ pub fn chess_uci(
                 sync_stop();
                 break;
             }
-            Some(arg) => return Err(anyhow::anyhow!("Unknown command: \"{}\"", arg)),
+            Some(arg) => {
+                if debug_enabled {
+                    println!("info string Unknown command: {}", arg);
+                }
+            }
             None => return Err(anyhow::anyhow!("No command provided")),
         }
     }

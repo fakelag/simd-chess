@@ -1,8 +1,8 @@
 use std::arch::x86_64::*;
 
 macro_rules! calc_seg_size {
-    ($n:expr) => {
-        $n.next_power_of_two().min(256).max(16)
+    ($n:expr, $cap:expr) => {
+        $n.next_power_of_two().min($cap).max(16)
     };
 }
 
@@ -349,7 +349,7 @@ pub fn sort_slow(buf: &mut [u32]) {
 /// in descending order. The array is sorted in-place, padding the array with 0xFFFF
 /// or another sentinel value should be done by the caller.
 #[inline(always)]
-pub fn sort_256u32_desc_avx512(buf: &mut [u32; 256], n: usize) {
+pub fn sort_u32_desc_avx512<const N: usize>(buf: &mut [u32; N], n: usize) {
     if n <= 4 {
         sort4(&mut buf[0..4]);
         return;
@@ -360,7 +360,7 @@ pub fn sort_256u32_desc_avx512(buf: &mut [u32; 256], n: usize) {
         return;
     }
 
-    let seg_size = calc_seg_size!(n);
+    let seg_size = calc_seg_size!(n, N);
 
     unsafe {
         match seg_size {
@@ -402,8 +402,6 @@ pub fn sort_256u32_desc_avx512(buf: &mut [u32; 256], n: usize) {
                 _mm512_storeu_si512(ptr.add(3), input_x16_3);
             }
             128 => {
-                std::hint::cold_path();
-
                 let ptr = buf.as_ptr() as *const __m512i;
 
                 let mut input_x16_0 = _mm512_loadu_si512(ptr);
@@ -436,7 +434,7 @@ pub fn sort_256u32_desc_avx512(buf: &mut [u32; 256], n: usize) {
                 _mm512_storeu_si512(ptr.add(6), input_x16_6);
                 _mm512_storeu_si512(ptr.add(7), input_x16_7);
             }
-            _ => {
+            _ if N > 128 => {
                 std::hint::cold_path();
                 sort_slow(buf);
 
@@ -496,6 +494,10 @@ pub fn sort_256u32_desc_avx512(buf: &mut [u32; 256], n: usize) {
                 // _mm512_storeu_si512(ptr.add(14), input_x16_14);
                 // _mm512_storeu_si512(ptr.add(15), input_x16_15);
             }
+            _ => {
+                debug_assert!(false, "Unsupported segment size: {}", seg_size);
+                std::hint::unreachable_unchecked();
+            }
         }
     }
 }
@@ -531,7 +533,7 @@ mod tests {
                     arr[i] = rng.random_range(0..u32::MAX);
                 }
 
-                sort_256u32_desc_avx512(&mut arr, len);
+                sort_u32_desc_avx512(&mut arr, len);
 
                 black_box(&arr);
                 arr[0] = arr[1];
@@ -564,7 +566,7 @@ mod tests {
                 }
 
                 let mut arr_copy = random_arr;
-                sort_256u32_desc_avx512(&mut arr_copy, arr_size);
+                sort_u32_desc_avx512(&mut arr_copy, arr_size);
 
                 // {
                 //     let mut pad_storage = std::mem::MaybeUninit::<[u32; 256]>::uninit();
@@ -589,7 +591,7 @@ mod tests {
                     if arr_size <= 8 {
                         8
                     } else {
-                        calc_seg_size!(arr_size)
+                        calc_seg_size!(arr_size, 256)
                     },
                     &random_arr[0..arr_size],
                     &arr_copy[0..arr_size]

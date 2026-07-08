@@ -19,15 +19,20 @@ pub struct Pinning {
     pub relations: [u8; 64],
     pub pinners: u64,
     pub pinned: u64,
+    pub pinned_multi: u64,
 }
 
 impl Pinning {
     #[inline(always)]
     pub fn update_pinned_mask(&self, attacker_sq_mask: u64, out_pinned: &mut u64) {
         let is_pinner_mask = ((attacker_sq_mask & self.pinners == 0) as u64).wrapping_sub(1);
-        let pin_removed_mask = (1u64
+        let mut pin_removed_mask = (1u64
             .wrapping_shl(self.relations[attacker_sq_mask.trailing_zeros() as usize] as u32))
             & is_pinner_mask;
+
+        if crate::engine::search::search::FLAG_SEE_PIN_MULTI {
+            pin_removed_mask &= !self.pinned_multi;
+        }
 
         *out_pinned &= !pin_removed_mask
     }
@@ -42,6 +47,7 @@ pub fn calc_pinnings(
 ) -> Pinning {
     let mut pinners = 0u64;
     let mut pinned = 0u64;
+    let mut pinned_multi = 0u64;
     let mut relations = [0u8; 64];
 
     let bitboards = board.bitboards();
@@ -87,6 +93,11 @@ pub fn calc_pinnings(
         let attacker_sq = attacker_sq as usize;
 
         relations[attacker_sq] = blocker_sq as u8;
+
+        if crate::engine::search::search::FLAG_SEE_PIN_MULTI {
+            pinned_multi |= pinned & path_occupied & is_blocker_mask;
+        }
+
         pinned |= path_occupied & is_blocker_mask;
         pinners |= (1u64 << attacker_sq) & is_blocker_mask;
     }
@@ -95,6 +106,7 @@ pub fn calc_pinnings(
         relations,
         pinners,
         pinned,
+        pinned_multi,
     }
 }
 
@@ -309,6 +321,28 @@ pub fn calc_pinnings(
 // }
 
 #[inline(always)]
+fn entry_pins_reject(
+    pins: Option<&[Pinning; 2]>,
+    pinned: &mut [u64; 2],
+    king_online_pinned: &[u64; 2],
+    to_sq_mask: u64,
+    from_sq_mask: u64,
+    b_move: bool,
+) -> bool {
+    if let Some(pins) = pins {
+        pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
+
+        if (from_sq_mask & pinned[b_move as usize] & !king_online_pinned[b_move as usize]) != 0 {
+            return true;
+        }
+
+        pins[!b_move as usize].update_pinned_mask(from_sq_mask, &mut pinned[!b_move as usize]);
+    }
+
+    false
+}
+
+#[inline(always)]
 pub fn see_threshold(
     score_table: &[i16; 16],
     tables: &tables::Tables,
@@ -361,6 +395,8 @@ pub fn see_threshold(
         std::hint::assert_unchecked(to_piece < 16);
     }
 
+    let mut b_move = board.b_move();
+
     // 1. First capture:
     // `exchange` tracks the current capture sequence value offset to the
     // given threshold. It starts from the score of the initially captured
@@ -374,6 +410,19 @@ pub fn see_threshold(
         return false;
     }
 
+    if crate::engine::search::search::FLAG_SEE_PIN_STRICT
+        && entry_pins_reject(
+            pins,
+            &mut pinned,
+            &king_online_pinned,
+            to_sq_mask,
+            from_sq_mask,
+            b_move,
+        )
+    {
+        return false;
+    }
+
     // 2. Possible recapture:
     // Update to net gain/loss after initial stm's piece has been recaptured
     exchange = score_table[last_moved_piece as usize] - exchange;
@@ -383,16 +432,17 @@ pub fn see_threshold(
         return true;
     }
 
-    let mut b_move = board.b_move();
-
-    if let Some(pins) = &pins {
-        pins[b_move as usize].update_pinned_mask(to_sq_mask, &mut pinned[b_move as usize]);
-
-        if (from_sq_mask & pinned[b_move as usize] & !king_online_pinned[b_move as usize]) != 0 {
-            return false;
-        }
-
-        pins[!b_move as usize].update_pinned_mask(from_sq_mask, &mut pinned[!b_move as usize]);
+    if !crate::engine::search::search::FLAG_SEE_PIN_STRICT
+        && entry_pins_reject(
+            pins,
+            &mut pinned,
+            &king_online_pinned,
+            to_sq_mask,
+            from_sq_mask,
+            b_move,
+        )
+    {
+        return false;
     }
 
     *[&mut white_board, &mut black_board][b_move as usize] ^= from_sq_mask | to_sq_mask;
@@ -1462,6 +1512,28 @@ mod tests {
         assert_eq!(
             result, true,
             "quiet on-line move by the pinned Re4 must pass SEE"
+        );
+    }
+
+    #[test]
+    fn test_see_pin_multi_battery() {
+        let result = see_threshold_from_fen("k7/4r3/4q3/8/2N1R3/8/8/4K3 b - - 0 1", "e6c4", 0);
+
+        assert_eq!(
+            result,
+            crate::engine::search::search::FLAG_SEE_PIN_MULTI,
+            "battery pinner Re7 still pins Re4 after Qe6 departs"
+        );
+    }
+
+    #[test]
+    fn test_see_pin_strict_early_true() {
+        let result = see_threshold_from_fen("k7/4r3/3r4/8/4N3/8/8/4K3 w - - 0 1", "e4d6", 0);
+
+        assert_eq!(
+            result,
+            !crate::engine::search::search::FLAG_SEE_PIN_STRICT,
+            "pinned Ne4 capturing off-line at d6 is illegal despite exchange<=0 early-true"
         );
     }
 }

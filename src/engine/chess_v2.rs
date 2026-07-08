@@ -213,7 +213,7 @@ impl ChessGame {
     }
 
     #[inline(always)]
-    pub fn gen_moves_avx512<const CAPTURE_ONLY: bool, MoveType: From<u16>>(
+    pub fn gen_moves_avx512<const CAPTURE_ONLY: bool, MoveType: From<u16> + TryInto<u16> + Copy>(
         &self,
         move_list: &mut [MoveType],
     ) -> usize {
@@ -234,13 +234,13 @@ impl ChessGame {
                 PieceIndex::WhiteKing as i64,
             );
             let const_nonslider_split = _mm512_set_epi64(
-                0x4040404040404040u64 as i64, // g // 0x8080808080808080u64 as i64, // h file
-                0x2020202020202020u64 as i64, // f // 0x4040404040404040u64 as i64, // g file
-                0x404040404040404u64 as i64,  // c // 0x3030303030303030u64 as i64, // ef file
-                0x1212121212121212u64 as i64, // be // 0xc0c0c0c0c0c0c0cu64 as i64,  // cd file
-                0x8989898989898989u64 as i64, // adh // 0x303030303030303u64 as i64,  // ab file
-                0xF0F0F0F0F0F0F0F0u64 as i64, // right half
-                0x0F0F0F0F0F0F0F0Fu64 as i64, // left half
+                0x4040404040404040u64 as i64,
+                0x2020202020202020u64 as i64,
+                0x404040404040404u64 as i64,
+                0x1212121212121212u64 as i64,
+                0x8989898989898989u64 as i64,
+                0xF0F0F0F0F0F0F0F0u64 as i64,
+                0x0F0F0F0F0F0F0F0Fu64 as i64,
                 0xFFFFFFFF_FFFFFFFFu64 as i64,
             );
             const PAWN_LANES: u8 = 0b11111000;
@@ -261,12 +261,12 @@ impl ChessGame {
             let const_slider_split = _mm512_set_epi64(
                 0xFFFFFFFF_FFFFFFFFu64 as i64,
                 0xFFFFFFFF_FFFFFFFFu64 as i64,
-                0x050A050A050A050Au64 as i64, // left light squares
-                0x0A050A050A050A05u64 as i64, // left black squares
-                0x50A050A050A050A0u64 as i64, // right light squares
-                0xA050A050A050A050u64 as i64, // right black squares
-                0xAA55AA55AA55AA55u64 as i64, // black squares
-                0x55AA55AA55AA55AAu64 as i64, // light squares
+                0x050A050A050A050Au64 as i64,
+                0x0A050A050A050A05u64 as i64,
+                0x50A050A050A050A0u64 as i64,
+                0xA050A050A050A050u64 as i64,
+                0xAA55AA55AA55AA55u64 as i64,
+                0x55AA55AA55AA55AAu64 as i64,
             );
             const BISHOP_LANES: u8 = 0b10000011;
             const ROOK_LANES: u8 = 0b01111100;
@@ -356,6 +356,8 @@ impl ChessGame {
                 }};
             }
 
+            let mut has_promotions = 0;
+
             loop {
                 let pawn_mask = PAWN_LANES & active_pieces_non_slider_mask;
 
@@ -368,57 +370,6 @@ impl ChessGame {
                     ROOK_LANES & active_pieces_slider_mask,
                     BISHOP_LANES & active_pieces_slider_mask,
                 );
-
-                // print_m512("slider_moves_x8", &slider_moves_x8);
-
-                // 0x0 = rook, 0x40 = bishop
-                // let const_slider_gather_magic_masks_offsets_x8 =
-                //     _mm512_set_epi64(0x40, 0, 0, 0, 0, 0, 0x40, 0x40);
-                // let const_slider_gather_moves_shifts_x8 = _mm512_set_epi64(
-                //     Tables::BISHOP_OCCUPANCY_BITS as i64,
-                //     Tables::ROOK_OCCUPANCY_BITS as i64,
-                //     Tables::ROOK_OCCUPANCY_BITS as i64,
-                //     Tables::ROOK_OCCUPANCY_BITS as i64,
-                //     Tables::ROOK_OCCUPANCY_BITS as i64,
-                //     Tables::ROOK_OCCUPANCY_BITS as i64,
-                //     Tables::BISHOP_OCCUPANCY_BITS as i64,
-                //     Tables::BISHOP_OCCUPANCY_BITS as i64,
-                // );
-                // const BISHOP_MV_GATHER_OFFSET: i64 = (64 * Tables::ROOK_OCCUPANCY_MAX) as i64;
-                // let const_moves_gather_base_offsets_x8 = _mm512_set_epi64(
-                //     BISHOP_MV_GATHER_OFFSET,
-                //     0,
-                //     0,
-                //     0,
-                //     0,
-                //     0,
-                //     BISHOP_MV_GATHER_OFFSET,
-                //     BISHOP_MV_GATHER_OFFSET,
-                // );
-                // let mut slider_moves_x8 = Self::gather_slider_moves_avx512_x8(
-                //     tables,
-                //     full_board_x8,
-                //     one_of_each_slider_index_x8,
-                //     const_slider_gather_magic_masks_offsets_x8,
-                //     const_moves_gather_base_offsets_x8,
-                //     const_slider_gather_moves_shifts_x8,
-                //     active_pieces_slider_mask,
-                // );
-
-                // let friendly_move_offset_x8 = _mm512_set1_epi64(friendly_move_offset as i64);
-                // let mut non_slider_moves_x8 = _mm512_mask_i64gather_epi64(
-                //     _mm512_setzero_si512(),
-                //     active_pieces_non_slider_mask,
-                //     _mm512_add_epi64(
-                //         _mm512_mullo_epi64(
-                //             _mm512_add_epi64(const_nonslider_selector, friendly_move_offset_x8),
-                //             const_64_x8,
-                //         ),
-                //         one_of_each_non_slider_index_x8,
-                //     ),
-                //     Tables::LT_NON_SLIDER_MASKS_GATHER.0.as_ptr() as *const i64,
-                //     8,
-                // );
 
                 let mut non_slider_moves_x8 = Self::calc_non_slider_moves_avx512_x8(
                     self.b_move,
@@ -451,6 +402,8 @@ impl ChessGame {
                     );
                     let promotion_mask =
                         _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
+                    has_promotions |= promotion_mask;
+
                     let pawn_push_double_bit_x8 = _mm512_and_epi64(
                         _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
                         _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
@@ -504,9 +457,9 @@ impl ChessGame {
                     );
 
                     // Promotion flag for pawn moves on the last rank
-                    // NOTE: This requires special handling on move maker side to try out other promotions
                     let promotion_mask = pawn_mask
                         & _mm512_test_epi64_mask(non_slider_dst_sq_bit_x8, pawn_promotion_rank_x8);
+                    has_promotions |= promotion_mask;
 
                     // EP flag for en passant captures
                     let ep_mask = pawn_mask
@@ -605,21 +558,61 @@ impl ChessGame {
                 }
             }
 
+            if std::hint::unlikely(has_promotions != 0) {
+                let original_count = mv_cursor;
+                for i in 0..original_count {
+                    let mv: u16 = (*move_list.get_unchecked(i)).try_into().unwrap_unchecked();
+
+                    if std::hint::likely((mv & MV_FLAGS_PR_MASK) != MV_FLAGS_PR_QUEEN) {
+                        continue;
+                    }
+
+                    let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+
+                    let mv_k = mv_unpromoted | MV_FLAGS_PR_KNIGHT;
+                    let mv_b = mv_unpromoted | MV_FLAGS_PR_BISHOP;
+                    let mv_r = mv_unpromoted | MV_FLAGS_PR_ROOK;
+
+                    macro_rules! add_move {
+                        ($move:expr) => {
+                            *move_list.get_unchecked_mut(mv_cursor) = ($move).into();
+                            mv_cursor += 1;
+                        };
+                    }
+
+                    add_move!(mv_k);
+
+                    if !CAPTURE_ONLY {
+                        // Quiescence search can't encounter new captures after queen or knight promotions
+                        add_move!(mv_b);
+                        add_move!(mv_r);
+                    }
+                }
+            }
+
             // Castling moves
             if !CAPTURE_ONLY {
                 let king_bitboard =
                     self.board.bitboards[PieceIndex::WhiteKing as usize + friendly_move_offset];
                 let king_square = king_bitboard.trailing_zeros() as u16;
 
-                *move_list.get_unchecked_mut(mv_cursor as usize) = MoveType::from(
-                    ((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING,
-                );
-                mv_cursor += self.is_kingside_castle_allowed(self.b_move) as usize;
+                let can_castle_kingside = self.is_kingside_castle_allowed(self.b_move) as usize;
+                let can_castle_kingside_mask = 0u16.wrapping_sub(can_castle_kingside as u16);
+
+                let can_castle_queenside = self.is_queenside_castle_allowed(self.b_move) as usize;
+                let can_castle_queenside_mask = 0u16.wrapping_sub(can_castle_queenside as u16);
 
                 *move_list.get_unchecked_mut(mv_cursor as usize) = MoveType::from(
-                    ((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN,
+                    (((king_square.wrapping_add(2)) << 6) | king_square | MV_FLAGS_CASTLE_KING)
+                        & can_castle_kingside_mask,
                 );
-                mv_cursor += self.is_queenside_castle_allowed(self.b_move) as usize;
+                mv_cursor += can_castle_kingside;
+
+                *move_list.get_unchecked_mut(mv_cursor as usize) = MoveType::from(
+                    (((king_square.wrapping_sub(2)) << 6) | king_square | MV_FLAGS_CASTLE_QUEEN)
+                        & can_castle_queenside_mask,
+                );
+                mv_cursor += can_castle_queenside;
             }
 
             // Move count should never overflow 256
@@ -1570,24 +1563,22 @@ impl ChessGame {
 
         let mut node_count = 0;
 
-        let mut move_list = [0u16; 220];
-        let move_count = self.gen_moves_avx512::<false, _>(&mut move_list[2..]);
+        let mut move_list = [0u16; 256];
+        let move_count = self.gen_moves_avx512::<false, _>(&mut move_list);
 
         let board_copy = self.clone();
 
-        let mut i = 2;
-        while i < move_count + 2 {
+        for i in 0..move_count {
             let mv = move_list[i];
-            i += 1;
 
-            if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
-                i -= 3;
+            // if mv & MV_FLAGS_PR_MASK == MV_FLAGS_PR_QUEEN {
+            //     i -= 3;
 
-                let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
-                move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
-                move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
-                move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
-            }
+            //     let mv_unpromoted = mv & !MV_FLAGS_PR_MASK;
+            //     move_list[i] = mv_unpromoted | MV_FLAGS_PR_KNIGHT; // Second promotion to check
+            //     move_list[i + 1] = mv_unpromoted | MV_FLAGS_PR_ROOK; // Third promotion to check
+            //     move_list[i + 2] = mv_unpromoted | MV_FLAGS_PR_BISHOP; // Fourth promotion to check
+            // }
 
             let nnue_update = unsafe { self.make_move_nnue(mv, tables) };
 
