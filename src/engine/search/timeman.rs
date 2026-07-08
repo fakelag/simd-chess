@@ -1,17 +1,28 @@
 use std::time::Instant;
 
 use crate::engine::search::eval::{Eval, SCORE_INF, is_mate};
-use crate::engine::search::search::FLAG_STAB_NODE_GATE;
 use crate::engine::search::search_params::SearchParams;
+
+// 0 = off (flat /20)   1 = 14/24   2 = 12/26 (wide)   3 = 10/24 (lowmin)   4 = 14/28 (highmax)
+const PH_MODE: u8 = 0;
 
 const MOVE_OVERHEAD_MS: u64 = 10;
 
-const MATE_TIME_MANAGEMENT: bool = true;
 const MATE_VERIFY_MARGIN: u32 = 2;
 const MATE_VERIFY_STABLE_ITERS: u32 = 1;
 const MATE_SOFT_SCALE: f64 = 0.60;
 
 const SUDDEN_DEATH_DIV: u64 = 20;
+const HORIZON_DIV_MIN: u64 = match PH_MODE {
+    2 => 12,
+    3 => 10,
+    _ => 14,
+};
+const HORIZON_DIV_MAX: u64 = match PH_MODE {
+    2 => 26,
+    4 => 28,
+    _ => 24,
+};
 const INC_NUM: u64 = 1;
 const INC_DEN: u64 = 2;
 
@@ -61,7 +72,12 @@ pub struct TimeManager {
     prev_score: Eval,
 }
 
-pub fn compute_limits(p: &SearchParams, b_move: bool) -> Option<TimeLimits> {
+fn horizon_div(piece_count: u32) -> u64 {
+    let pc = piece_count.clamp(2, 32) as u64;
+    HORIZON_DIV_MIN + (HORIZON_DIV_MAX - HORIZON_DIV_MIN) * (pc - 2) / 30
+}
+
+pub fn compute_limits(p: &SearchParams, b_move: bool, piece_count: u32) -> Option<TimeLimits> {
     if p.infinite {
         return None;
     }
@@ -84,7 +100,13 @@ pub fn compute_limits(p: &SearchParams, b_move: bool) -> Option<TimeLimits> {
 
     let mtg: u64 = match p.movestogo {
         Some(m) => (m as u64).max(1),
-        None => SUDDEN_DEATH_DIV,
+        None => {
+            if PH_MODE != 0 {
+                horizon_div(piece_count)
+            } else {
+                SUDDEN_DEATH_DIV
+            }
+        }
     };
 
     let cap_ms = (timeleft_ms * HARD_CAP_NUM / HARD_CAP_DEN).max(1);
@@ -174,14 +196,13 @@ impl TimeManager {
         }
 
         if r.best_move == self.prev_best_move {
-            self.stability += (!FLAG_STAB_NODE_GATE || r.iter_nodes >= 512) as u32;
+            self.stability += 1;
         } else {
             self.stability = 0;
             self.prev_best_move = r.best_move;
         }
 
-        if MATE_TIME_MANAGEMENT
-            && self.limits.dynamic
+        if self.limits.dynamic
             && is_mate(r.score)
             && (SCORE_INF - r.score.abs()) as u32 + MATE_VERIFY_MARGIN <= r.depth as u32
             && self.stability >= MATE_VERIFY_STABLE_ITERS
@@ -190,12 +211,7 @@ impl TimeManager {
         }
 
         let scale = if self.limits.dynamic && r.depth >= MIN_DYNAMIC_DEPTH {
-            let s = self.f_stability() * Self::f_effort(r) * self.f_eval(r.score);
-            if MATE_TIME_MANAGEMENT {
-                s * Self::f_mate(r)
-            } else {
-                s
-            }
+            self.f_stability() * Self::f_effort(r) * self.f_eval(r.score) * Self::f_mate(r)
         } else {
             1.0
         };

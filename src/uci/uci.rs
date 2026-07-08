@@ -134,7 +134,11 @@ pub fn chess_uci(
                 let mut search_params = search_params::SearchParams::from_iter(input);
                 search_params.debug = debug_enabled;
 
-                let limits = timeman::compute_limits(&search_params, chess.b_move());
+                let limits = timeman::compute_limits(
+                    &search_params,
+                    chess.b_move(),
+                    chess.occupancy().count_ones(),
+                );
 
                 tx_search.send(UciCommand::Go(GoCommand {
                     start_time,
