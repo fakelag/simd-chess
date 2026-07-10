@@ -45,10 +45,19 @@ impl<'a> FromIterator<&'a str> for SearchParams {
                 };
             }
 
+            macro_rules! next_time {
+                ($input:expr) => {
+                    $input
+                        .next()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .map(|t| t.clamp(1, u32::MAX as i64) as u32)
+                };
+            }
+
             match command {
                 Some("depth") => search_params.depth = next_int!(iter, u8),
-                Some("btime") => search_params.btime = next_int!(iter, u32),
-                Some("wtime") => search_params.wtime = next_int!(iter, u32),
+                Some("btime") => search_params.btime = next_time!(iter),
+                Some("wtime") => search_params.wtime = next_time!(iter),
                 Some("winc") => search_params.winc = next_int!(iter, u32),
                 Some("binc") => search_params.binc = next_int!(iter, u32),
                 Some("movestogo") => search_params.movestogo = next_int!(iter, u8),
@@ -56,6 +65,7 @@ impl<'a> FromIterator<&'a str> for SearchParams {
                 Some("mate") => search_params.mate = next_int!(iter, u32),
                 Some("movetime") => search_params.movetime = next_int!(iter, u32),
                 Some("infinite") => search_params.infinite = true,
+                Some("ponder") => {}
                 None => break,
                 Some(cmd) => panic!("Unknown search parameter: {}", cmd),
             }

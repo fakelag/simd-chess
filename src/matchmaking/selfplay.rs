@@ -5,17 +5,16 @@ use super::fen_feeder::SharedFenFeeder;
 use std::cell::SyncUnsafeCell;
 
 const DEBUG: bool = false;
-const ANNOTATION_DEPTH: u8 = 8;
+const ANNOTATION_DEPTH: u8 = 9;
 const USE_ACC_SEARCH: bool = false;
 
-const STABILITY_THRESHOLD: f64 = 0.13;
+const STABILITY_THRESHOLD: f64 = 0.295; // 0.43; // = 0.13;
 
 const INSUFFICIENT_MATERIAL_DRAW: bool = true;
 const THREE_FOLD_REPETITION_DRAW: bool = true;
-const WIN_ADJUDICATION: bool = false;
+
 const WIN_ADJ_SCORE: i32 = 2000;
 const WIN_ADJ_PLIES: i32 = 5;
-const DRAW_ADJUDICATION: bool = false;
 const DRAW_ADJ_SCORE: i32 = 10;
 const DRAW_ADJ_PLIES: u32 = 10;
 const DRAW_ADJ_MIN_PLY: u32 = 60;
@@ -50,6 +49,18 @@ struct AdjudicationState {
     draw_streak: u32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GameEnding {
+    Natural,
+    WinAdjudication,
+    DrawAdjudication,
+}
+
+struct GameResult {
+    entries: Vec<TrainingDataEntry>,
+    ending: GameEnding,
+}
+
 struct SelfplayEngine<'a> {
     thread_id: usize,
 
@@ -67,6 +78,8 @@ pub struct SelfplayTrainer {
     stats_num_games_total: usize,
     stats_positions_total: usize,
     stat_num_stab_threshold_passed: usize,
+    stats_win_adj: usize,
+    stats_draw_adj: usize,
     stats_flushed_at: std::time::Instant,
     binpack_path: Option<String>,
 }
@@ -87,6 +100,8 @@ impl SelfplayTrainer {
             stats_num_games_total: 0,
             stats_positions_total: 0,
             stat_num_stab_threshold_passed: 0,
+            stats_win_adj: 0,
+            stats_draw_adj: 0,
             stats_flushed_at: std::time::Instant::now(),
             binpack_path: out_binpack_path.map(|s| s.to_string()),
         }
@@ -99,6 +114,8 @@ impl SelfplayTrainer {
         from: Option<usize>,
         count: Option<usize>,
         max_positions: Option<usize>,
+        win_adj: bool,
+        draw_adj: bool,
     ) -> anyhow::Result<()> {
         let feeder = Box::new(SharedFenFeeder::new(position_file_path));
 
@@ -147,7 +164,9 @@ impl SelfplayTrainer {
 
                     Some(s.spawn(move || {
                         util::pin_thread_for_worker(i);
-                        Self::play_annotated_thread(i, tx_entries, feeder, tables)
+                        Self::play_annotated_thread(
+                            i, tx_entries, feeder, tables, win_adj, draw_adj,
+                        )
                     }))
                 })
                 .collect::<Vec<_>>();
@@ -159,21 +178,29 @@ impl SelfplayTrainer {
             self.stats_num_games_total = 0;
             self.stats_positions_total = 0;
             self.stat_num_stab_threshold_passed = 0;
+            self.stats_win_adj = 0;
+            self.stats_draw_adj = 0;
 
             'outer: loop {
                 match rx_entries.recv_timeout(std::time::Duration::from_secs(1)) {
-                    Ok(entries) => {
+                    Ok(game) => {
                         self.stats_num_games_cp += 1;
                         self.stats_num_games_total += 1;
 
-                        for e in entries {
+                        match game.ending {
+                            GameEnding::WinAdjudication => self.stats_win_adj += 1,
+                            GameEnding::DrawAdjudication => self.stats_draw_adj += 1,
+                            GameEnding::Natural => {}
+                        }
+
+                        for e in game.entries {
                             self.stat_num_stab_threshold_passed +=
                                 (e.stability >= STABILITY_THRESHOLD) as usize;
 
                             if let Some(writer) = &mut self.binpack_writer {
                                 writer.write_entry(&e.entry).unwrap();
-                                self.stats_positions_total += 1;
                             }
+                            self.stats_positions_total += 1;
 
                             if let Some(max_positions) = max_positions {
                                 if self.stats_positions_total >= max_positions {
@@ -218,7 +245,7 @@ impl SelfplayTrainer {
                     };
 
                     println!(
-                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. >=stab%: {}, Binpack size: {}. ETA: {}",
+                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. >=stab%: {}, win-adj%: {:.02}, draw-adj%: {:.02}, Binpack size: {}. ETA: {}",
                         self.stats_num_games_total,
                         self.stats_flushed_at.elapsed().as_secs_f64() / 60.0,
                         games_per_minute,
@@ -228,6 +255,8 @@ impl SelfplayTrainer {
                         (self.stat_num_stab_threshold_passed as f64
                             / self.stats_positions_total as f64)
                             * 100.0,
+                        self.stats_win_adj as f64 / self.stats_num_games_total as f64 * 100.0,
+                        self.stats_draw_adj as f64 / self.stats_num_games_total as f64 * 100.0,
                         util::byte_size_string(self.binpack_size_bytes()),
                         util::time_format(eta_ms)
                     );
@@ -243,11 +272,13 @@ impl SelfplayTrainer {
             }
 
             println!(
-                "Selfplay finished with {} games in {}. {} total positions annotated, games per minute ~{}. binpack size: ~{}",
+                "Selfplay finished with {} games in {}. {} total positions annotated, games per minute ~{}. win-adj%: {:.02}, draw-adj%: {:.02}. binpack size: ~{}",
                 self.stats_num_games_total,
                 util::time_format(start_at.elapsed().as_millis() as u64),
                 self.stats_positions_total,
                 self.stats_num_games_total as f64 / (start_at.elapsed().as_secs_f64() / 60.0),
+                self.stats_win_adj as f64 / self.stats_num_games_total as f64 * 100.0,
+                self.stats_draw_adj as f64 / self.stats_num_games_total as f64 * 100.0,
                 util::byte_size_string(self.binpack_size_bytes()),
             );
         });
@@ -257,12 +288,14 @@ impl SelfplayTrainer {
 
     fn play_annotated_thread(
         thread_id: usize,
-        tx: crossbeam::channel::Sender<Vec<TrainingDataEntry>>,
+        tx: crossbeam::channel::Sender<GameResult>,
         mut feeder: Box<dyn PositionFeeder + Send>,
         tables: &tables::Tables,
+        win_adj: bool,
+        draw_adj: bool,
     ) -> anyhow::Result<()> {
         let tt = std::cell::SyncUnsafeCell::new(
-            engine::search::transposition::TranspositionTable::new(16),
+            engine::search::transposition::TranspositionTable::new(8),
         );
 
         let mut tm = std::cell::SyncUnsafeCell::new(timeman::TimeManager::new());
@@ -297,7 +330,7 @@ impl SelfplayTrainer {
             let mut adj = AdjudicationState::default();
 
             // Main game loop
-            let result = loop {
+            let (result, ending) = loop {
                 let (bestmove, score, stability) = engine.new_move(ANNOTATION_DEPTH.into());
 
                 let mover_bmove = engine.b_move();
@@ -341,6 +374,8 @@ impl SelfplayTrainer {
                         white_pov_score,
                         stability < STABILITY_THRESHOLD,
                         engine.ply() as u32,
+                        win_adj,
+                        draw_adj,
                     ) {
                         break adj_result;
                     }
@@ -349,10 +384,13 @@ impl SelfplayTrainer {
                 match game_state {
                     chess_v2::GameState::Ongoing => {}
                     chess_v2::GameState::Checkmate(side) => {
-                        break if side == util::Side::White { 1 } else { -1 };
+                        break (
+                            if side == util::Side::White { 1 } else { -1 },
+                            GameEnding::Natural,
+                        );
                     }
                     chess_v2::GameState::Draw => {
-                        break 0;
+                        break (0, GameEnding::Natural);
                     }
                 }
             };
@@ -380,7 +418,10 @@ impl SelfplayTrainer {
                 b_move = !b_move;
             }
 
-            match tx.send(training_entries.clone()) {
+            match tx.send(GameResult {
+                entries: training_entries.clone(),
+                ending,
+            }) {
                 Ok(_) => {}
                 // Handle disconnect
                 Err(_) => break,
@@ -504,8 +545,10 @@ impl SelfplayTrainer {
         white_score: i32,
         stable: bool,
         ply: u32,
-    ) -> Option<i16> {
-        if WIN_ADJUDICATION {
+        win_adj: bool,
+        draw_adj: bool,
+    ) -> Option<(i16, GameEnding)> {
+        if win_adj {
             if stable && white_score >= WIN_ADJ_SCORE {
                 adj.win_streak = adj.win_streak.max(0) + 1;
             } else if stable && white_score <= -WIN_ADJ_SCORE {
@@ -515,15 +558,15 @@ impl SelfplayTrainer {
             }
 
             if adj.win_streak >= WIN_ADJ_PLIES {
-                return Some(1);
+                return Some((1, GameEnding::WinAdjudication));
             }
 
             if adj.win_streak <= -WIN_ADJ_PLIES {
-                return Some(-1);
+                return Some((-1, GameEnding::WinAdjudication));
             }
         }
 
-        if DRAW_ADJUDICATION {
+        if draw_adj {
             if stable && ply >= DRAW_ADJ_MIN_PLY && white_score.abs() <= DRAW_ADJ_SCORE {
                 adj.draw_streak += 1;
             } else {
@@ -531,7 +574,7 @@ impl SelfplayTrainer {
             }
 
             if adj.draw_streak >= DRAW_ADJ_PLIES {
-                return Some(0);
+                return Some((0, GameEnding::DrawAdjudication));
             }
         }
 

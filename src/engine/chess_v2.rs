@@ -563,7 +563,9 @@ impl ChessGame {
                 for i in 0..original_count {
                     let mv: u16 = (*move_list.get_unchecked(i)).try_into().unwrap_unchecked();
 
-                    if std::hint::likely((mv & MV_FLAGS_PR_MASK) != MV_FLAGS_PR_QUEEN) {
+                    if std::hint::likely((mv & MV_FLAGS_PR_MASK) != MV_FLAGS_PR_QUEEN)
+                        || std::hint::unlikely(mv_cursor > 252)
+                    {
                         continue;
                     }
 
@@ -859,17 +861,11 @@ impl ChessGame {
                 ntm_bitboards.get_unchecked(PieceIndex::WhiteBishop as usize);
             let opponent_queen_board = ntm_bitboards.get_unchecked(PieceIndex::WhiteQueen as usize);
 
-            let rook_occupancy_mask =
-                *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
-            let rook_blockers = occupancy & rook_occupancy_mask;
             let rook_moves =
-                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers);
+                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, occupancy);
 
-            let bishop_occupancy_mask =
-                *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
-            let bishop_blockers = occupancy & bishop_occupancy_mask;
             let bishop_moves =
-                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers);
+                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, occupancy);
 
             is_attacked |= (opponent_rook_board | opponent_queen_board) & rook_moves;
             is_attacked |= (opponent_bishop_board | opponent_queen_board) & bishop_moves;
@@ -907,17 +903,11 @@ impl ChessGame {
             let opponent_bishop_board = opponent_bitboards[PieceIndex::WhiteBishop as usize];
             let opponent_queen_board = opponent_bitboards[PieceIndex::WhiteQueen as usize];
 
-            let rook_occupancy_mask =
-                *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
-            let rook_blockers = full_board & rook_occupancy_mask;
             let rook_moves =
-                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, rook_blockers);
+                tables.get_slider_move_mask_unchecked::<true>(sq_index as usize, full_board);
 
-            let bishop_occupancy_mask =
-                *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(sq_index as usize);
-            let bishop_blockers = full_board & bishop_occupancy_mask;
             let bishop_moves =
-                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, bishop_blockers);
+                tables.get_slider_move_mask_unchecked::<false>(sq_index as usize, full_board);
 
             attackers |= (opponent_rook_board | opponent_queen_board) & rook_moves;
             attackers |= (opponent_bishop_board | opponent_queen_board) & bishop_moves;
@@ -1047,16 +1037,8 @@ impl ChessGame {
         loop {
             let src_sq = pop_ls1b!(piece_board);
 
-            let occupancy_mask = if IS_ROOK {
-                Tables::LT_ROOK_OCCUPANCY_MASKS[src_sq as usize]
-            } else {
-                Tables::LT_BISHOP_OCCUPANCY_MASKS[src_sq as usize]
-            };
-
-            let slider_blockers = full_board & occupancy_mask;
-
             let mut slider_moves = tables
-                .get_slider_move_mask::<IS_ROOK>(src_sq as usize, slider_blockers)
+                .get_slider_move_mask::<IS_ROOK>(src_sq as usize, full_board)
                 & !friendly_board;
 
             loop {
@@ -2110,68 +2092,6 @@ impl ChessGame {
     #[inline(always)]
     pub fn is_queenside_castle_allowed(&self, b_move: bool) -> bool {
         self.castles & (0b1 << (!b_move as u8 * 2)) != 0
-    }
-
-    #[inline(always)]
-    fn gather_slider_moves_avx512_x8(
-        tables: &Tables,
-        full_board_x8: __m512i,
-        piece_indices: __m512i,
-        gather_offsets_magics_masks_x8: __m512i,
-        gather_offsets_moves_x8: __m512i,
-        gather_shifts_moves_x8: __m512i,
-        mask: u8,
-    ) -> __m512i {
-        unsafe {
-            let masks_x8 = _mm512_mask_i64gather_epi64(
-                _mm512_setzero_si512(),
-                mask,
-                _mm512_add_epi64(piece_indices, gather_offsets_magics_masks_x8),
-                Tables::LT_SLIDER_MASKS_GATHER.0.as_ptr() as *const i64,
-                8,
-            );
-
-            let magics_x8 = _mm512_mask_i64gather_epi64(
-                _mm512_setzero_si512(),
-                mask,
-                _mm512_add_epi64(piece_indices, gather_offsets_magics_masks_x8),
-                Tables::LT_SLIDER_MAGICS_GATHER.0.as_ptr() as *const i64,
-                8,
-            );
-
-            let const_shamt_selector = _mm512_set_epi8(
-                0, 0, 0, 0, 0, 0, 0, 63, //
-                0, 0, 0, 0, 0, 0, 0, 55, //
-                0, 0, 0, 0, 0, 0, 0, 47, //
-                0, 0, 0, 0, 0, 0, 0, 39, //
-                0, 0, 0, 0, 0, 0, 0, 31, //
-                0, 0, 0, 0, 0, 0, 0, 23, //
-                0, 0, 0, 0, 0, 0, 0, 15, //
-                0, 0, 0, 0, 0, 0, 0, 7, //
-            );
-            let shamt_x8 =
-                _mm512_maskz_shuffle_epi8(0x0101010101010101, magics_x8, const_shamt_selector);
-
-            let occupancy_indices_x8 = _mm512_srlv_epi64(
-                _mm512_mullo_epi64(_mm512_and_epi64(full_board_x8, masks_x8), magics_x8),
-                shamt_x8,
-            );
-
-            let movement_gather_indices_x8 = _mm512_add_epi64(
-                _mm512_sllv_epi64(piece_indices, gather_shifts_moves_x8),
-                occupancy_indices_x8,
-            );
-
-            let slider_movement_mask_x8 = _mm512_mask_i64gather_epi64(
-                _mm512_setzero_si512(),
-                mask,
-                _mm512_add_epi64(movement_gather_indices_x8, gather_offsets_moves_x8),
-                tables.slider_combined_move_masks.as_ptr() as *const i64,
-                8,
-            );
-
-            slider_movement_mask_x8
-        }
     }
 
     #[inline(always)]

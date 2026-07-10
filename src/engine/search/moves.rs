@@ -146,6 +146,7 @@ pub enum MovegenPhase {
     MoveQuietGen = 4,
     MoveQuiet = 5,
     MoveBadCap = 6,
+    MoveQuietPromoOnly = 7,
 }
 
 pub struct See {
@@ -552,6 +553,22 @@ impl Movegen {
                     self.quiet_index += 1;
                     return Some((*mv_quiet as u16, phase));
                 },
+                MovegenPhase::MoveQuietPromoOnly => unsafe {
+                    while self.quiet_index < self.quiet_count {
+                        let mv = *buffer
+                            .move_list_quiets
+                            .get_unchecked(self.quiet_index as usize)
+                            as u16;
+                        self.quiet_index += 1;
+
+                        if mv & chess_v2::MV_FLAG_PROMOTION != 0 {
+                            return Some((mv, phase));
+                        }
+                    }
+
+                    self.phase = MovegenPhase::MoveBadCap;
+                    continue;
+                },
                 MovegenPhase::MoveBadCap => unsafe {
                     if self.cap_count == self.cap_index {
                         return None;
@@ -564,6 +581,15 @@ impl Movegen {
                 },
             }
         }
+    }
+
+    #[inline(always)]
+    pub fn set_phase(&mut self, phase: MovegenPhase) {
+        debug_assert!(matches!(
+            self.phase,
+            MovegenPhase::MoveCut | MovegenPhase::MoveQuiet
+        ));
+        self.phase = phase;
     }
 
     #[inline(never)]

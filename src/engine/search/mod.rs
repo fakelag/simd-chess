@@ -121,14 +121,14 @@ mod tests {
         results
             .iter()
             .for_each(|(name, depth, avg_cycles, nodes, pv)| {
+                std::hint::black_box(pv);
                 println!(
-                    "[{:<13}] {:>2} iterations {:>6} avg Mcycles, {:>10} nodes, {:>2} depth, PV: {:?}",
+                    "[{:<13}] {:>2} iterations {:>6} avg Mcycles, {:>10} nodes, {:>2} depth",
                     name,
                     ITERATIONS,
                     avg_cycles / 1_000_000,
                     nodes,
-                    depth,
-                    pv
+                    depth
                 );
             });
     }

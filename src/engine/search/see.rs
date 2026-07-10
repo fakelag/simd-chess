@@ -27,7 +27,7 @@ impl Pinning {
     pub fn update_pinned_mask(&self, attacker_sq_mask: u64, out_pinned: &mut u64) {
         let is_pinner_mask = ((attacker_sq_mask & self.pinners == 0) as u64).wrapping_sub(1);
         let mut pin_removed_mask = (1u64
-            .wrapping_shl(self.relations[attacker_sq_mask.trailing_zeros() as usize] as u32))
+            .wrapping_shl(self.relations[attacker_sq_mask.trailing_zeros() as usize & 63] as u32))
             & is_pinner_mask;
 
         if crate::engine::search::search::FLAG_SEE_PIN_MULTI {
@@ -603,15 +603,15 @@ pub unsafe fn calc_slider_attacks<const IS_ROOK: bool>(
         std::hint::assert_unchecked(sq_index < 64);
     }
 
-    let occupancy_mask = if IS_ROOK {
-        tables::Tables::LT_ROOK_OCCUPANCY_MASKS[sq_index as usize]
-    } else {
-        tables::Tables::LT_BISHOP_OCCUPANCY_MASKS[sq_index as usize]
-    };
+    // let occupancy_mask = if IS_ROOK {
+    //     tables::Tables::LT_ROOK_OCCUPANCY_MASKS[sq_index as usize]
+    // } else {
+    //     tables::Tables::LT_BISHOP_OCCUPANCY_MASKS[sq_index as usize]
+    // };
+    //
+    // let blockers = full_board & occupancy_mask;
 
-    let blockers = full_board & occupancy_mask;
-
-    unsafe { tables.get_slider_move_mask_unchecked::<IS_ROOK>(sq_index as usize, blockers) }
+    unsafe { tables.get_slider_move_mask_unchecked::<IS_ROOK>(sq_index as usize, full_board) }
 }
 
 /// Safety: sq_index must be < 64

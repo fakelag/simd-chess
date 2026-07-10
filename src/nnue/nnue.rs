@@ -22,6 +22,7 @@ macro_rules! feature_safety {
     }};
 }
 
+#[inline(always)]
 fn pair_feature_from_piece_square(piece_index: u8, square: u8) -> PairFeature {
     let is_black = (piece_index & 0b1000) != 0;
     let piece_base = (64 * (NNUE_PIECE_INDICES[(piece_index & 7) as usize])) as u16;
@@ -513,11 +514,16 @@ where
 
     #[inline(always)]
     pub fn evaluate(&mut self, b_move: bool, bucket: u8) -> i16 {
-        let start = self.applied_accumulators.last().copied().unwrap();
+        debug_assert!(self.applied_accumulators.last().is_some());
+
+        let start = unsafe { self.applied_accumulators.last().copied().unwrap_unchecked() };
 
         debug_assert!(start <= self.updates.len());
         debug_assert!(start < self.accumulators.len());
         debug_assert!(self.updates.len() < self.accumulators.len());
+        debug_assert!(self.accumulators.len() > 0);
+
+        unsafe { std::hint::assert_unchecked(self.accumulators.len() > 0) };
 
         let ply = self.updates.len().min(self.accumulators.len() - 1);
 

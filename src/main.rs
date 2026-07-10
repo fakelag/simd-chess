@@ -194,6 +194,8 @@ fn main() {
             let mut out_path = None;
             let mut max_positions = None;
             let mut positions_path = None;
+            let mut win_adj = false;
+            let mut draw_adj = false;
 
             loop {
                 let arg = match arg_it.next() {
@@ -210,6 +212,8 @@ fn main() {
                     "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
                     "--positions" => positions_path = Some(arg_it.next().unwrap()),
                     "--out" => out_path = Some(arg_it.next().unwrap()),
+                    "--win-adj" => win_adj = true,
+                    "--draw-adj" => draw_adj = true,
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
@@ -223,6 +227,8 @@ fn main() {
                 from,
                 games,
                 max_positions,
+                win_adj,
+                draw_adj,
             )
         }
         "train" => {

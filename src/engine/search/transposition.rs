@@ -1,9 +1,4 @@
-use std::{
-    arch::x86_64::*,
-    cell::SyncUnsafeCell,
-    ops::{Deref, DerefMut},
-    pin::Pin,
-};
+use std::{arch::x86_64::*, pin::Pin};
 
 use crate::engine::search::eval::Eval;
 
@@ -289,6 +284,18 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
+    fn find_shallowest_index_avx512(&self, bucket_vec: &__m512i) -> u32 {
+        unsafe {
+            let dt_vec = _mm_and_si128(
+                _mm512_cvtepi64_epi16(_mm512_srli_epi64::<32>(*bucket_vec)),
+                _mm_set1_epi16(0xFC),
+            );
+
+            (_mm_extract_epi16::<1>(_mm_minpos_epu16(dt_vec)) as u32) & 7
+        }
+    }
+
+    #[inline(always)]
     fn match_entries_replace_avx512(
         &self,
         bucket_vec: &__m512i,
@@ -351,30 +358,8 @@ impl TranspositionTable {
     #[inline(always)]
     fn match_entries_key_avx512(&self, bucket_vec: &__m512i, key: u32) -> __mmask8 {
         unsafe {
-            let key_vec = _mm512_set1_epi32(key as i32);
-
-            let bucket_aligned_vec = _mm512_permutexvar_epi8(
-                _mm512_set_epi64(
-                    0,
-                    0,
-                    0,
-                    0,
-                    0x3B3A3938_33323130,
-                    0x2B2A2928_23222120,
-                    0x1B1A1918_13121110,
-                    0x0B0A0908_03020100,
-                ),
-                *bucket_vec,
-            );
-
-            let key_mask_vec = _mm512_set1_epi32(0x3FFF_FFFF as i32);
-
-            let result = _mm512_cmpeq_epi32_mask(
-                _mm512_and_si512(bucket_aligned_vec, key_mask_vec),
-                key_vec,
-            );
-
-            (result & 0xFF) as __mmask8
+            let masked = _mm512_and_si512(*bucket_vec, _mm512_set1_epi64(0x3FFF_FFFF));
+            _mm512_cmpeq_epi64_mask(masked, _mm512_set1_epi64(key as i64))
         }
     }
 
@@ -398,7 +383,7 @@ impl TranspositionTable {
 
         // let mut dbg = String::new();
 
-        let entry_mask = unsafe {
+        let (entry_mask, key_mask, bucket_vec) = unsafe {
             let bucket_vec =
                 _mm512_load_si512(self.entries.as_ptr().add(bucket_index) as *const __m512i);
 
@@ -426,10 +411,8 @@ impl TranspositionTable {
             //     replace_mask, empty_mask, key_mask, entry_mask
             // ));
 
-            entry_mask
+            (entry_mask, key_mask, bucket_vec)
         };
-
-        let entry_index = entry_mask.trailing_zeros();
 
         // let debug_res = self.find_store_index_debug(hash, bound_type, depth, key_mask, &mut dbg);
         // assert!(
@@ -445,10 +428,18 @@ impl TranspositionTable {
         //     dbg
         // );
 
-        let entry = match entry_index {
-            0..8 => &mut self.entries[bucket_index].0[entry_index as usize],
-            _ => return,
+        let entry_index = match entry_mask.trailing_zeros() {
+            i @ 0..8 => i,
+            _ => {
+                if key_mask != 0 {
+                    return;
+                }
+
+                self.find_shallowest_index_avx512(&bucket_vec)
+            }
         };
+
+        let entry = &mut self.entries[bucket_index].0[entry_index as usize];
 
         // if DEBUG {
         //     self.hash64
@@ -565,4 +556,74 @@ impl TranspositionTable {
     //         }
     //     }
     // }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INDEX_BITS: u32 = 14;
+    const DEPTHS: [u8; 8] = [20, 18, 25, 9, 30, 22, 27, 21];
+
+    fn hash_for_key(key: u64) -> u64 {
+        key << INDEX_BITS
+    }
+
+    fn fresh_tt() -> TranspositionTable {
+        let mut tt = TranspositionTable::new(1);
+        assert_eq!(tt.index_bits, INDEX_BITS);
+        tt.new_search();
+        tt
+    }
+
+    fn fill_bucket(tt: &mut TranspositionTable, depths: [u8; 8]) {
+        for (i, depth) in depths.into_iter().enumerate() {
+            tt.store(hash_for_key(i as u64 + 1), 0, depth, || 0, BoundType::Exact);
+        }
+    }
+
+    fn probe_depth(tt: &mut TranspositionTable, key: u64) -> Option<u8> {
+        tt.probe(hash_for_key(key), 0, -30_000, 30_000)
+            .map(|probe| probe.tt_depth)
+    }
+
+    #[test]
+    fn tt_store_replaces_shallowest_when_no_candidate() {
+        let mut tt = fresh_tt();
+
+        fill_bucket(&mut tt, DEPTHS);
+        tt.store(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
+
+        assert_eq!(probe_depth(&mut tt, 100), Some(5));
+        assert_eq!(probe_depth(&mut tt, 4), None);
+        for (i, depth) in DEPTHS.into_iter().enumerate() {
+            if i != 3 {
+                assert_eq!(probe_depth(&mut tt, i as u64 + 1), Some(depth));
+            }
+        }
+    }
+
+    #[test]
+    fn tt_store_keeps_deeper_key_matched_entry() {
+        let mut tt = fresh_tt();
+        fill_bucket(&mut tt, DEPTHS);
+
+        tt.store(hash_for_key(4), 0, 2, || 0, BoundType::Exact);
+
+        assert_eq!(probe_depth(&mut tt, 4), Some(9));
+    }
+
+    #[test]
+    fn tt_store_prefers_stale_generation_over_shallowest() {
+        let mut tt = fresh_tt();
+        fill_bucket(&mut tt, DEPTHS);
+
+        tt.new_search();
+        tt.new_search();
+        tt.store(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
+
+        assert_eq!(probe_depth(&mut tt, 100), Some(5));
+        assert_eq!(probe_depth(&mut tt, 1), None);
+        assert_eq!(probe_depth(&mut tt, 4), Some(9));
+    }
 }

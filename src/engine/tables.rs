@@ -80,10 +80,8 @@ pub struct ZobristKeys {
 }
 
 pub struct Tables {
-    rook_move_mask: Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]>,
-    bishop_move_mask: Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]>,
-    pub slider_combined_move_masks:
-        Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX + 64 * Self::BISHOP_OCCUPANCY_MAX]>,
+    rook_move_mask: Box<[u64; Self::ROOK_TABLE_SIZE]>,
+    bishop_move_mask: Box<[u64; Self::BISHOP_TABLE_SIZE]>,
     pub zobrist_hash_keys: Box<ZobristKeys>,
 }
 
@@ -102,27 +100,9 @@ impl Tables {
         let rook_move_mask = Self::gen_rook_move_table();
         let bishop_move_mask = Self::gen_bishop_move_table();
 
-        let slider_combined_move_masks = {
-            let mut masks =
-                vec![0; 64 * Self::ROOK_OCCUPANCY_MAX + 64 * Self::BISHOP_OCCUPANCY_MAX];
-            for square in 0..64 {
-                for j in 0..Self::ROOK_OCCUPANCY_MAX {
-                    masks[square * Self::ROOK_OCCUPANCY_MAX + j] =
-                        rook_move_mask[square * Self::ROOK_OCCUPANCY_MAX + j];
-                }
-                for j in 0..Self::BISHOP_OCCUPANCY_MAX {
-                    masks
-                        [64 * Self::ROOK_OCCUPANCY_MAX + square * Self::BISHOP_OCCUPANCY_MAX + j] =
-                        bishop_move_mask[square * Self::BISHOP_OCCUPANCY_MAX + j];
-                }
-            }
-            masks.into_boxed_slice().try_into().unwrap()
-        };
-
         Self {
             rook_move_mask,
             bishop_move_mask,
-            slider_combined_move_masks,
             zobrist_hash_keys: Box::new(ZobristKeys {
                 hash_piece_squares: zobrist_hash_squares_old[1..].try_into().unwrap(),
                 hash_piece_squares_new: zobrist_hash_squares_new,
@@ -249,18 +229,23 @@ impl Tables {
         moves
     };
 
-    pub const LT_ROOK_OCCUPANCY_SHIFTS: [u8; 64] = const {
-        let mut shifts = [0; 64];
+    pub const LT_ROOK_TABLE_OFFSETS: [u32; 64] = const {
+        let mut offsets = [0u32; 64];
+        let mut acc = 0u32;
         let mut square = 0;
 
         while square < 64 {
-            let shamt = (64 - Self::LT_ROOK_OCCUPANCY_MASKS[square].count_ones()) as u8;
-            shifts[square] = shamt;
+            offsets[square] = acc;
+            acc += 1 << Self::LT_ROOK_OCCUPANCY_MASKS[square].count_ones();
             square += 1;
         }
 
-        shifts
+        offsets
     };
+
+    pub const ROOK_TABLE_SIZE: usize = (Self::LT_ROOK_TABLE_OFFSETS[63]
+        + (1 << Self::LT_ROOK_OCCUPANCY_MASKS[63].count_ones()))
+        as usize;
 
     pub const LT_BISHOP_OCCUPANCY_MASKS: [u64; 64] = const {
         let mut moves = [0; 64];
@@ -315,18 +300,23 @@ impl Tables {
         moves
     };
 
-    pub const LT_BISHOP_OCCUPANCY_SHIFTS: [u8; 64] = const {
-        let mut shifts = [0; 64];
+    pub const LT_BISHOP_TABLE_OFFSETS: [u32; 64] = const {
+        let mut offsets = [0u32; 64];
+        let mut acc = 0u32;
         let mut square = 0;
 
         while square < 64 {
-            let shamt = (64 - Self::LT_BISHOP_OCCUPANCY_MASKS[square].count_ones()) as u8;
-            shifts[square] = shamt;
+            offsets[square] = acc;
+            acc += 1 << Self::LT_BISHOP_OCCUPANCY_MASKS[square].count_ones();
             square += 1;
         }
 
-        shifts
+        offsets
     };
+
+    pub const BISHOP_TABLE_SIZE: usize = (Self::LT_BISHOP_TABLE_OFFSETS[63]
+        + (1 << Self::LT_BISHOP_OCCUPANCY_MASKS[63].count_ones()))
+        as usize;
 
     pub const LT_LINES: [[u64; 64]; 64] = const {
         let mut result = [[0; 64]; 64];
@@ -849,62 +839,56 @@ impl Tables {
     };
 
     #[inline(always)]
-    pub fn calc_occupancy_index<const IS_ROOK: bool>(square: usize, blockers: u64) -> usize {
-        let (magic, shamt) = if IS_ROOK {
-            (
-                Tables::LT_ROOK_OCCUPANCY_MAGICS[square],
-                Tables::LT_ROOK_OCCUPANCY_SHIFTS[square],
-            )
+    pub fn calc_occupancy_index<const IS_ROOK: bool>(square: usize, occupancy: u64) -> usize {
+        let mask = if IS_ROOK {
+            Tables::LT_ROOK_OCCUPANCY_MASKS[square]
         } else {
-            (
-                Tables::LT_BISHOP_OCCUPANCY_MAGICS[square],
-                Tables::LT_BISHOP_OCCUPANCY_SHIFTS[square],
-            )
+            Tables::LT_BISHOP_OCCUPANCY_MASKS[square]
         };
-        (blockers.wrapping_mul(magic) >> shamt) as usize
+        unsafe { _pext_u64(occupancy, mask) as usize }
     }
 
     #[inline(always)]
     pub unsafe fn calc_occupancy_index_unchecked<const IS_ROOK: bool>(
         square: usize,
-        blockers: u64,
+        occupancy: u64,
     ) -> usize {
         unsafe {
-            let (magic, shamt) = if IS_ROOK {
-                (
-                    *Tables::LT_ROOK_OCCUPANCY_MAGICS.get_unchecked(square),
-                    *Tables::LT_ROOK_OCCUPANCY_SHIFTS.get_unchecked(square),
-                )
+            let mask = if IS_ROOK {
+                *Tables::LT_ROOK_OCCUPANCY_MASKS.get_unchecked(square)
             } else {
-                (
-                    *Tables::LT_BISHOP_OCCUPANCY_MAGICS.get_unchecked(square),
-                    *Tables::LT_BISHOP_OCCUPANCY_SHIFTS.get_unchecked(square),
-                )
+                *Tables::LT_BISHOP_OCCUPANCY_MASKS.get_unchecked(square)
             };
-            (blockers.wrapping_mul(magic) >> shamt) as usize
+            _pext_u64(occupancy, mask) as usize
         }
     }
 
     #[inline(always)]
-    pub fn get_slider_move_mask<const IS_ROOK: bool>(&self, square: usize, blockers: u64) -> u64 {
+    pub fn get_slider_move_mask<const IS_ROOK: bool>(&self, square: usize, occupancy: u64) -> u64 {
         debug_assert!(square < 64, "Square index out of bounds");
 
-        let occupancy_index = Self::calc_occupancy_index::<IS_ROOK>(square, blockers);
+        let occupancy_index = Self::calc_occupancy_index::<IS_ROOK>(square, occupancy);
+
+        let table_index = if IS_ROOK {
+            Self::LT_ROOK_TABLE_OFFSETS[square] as usize + occupancy_index
+        } else {
+            Self::LT_BISHOP_TABLE_OFFSETS[square] as usize + occupancy_index
+        };
 
         debug_assert!(
-            occupancy_index
+            table_index
                 < if IS_ROOK {
-                    Self::ROOK_OCCUPANCY_MAX
+                    Self::ROOK_TABLE_SIZE
                 } else {
-                    Self::BISHOP_OCCUPANCY_MAX
+                    Self::BISHOP_TABLE_SIZE
                 },
             "Occupancy index out of bounds"
         );
 
         if IS_ROOK {
-            self.rook_move_mask[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index]
+            self.rook_move_mask[table_index]
         } else {
-            self.bishop_move_mask[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index]
+            self.bishop_move_mask[table_index]
         }
     }
 
@@ -912,41 +896,43 @@ impl Tables {
     pub unsafe fn get_slider_move_mask_unchecked<const IS_ROOK: bool>(
         &self,
         square: usize,
-        blockers: u64,
+        occupancy: u64,
     ) -> u64 {
         debug_assert!(square < 64, "Square index out of bounds");
 
         unsafe {
-            let occupancy_index = Self::calc_occupancy_index_unchecked::<IS_ROOK>(square, blockers);
+            let occupancy_index =
+                Self::calc_occupancy_index_unchecked::<IS_ROOK>(square, occupancy);
+
+            let table_index = if IS_ROOK {
+                *Self::LT_ROOK_TABLE_OFFSETS.get_unchecked(square) as usize + occupancy_index
+            } else {
+                *Self::LT_BISHOP_TABLE_OFFSETS.get_unchecked(square) as usize + occupancy_index
+            };
 
             debug_assert!(
-                occupancy_index
+                table_index
                     < if IS_ROOK {
-                        Self::ROOK_OCCUPANCY_MAX
+                        Self::ROOK_TABLE_SIZE
                     } else {
-                        Self::BISHOP_OCCUPANCY_MAX
+                        Self::BISHOP_TABLE_SIZE
                     },
                 "Occupancy index out of bounds"
             );
 
             if IS_ROOK {
-                *self
-                    .rook_move_mask
-                    .get_unchecked(square * Self::ROOK_OCCUPANCY_MAX + occupancy_index)
+                *self.rook_move_mask.get_unchecked(table_index)
             } else {
-                *self
-                    .bishop_move_mask
-                    .get_unchecked(square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index)
+                *self.bishop_move_mask.get_unchecked(table_index)
             }
         }
     }
 
-    fn gen_rook_move_table() -> Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]> {
-        let mut moves: Box<[u64; 64 * Self::ROOK_OCCUPANCY_MAX]> =
-            vec![0u64; 64 * Self::ROOK_OCCUPANCY_MAX]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap();
+    fn gen_rook_move_table() -> Box<[u64; Self::ROOK_TABLE_SIZE]> {
+        let mut moves: Box<[u64; Self::ROOK_TABLE_SIZE]> = vec![0u64; Self::ROOK_TABLE_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
 
         let occupancy_premutations = Self::gen_slider_occupancy_premutations::<true>();
 
@@ -957,10 +943,11 @@ impl Tables {
             for occ_id in 0..Self::ROOK_OCCUPANCY_MAX {
                 let blockers = occupancy_premutations[square * Self::ROOK_OCCUPANCY_MAX + occ_id];
                 let occupancy_index = Self::calc_occupancy_index::<true>(square, blockers);
+                let table_index = Self::LT_ROOK_TABLE_OFFSETS[square] as usize + occupancy_index;
 
                 for file_it in file + 1..8 {
                     let bit = 1 << (rank * 8 + file_it);
-                    moves[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
@@ -968,7 +955,7 @@ impl Tables {
 
                 for file_it in (0..=file.max(1) - 1).rev() {
                     let bit = 1 << (rank * 8 + file_it);
-                    moves[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
@@ -976,7 +963,7 @@ impl Tables {
 
                 for rank_it in rank + 1..8 {
                     let bit = 1 << (rank_it * 8 + file);
-                    moves[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
@@ -984,25 +971,24 @@ impl Tables {
 
                 for rank_it in (0..=rank.max(1) - 1).rev() {
                     let bit = 1 << (rank_it * 8 + file);
-                    moves[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
                 }
 
-                moves[square * Self::ROOK_OCCUPANCY_MAX + occupancy_index] &= !(1 << square);
+                moves[table_index] &= !(1 << square);
             }
         }
 
         moves
     }
 
-    fn gen_bishop_move_table() -> Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]> {
-        let mut moves: Box<[u64; 64 * Self::BISHOP_OCCUPANCY_MAX]> =
-            vec![0u64; 64 * Self::BISHOP_OCCUPANCY_MAX]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap();
+    fn gen_bishop_move_table() -> Box<[u64; Self::BISHOP_TABLE_SIZE]> {
+        let mut moves: Box<[u64; Self::BISHOP_TABLE_SIZE]> = vec![0u64; Self::BISHOP_TABLE_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
 
         let occupancy_premutations = Self::gen_slider_occupancy_premutations::<false>();
 
@@ -1013,6 +999,7 @@ impl Tables {
             for occ_id in 0..Self::BISHOP_OCCUPANCY_MAX {
                 let blockers = occupancy_premutations[square * Self::BISHOP_OCCUPANCY_MAX + occ_id];
                 let occupancy_index = Self::calc_occupancy_index::<false>(square, blockers);
+                let table_index = Self::LT_BISHOP_TABLE_OFFSETS[square] as usize + occupancy_index;
 
                 let mut file_it = file - 1;
 
@@ -1021,7 +1008,7 @@ impl Tables {
                         break;
                     }
                     let bit = 1 << (rank_it * 8 + file_it);
-                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
@@ -1035,7 +1022,7 @@ impl Tables {
                         break;
                     }
                     let bit = 1 << (rank_it * 8 + file_it);
-                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
@@ -1049,7 +1036,7 @@ impl Tables {
                         break;
                     }
                     let bit = 1 << (rank_it * 8 + file_it);
-                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
@@ -1063,7 +1050,7 @@ impl Tables {
                         break;
                     }
                     let bit = 1 << (rank_it * 8 + file_it);
-                    moves[square * Self::BISHOP_OCCUPANCY_MAX + occupancy_index] |= bit;
+                    moves[table_index] |= bit;
                     if blockers & bit != 0 {
                         break;
                     }
@@ -1104,64 +1091,6 @@ impl Tables {
         }
 
         masks
-    }
-
-    pub fn gen_slider_hash_functions<const IS_ROOK: bool>() -> ([u64; 64], [u8; 64]) {
-        use rand::Rng;
-        let mut rng = rand::rng();
-
-        let occupancy_table_size = if IS_ROOK {
-            Self::ROOK_OCCUPANCY_MAX
-        } else {
-            Self::BISHOP_OCCUPANCY_MAX
-        };
-
-        rng.reseed().unwrap();
-
-        let premuts = Self::gen_slider_occupancy_premutations::<IS_ROOK>();
-        let mut hash_magics = [0u64; 64];
-        let mut hash_shifts = [0u8; 64];
-
-        for square in 0..64 {
-            let occupancy_mask = if IS_ROOK {
-                Self::LT_ROOK_OCCUPANCY_MASKS[square]
-            } else {
-                Self::LT_BISHOP_OCCUPANCY_MASKS[square]
-            };
-
-            let occupancy_bits = occupancy_mask.count_ones() as usize;
-            let shamt = (64 - occupancy_bits) as u8;
-
-            hash_shifts[square] = shamt;
-
-            let mut rng_magic: u64;
-            let mut used_keys = vec![false; 1 << occupancy_bits];
-
-            'outer: loop {
-                used_keys.fill(false);
-                rng_magic = rng.random::<u64>();
-                rng_magic &= rng.random::<u64>();
-                rng_magic &= rng.random::<u64>();
-                rng_magic &= 0x00FFFFFF_FFFFFFFF; // Ensure the magic is 48 bits
-                rng_magic |= (shamt as u64) << 56; // Set the shift bits
-
-                for occupancy_index in 0..(1 << occupancy_bits) {
-                    let premutation = premuts[square * occupancy_table_size + occupancy_index];
-                    let hash_key = premutation.wrapping_mul(rng_magic) >> shamt;
-
-                    if used_keys[hash_key as usize] {
-                        continue 'outer;
-                    }
-
-                    used_keys[hash_key as usize] = true;
-                }
-                break;
-            }
-
-            hash_magics[square] = rng_magic;
-        }
-
-        (hash_magics, hash_shifts)
     }
 
     pub fn gen_zobrist_hashes() -> (
@@ -1225,74 +1154,83 @@ impl Tables {
             hash_pawn_squares,
         )
     }
+}
 
-    #[cfg_attr(any(), rustfmt::skip)]
-    pub const LT_ROOK_OCCUPANCY_MAGICS: [u64; 64] = [
-        0x3480022080400650, 0x3540004820021000, 0x3500200040100900, 0x3500100189004420,
-        0x3500080011000422, 0x3500040011000802, 0x350050a402000500, 0x34800040a1800100,
-        0x3508800040043080, 0x3608400050006000, 0x3600806000801000, 0x3620800800500084,
-        0x3609802400808800, 0x360200100200880c, 0x3601005401001200, 0x3582000204004085,
-        0x3508208000400080, 0x3621848020004000, 0x3608808020001000, 0x3601050018201000,
-        0x3642808008002400, 0x3601010004000802, 0x3600040010184502, 0x350842000c128041,
-        0x3580004040092000, 0x36406000c01000c0, 0x36c6028200204010, 0x3601022900201001,
-        0x3694140080080280, 0x3646002200087004, 0x3681020400088110, 0x3500624a00008104,
-        0x3588488001002100, 0x3600c00901002080, 0x36860020820050c0, 0x3602090121001000,
-        0x3600800402800800, 0x3606008802004c10, 0x3602000442000811, 0x350000a242000401,
-        0x3500804001208000, 0x361000a004404000, 0x3601082000410010, 0x3602001140620008,
-        0x3655908801010004, 0x3642009008020004, 0x3603290810140002, 0x3581808a44020005,
-        0x35c0048000204180, 0x3640002010080020, 0x3600100820008080, 0x3600300021000900,
-        0x3600800400080080, 0x3600020080140080, 0x3600182605101400, 0x35062c540a810600,
-        0x3401008000443029, 0x3588803600c10022, 0x350831a00100416b, 0x35100051000904a1,
-        0x3505030800100301, 0x3501002208040001, 0x350009024801900c, 0x3400002400850042,
-    ];
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    #[cfg_attr(any(), rustfmt::skip)]
-    pub const LT_BISHOP_OCCUPANCY_MAGICS: [u64; 64] = [
-        0x3a90441d06440101, 0x3b02244802004002, 0x3b300404f0442100, 0x3b04040480040100,
-        0x3b01104008080208, 0x3b018804c0004800, 0x3b00880410040510, 0x3a04508410021002,
-        0x3b00401019020088, 0x3b00884208062220, 0x3b02042400a60020, 0x3b20424081031900,
-        0x3b00511040000040, 0x3b00010422401000, 0x3b0001c210242008, 0x3bc0008404010400,
-        0x3bc0060444040401, 0x3b600c8608010514, 0x3922041040820200, 0x3908200404001092,
-        0x3904008080a08013, 0x390600a108011400, 0x3b05040201100200, 0x3b0180090404a620,
-        0x3b24421020080100, 0x3b13106009501100, 0x3904280010084cc0, 0x3704004044010002,
-        0x37008c000a802009, 0x3901010002014120, 0x3b08110116110110, 0x3b40518002008400,
-        0x3b90022020190891, 0x3b0128210c020400, 0x3900220800404884, 0x3722040108040100,
-        0x3750038a00016200, 0x3920808500820120, 0x3b02008201090800, 0x3b31004110020108,
-        0x3b18443208402000, 0x3b920201210844a0, 0x3904a10802400800, 0x39004020130a5801,
-        0x3900200208802404, 0x3910200103000032, 0x3b5202020c000200, 0x3b82420401101120,
-        0x3b06011008040100, 0x3b20248404200820, 0x3b1002a402280114, 0x3b20808084040440,
-        0x3b10044005044000, 0x3b08600401020002, 0x3b50a00104388126, 0x3b2008020080250a,
-        0x3a8900880c020a10, 0x3b002503009a2000, 0x3b00280242080400, 0x3b18108000411080,
-        0x3b40020031120202, 0x3b30e25011100120, 0x3b40282004440060, 0x3aa2902200830200
-    ];
+    fn ray_attacks(square: usize, blockers: u64, dirs: &[(i32, i32)]) -> u64 {
+        let mut attacks = 0u64;
+        let rank = (square / 8) as i32;
+        let file = (square % 8) as i32;
 
-    pub const LT_SLIDER_MAGICS_GATHER: Align64<[[u64; 64]; 2]> = const {
-        Align64([
-            Tables::LT_ROOK_OCCUPANCY_MAGICS,
-            Tables::LT_BISHOP_OCCUPANCY_MAGICS,
-        ])
-    };
+        for &(dr, df) in dirs {
+            let mut r = rank + dr;
+            let mut f = file + df;
+            while (0..8).contains(&r) && (0..8).contains(&f) {
+                let bit = 1u64 << (r * 8 + f);
+                attacks |= bit;
+                if blockers & bit != 0 {
+                    break;
+                }
+                r += dr;
+                f += df;
+            }
+        }
 
-    pub const LT_SLIDER_MASKS_GATHER: Align64<[[u64; 64]; 2]> = const {
-        Align64([
-            Tables::LT_ROOK_OCCUPANCY_MASKS,
-            Tables::LT_BISHOP_OCCUPANCY_MASKS,
-        ])
-    };
+        attacks
+    }
 
-    pub const LT_NON_SLIDER_MASKS_GATHER: Align64<[[u64; 64]; 16]> = const {
-        let mut masks = [[0u64; 64]; 16];
+    #[test]
+    fn test_slider_move_masks_exhaustive() {
+        let tables = Tables::new();
 
-        masks[chess_v2::PieceIndex::WhiteKing as usize] = Self::LT_KING_MOVE_MASKS;
-        masks[chess_v2::PieceIndex::WhiteKnight as usize] = Self::LT_KNIGHT_MOVE_MASKS;
-        masks[chess_v2::PieceIndex::WhitePawn as usize] =
-            Self::LT_PAWN_CAPTURE_MASKS[Side::White as usize];
+        let rook_dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+        let bishop_dirs = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
 
-        masks[chess_v2::PieceIndex::BlackKing as usize] = Self::LT_KING_MOVE_MASKS;
-        masks[chess_v2::PieceIndex::BlackKnight as usize] = Self::LT_KNIGHT_MOVE_MASKS;
-        masks[chess_v2::PieceIndex::BlackPawn as usize] =
-            Self::LT_PAWN_CAPTURE_MASKS[Side::Black as usize];
+        for square in 0..64 {
+            for (mask, dirs, is_rook) in [
+                (Tables::LT_ROOK_OCCUPANCY_MASKS[square], &rook_dirs, true),
+                (
+                    Tables::LT_BISHOP_OCCUPANCY_MASKS[square],
+                    &bishop_dirs,
+                    false,
+                ),
+            ] {
+                for i in 0..(1u64 << mask.count_ones()) {
+                    let blockers = unsafe { _pdep_u64(i, mask) };
+                    let occupancy = blockers | (0xAAAA_5555_AAAA_5555 & !mask);
+                    let expected = ray_attacks(square, blockers, dirs);
 
-        Align64(masks)
-    };
+                    let (result, result_unchecked) = if is_rook {
+                        (
+                            tables.get_slider_move_mask::<true>(square, occupancy),
+                            unsafe {
+                                tables.get_slider_move_mask_unchecked::<true>(square, occupancy)
+                            },
+                        )
+                    } else {
+                        (
+                            tables.get_slider_move_mask::<false>(square, occupancy),
+                            unsafe {
+                                tables.get_slider_move_mask_unchecked::<false>(square, occupancy)
+                            },
+                        )
+                    };
+
+                    assert_eq!(
+                        result, expected,
+                        "slider attacks mismatch: is_rook {} square {} subset {}",
+                        is_rook, square, i
+                    );
+                    assert_eq!(
+                        result_unchecked, expected,
+                        "unchecked slider attacks mismatch: is_rook {} square {} subset {}",
+                        is_rook, square, i
+                    );
+                }
+            }
+        }
+    }
 }

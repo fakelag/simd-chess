@@ -1,4 +1,4 @@
-use std::cell::{SyncUnsafeCell, UnsafeCell};
+﻿use std::cell::{SyncUnsafeCell, UnsafeCell};
 use std::mem::MaybeUninit;
 
 use crate::{
@@ -25,11 +25,17 @@ const EVAL_CACHE: bool = false;
 
 const FLAG_NMP_MATE_CLAMP: bool = false;
 
-const FLAG_QS_TT: bool = false;
+const NMP_EVAL_R_DIV: Eval = 256; // @todo -> 192
+const NMP_EVAL_R_MAX: u8 = 3;
+
 const FLAG_TT_50MV_GUARD: bool = false;
 
 pub const FLAG_SEE_PIN_MULTI: bool = false;
 pub const FLAG_SEE_PIN_STRICT: bool = false;
+
+const FLAG_SKIP_EVAL_IN_CHECK: bool = true;
+
+const LMP_MAX_DEPTH: u8 = 8;
 
 macro_rules! net_path {
     () => {
@@ -581,13 +587,26 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         // Cut 2 plys before max PV depth since the previous call
         // can't copy over PV moves beyond this point
         if self.ply >= PV_DEPTH as u8 - 2 || depth == 0 {
-            return self.quiescence(alpha, beta, ply as u32);
+            return self.quiescence(alpha, beta);
         }
 
-        let static_eval = self.evaluate();
-        let corrected_eval = self.eval_with_correction(static_eval);
-
+        let (static_eval, corrected_eval) = if FLAG_SKIP_EVAL_IN_CHECK && in_check {
+            // Inherit ply-2 so that 'improving' can be detected down the line
+            let inherited = if ply >= 2 {
+                self.eval_stack[ply - 2]
+            } else {
+                0
+            };
+            (inherited, inherited)
+        } else {
+            let raw = self.evaluate();
+            (raw, self.eval_with_correction(raw))
+        };
         self.eval_stack[ply] = corrected_eval;
+
+        // let static_eval = self.evaluate();
+        // let corrected_eval = self.eval_with_correction(static_eval);
+        // self.eval_stack[ply] = corrected_eval;
 
         let improving = if !in_check {
             ply >= 2 && corrected_eval > self.eval_stack[ply - 2]
@@ -621,10 +640,24 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             {
                 let ep_square = self.chess.make_null_move(self.tables);
 
-                let r = 2 + depth / 3;
+                let nmp_r_enabled = match F {
+                    EngineForm::TacticalA => false,
+                    EngineForm::TacticalB => false,
+                    _ => true,
+                };
+
+                let new_depth = if nmp_r_enabled {
+                    let r_eval = ((corrected_eval as i32 - beta as i32) / NMP_EVAL_R_DIV as i32)
+                        .clamp(0, NMP_EVAL_R_MAX as i32) as u8;
+                    let r = 2 + depth / 3 + r_eval;
+                    depth.saturating_sub(r)
+                } else {
+                    let r = 2 + depth / 3;
+                    depth - r
+                };
 
                 self.ply += 1;
-                let score = -self.go(-beta, -beta + 1, depth - r);
+                let score = -self.go(-beta, -beta + 1, new_depth);
                 self.ply -= 1;
 
                 self.chess.rollback_null_move(ep_square, self.tables);
@@ -712,6 +745,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut tried_quiet_moves = MaybeUninit::<[u16; 218]>::uninit();
         let mut tried_quiet_count = 0;
 
+        let lmp_threshold = if non_pv_node && !in_check && depth <= LMP_MAX_DEPTH {
+            let d = depth as usize;
+            if improving { 4 + d * d } else { 2 + d * d / 2 }
+        } else {
+            usize::MAX
+        };
+
         while let Some((mv, phase)) = moves.next(
             &self.chess,
             self.tables,
@@ -757,6 +797,26 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
             }
 
+            if num_legal_moves > lmp_threshold
+                && phase == MovegenPhase::MoveQuiet
+                && (mv & (MV_FLAG_CAP | MV_FLAG_PROMOTION)) == 0
+            {
+                debug_assert!(phase == MovegenPhase::MoveQuiet);
+
+                // Jump to remaining promotions
+                moves.set_phase(MovegenPhase::MoveQuietPromoOnly);
+                continue;
+            }
+
+            let src_piece = board_copy.spt()[(mv & 0x3F) as usize] as usize;
+            let dst_sq = ((mv >> 6) & 0x3F) as usize;
+            debug_assert!(src_piece < 16);
+            debug_assert!(src_piece != 0);
+            unsafe {
+                std::hint::assert_unchecked(src_piece < 16);
+                std::hint::assert_unchecked(src_piece != 0);
+            };
+
             let flag_enable_see_prune = match F {
                 EngineForm::TacticalA => false,
                 EngineForm::TacticalB => true,
@@ -798,8 +858,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     // at deep depths (bigger savings). History shifts the threshold:
                     // bad history -> threshold closer to 0 -> more pruning.
                     if !is_capture && depth <= SEE_QUIET_PRUNE_MAX_DEPTH {
-                        let src_piece = board_copy.spt()[(mv & 0x3F) as usize] as usize;
-                        let dst_sq = ((mv >> 6) & 0x3F) as usize;
                         let history = self.history_moves[src_piece][dst_sq];
 
                         let threshold = -(SEE_QUIET_MARGIN * depth as Eval * depth as Eval)
@@ -840,11 +898,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             self.nnue.make_move(nnue_update);
 
-            let src_piece = board_copy.spt()[(mv & 0x3F) as usize];
-            let dst_sq = ((mv >> 6) & 0x3F) as u8;
             self.move_stack[ply] = (
                 util::compress_piece_index_nonzero(src_piece as usize) as u8,
-                dst_sq,
+                dst_sq as u8,
             );
 
             let is_non_capture_or_promotion = mv & (MV_FLAG_CAP | MV_FLAG_PROMOTION) == 0;
@@ -886,10 +942,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     let base_r =
                         self.lmr_table[depth.min(63) as usize][(num_legal_moves).min(63)] as i16;
 
-                    let src_piece = board_copy.spt()[(mv & 0x3F) as usize] as usize;
-                    debug_assert!(src_piece != 0);
-
-                    let dst_sq = ((mv >> 6) & 0x3F) as usize;
                     let history = self.history_moves[src_piece][dst_sq] as i32;
 
                     let cont_bonus = {
@@ -978,11 +1030,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             self.pv_table.moves[ply][0] = mv;
             self.pv_table.lengths[ply] = child_pv_length + 1;
 
-            let [root_pv_moves, child_pv_moves] = self
-                .pv_table
-                .moves
-                .get_disjoint_mut([ply, ply + 1])
-                .unwrap();
+            let [root_pv_moves, child_pv_moves] = unsafe {
+                self.pv_table
+                    .moves
+                    .get_disjoint_unchecked_mut([ply, ply + 1])
+            };
 
             unsafe {
                 // Safety: child_pv_length is guaranteed to be set due to a call to go()
@@ -995,38 +1047,15 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             if score >= beta {
                 if is_non_capture && excluded_move == 0 {
-                    let src_piece = self.chess.spt()[(mv & 0x3F) as usize] as usize;
-                    let dst_square = ((mv >> 6) & 0x3F) as usize;
-
-                    unsafe {
-                        // Safety:
-                        // - src_piece is guaranteed to be a valid piece index from the board state
-                        // - dst_square is guaranteed to be within 0..64 from move generation
-                        debug_assert!(src_piece < 16 && dst_square < 64);
-                        std::hint::assert_unchecked(src_piece < 16);
-                        std::hint::assert_unchecked(dst_square < 64);
-                    }
-                    debug_assert!(PieceIndex::from(src_piece) != PieceIndex::WhiteNullPiece);
-                    debug_assert!(PieceIndex::from(src_piece) != PieceIndex::BlackNullPiece);
-
                     // @todo - Check removing original history heuristic in favor of continuation history
-                    self.update_history_heuristic(
-                        src_piece,
-                        dst_square,
-                        depth as i16 * depth as i16,
-                    );
+                    self.update_history_heuristic(src_piece, dst_sq, depth as i16 * depth as i16);
 
                     if mv != self.cut_moves[ply][0] {
                         self.cut_moves[ply][1] = self.cut_moves[ply][0];
                         self.cut_moves[ply][0] = mv;
                     }
 
-                    self.update_cont_history(
-                        ply,
-                        src_piece,
-                        dst_square,
-                        depth as i16 * depth as i16,
-                    );
+                    self.update_cont_history(ply, src_piece, dst_sq, depth as i16 * depth as i16);
 
                     for j in 0..tried_quiet_count - (is_non_capture as usize) {
                         let prev_mv =
@@ -1124,7 +1153,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         best_score
     }
 
-    fn quiescence(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {
+    fn quiescence(&mut self, alpha: Eval, beta: Eval) -> Eval {
         self.node_count += 1;
 
         if self.check_abort() {
@@ -1136,17 +1165,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let alpha_orig = alpha;
 
-        if FLAG_QS_TT {
-            if let Some(p) = self
-                .tt_mut()
-                .probe(self.chess.zobrist_key(), 0, alpha, beta)
-            {
-                if let Some(score) = p.score {
-                    return score;
-                }
-            }
-        }
-
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
 
         let static_eval = if !in_check {
@@ -1156,16 +1174,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             // If the current board position is bad enough to cause a
             // cutoff higher up, save the time and return it immediately
             if static_eval >= beta {
-                if FLAG_QS_TT {
-                    self.tt_mut().store(
-                        self.chess.zobrist_key(),
-                        Self::score_to_tt(static_eval, self.ply),
-                        0,
-                        || 0xFF,
-                        BoundType::LowerBound,
-                    );
-                }
-
                 return static_eval;
             }
 
@@ -1253,7 +1261,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             self.ply += 1;
 
-            let score = -self.quiescence(-beta, -alpha, start_ply);
+            let score = -self.quiescence(-beta, -alpha);
 
             self.ply -= 1;
 
@@ -1268,16 +1276,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 best_score = score;
 
                 if score >= beta {
-                    if FLAG_QS_TT {
-                        self.tt_mut().store(
-                            self.chess.zobrist_key(),
-                            Self::score_to_tt(static_eval, self.ply),
-                            0,
-                            || 0xFF,
-                            BoundType::LowerBound,
-                        );
-                    }
-
                     return score;
                 }
 
@@ -1288,28 +1286,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
 
         if best_score == -SCORE_INF {
-            best_score = self.quiescence_check_evasion(alpha, beta, start_ply);
-        }
-
-        if FLAG_QS_TT {
-            let bt = if best_score > alpha_orig {
-                BoundType::Exact
-            } else {
-                BoundType::UpperBound
-            };
-            self.tt_mut().store(
-                self.chess.zobrist_key(),
-                Self::score_to_tt(best_score, self.ply),
-                0,
-                || 0xFF,
-                bt,
-            );
+            best_score = self.quiescence_check_evasion(alpha, beta);
         }
 
         best_score
     }
 
-    pub fn quiescence_check_evasion(&mut self, alpha: Eval, beta: Eval, start_ply: u32) -> Eval {
+    pub fn quiescence_check_evasion(&mut self, alpha: Eval, beta: Eval) -> Eval {
         debug_assert!(self.chess.in_check(self.tables, self.chess.b_move()));
 
         let mut alpha = alpha;
@@ -1356,7 +1339,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             self.ply += 1;
 
-            let score = -self.quiescence(-beta, -alpha, start_ply);
+            let score = -self.quiescence(-beta, -alpha);
 
             self.ply -= 1;
 
@@ -1398,6 +1381,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             self.ply as usize * 2 + (excluded_move != 0) as usize
         };
         debug_assert!(index < MOVE_STACK_SIZE);
+        unsafe {
+            std::hint::assert_unchecked(index < MOVE_STACK_SIZE);
+        }
 
         index
     }
@@ -1537,7 +1523,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let divisor = 32usize.div_ceil(NET_OSIZE);
         let occupancy = self.chess.occupancy();
 
-        (occupancy.count_ones() as u8 - 2) / divisor as u8
+        let bucket = (occupancy.count_ones() as u8 - 2) / divisor as u8;
+
+        debug_assert!((bucket as usize) < NET_OSIZE);
+        unsafe { std::hint::assert_unchecked((bucket as usize) < NET_OSIZE) };
+
+        bucket
     }
 
     #[inline(always)]
