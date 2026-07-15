@@ -1340,15 +1340,41 @@ impl ChessGame {
             MV_FLAG_DPP => {
                 let new_ep_square = if self.b_move { to_sq + 8 } else { to_sq - 8 };
 
-                debug_assert!(new_ep_square != 0);
-                next_ep_square = new_ep_square;
+                if crate::search::search::FLAG_EP_CAPTUREONLY {
+                    let ntm_offset = stm_offset ^ 8;
+                    unsafe {
+                        let attacker_pawns = *self
+                            .board
+                            .bitboards
+                            .get_unchecked(PieceIndex::WhitePawn as usize + ntm_offset);
+                        let ep_attack_squares = *Tables::LT_PAWN_CAPTURE_MASKS
+                            [self.b_move as usize]
+                            .get_unchecked(new_ep_square as usize);
 
-                // Add new en passant square to Zobrist key
-                unsafe {
-                    // Safety: Any pseudovalid move guarantees ep_square to be in range [8, =15] | [48, =55]
-                    self.zobrist_key ^= zb_keys
-                        .hash_en_passant_squares
-                        .get_unchecked(new_ep_square as usize);
+                        let no_ep_attackers = (ep_attack_squares & attacker_pawns) == 0;
+
+                        let ep_mask = (no_ep_attackers as u64).wrapping_sub(1);
+
+                        next_ep_square = new_ep_square & (ep_mask as u8);
+
+                        // Add new en passant square to Zobrist key
+                        // Safety: Any pseudovalid move guarantees ep_square to be in range [8, =15] | [48, =55]
+                        self.zobrist_key ^= zb_keys
+                            .hash_en_passant_squares
+                            .get_unchecked(new_ep_square as usize)
+                            & ep_mask;
+                    }
+                } else {
+                    debug_assert!(new_ep_square != 0);
+                    next_ep_square = new_ep_square;
+
+                    // Add new en passant square to Zobrist key
+                    unsafe {
+                        // Safety: Any pseudovalid move guarantees ep_square to be in range [8, =15] | [48, =55]
+                        self.zobrist_key ^= zb_keys
+                            .hash_en_passant_squares
+                            .get_unchecked(new_ep_square as usize);
+                    }
                 }
 
                 nnue::NnueUpdate::quiet(from_piece as u8, from_piece as u8, from_sq, to_sq)
@@ -1777,6 +1803,17 @@ impl ChessGame {
                     }
                     _ => return Err(format!("Invalid full move character '{}'", c)),
                 },
+            }
+        }
+
+        if crate::search::search::FLAG_EP_CAPTUREONLY && self.en_passant != 0 {
+            let stm_offset = (self.b_move as usize) << 3;
+            let ep_attackers = Tables::LT_PAWN_CAPTURE_MASKS[!self.b_move as usize]
+                [self.en_passant as usize]
+                & self.board.bitboards[PieceIndex::WhitePawn as usize + stm_offset];
+
+            if ep_attackers == 0 {
+                self.en_passant = 0;
             }
         }
 

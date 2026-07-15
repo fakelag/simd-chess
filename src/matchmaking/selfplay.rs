@@ -5,10 +5,13 @@ use super::fen_feeder::SharedFenFeeder;
 use std::cell::SyncUnsafeCell;
 
 const DEBUG: bool = false;
-const ANNOTATION_DEPTH: u8 = 9;
+const ANNOTATION_DEPTH: u8 = 8;
 const USE_ACC_SEARCH: bool = false;
+const STABILITY_THRESHOLD_ACC: f64 = 0.58;
 
-const STABILITY_THRESHOLD: f64 = 0.295; // 0.43; // = 0.13;
+const STABILITY_THRESHOLD_ADJ: f64 = 0.43; // = 0.13;
+// d9 = 0.295
+// d8 = 0.43
 
 const INSUFFICIENT_MATERIAL_DRAW: bool = true;
 const THREE_FOLD_REPETITION_DRAW: bool = true;
@@ -77,7 +80,8 @@ pub struct SelfplayTrainer {
     stats_num_games_cp: usize,
     stats_num_games_total: usize,
     stats_positions_total: usize,
-    stat_num_stab_threshold_passed: usize,
+    stat_num_adj_threshold_passed: usize,
+    stat_num_acc_threshold_passed: usize,
     stats_win_adj: usize,
     stats_draw_adj: usize,
     stats_flushed_at: std::time::Instant,
@@ -99,7 +103,8 @@ impl SelfplayTrainer {
             stats_num_games_cp: 0,
             stats_num_games_total: 0,
             stats_positions_total: 0,
-            stat_num_stab_threshold_passed: 0,
+            stat_num_adj_threshold_passed: 0,
+            stat_num_acc_threshold_passed: 0,
             stats_win_adj: 0,
             stats_draw_adj: 0,
             stats_flushed_at: std::time::Instant::now(),
@@ -177,7 +182,8 @@ impl SelfplayTrainer {
             self.stats_num_games_cp = 0;
             self.stats_num_games_total = 0;
             self.stats_positions_total = 0;
-            self.stat_num_stab_threshold_passed = 0;
+            self.stat_num_adj_threshold_passed = 0;
+            self.stat_num_acc_threshold_passed = 0;
             self.stats_win_adj = 0;
             self.stats_draw_adj = 0;
 
@@ -194,8 +200,10 @@ impl SelfplayTrainer {
                         }
 
                         for e in game.entries {
-                            self.stat_num_stab_threshold_passed +=
-                                (e.stability >= STABILITY_THRESHOLD) as usize;
+                            self.stat_num_adj_threshold_passed +=
+                                (e.stability >= STABILITY_THRESHOLD_ADJ) as usize;
+                            self.stat_num_acc_threshold_passed +=
+                                (e.stability >= STABILITY_THRESHOLD_ACC) as usize;
 
                             if let Some(writer) = &mut self.binpack_writer {
                                 writer.write_entry(&e.entry).unwrap();
@@ -245,14 +253,21 @@ impl SelfplayTrainer {
                     };
 
                     println!(
-                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. >=stab%: {}, win-adj%: {:.02}, draw-adj%: {:.02}, Binpack size: {}. ETA: {}",
+                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. >=stab%: (acc={:.02}, adj={:.02}), win-adj%: {:.02}, draw-adj%: {:.02}, Binpack size: {}. ETA: {}",
                         self.stats_num_games_total,
                         self.stats_flushed_at.elapsed().as_secs_f64() / 60.0,
                         games_per_minute,
                         games_per_minute_stable,
                         self.stats_positions_total,
                         self.stats_positions_total as f64 / self.stats_num_games_total as f64,
-                        (self.stat_num_stab_threshold_passed as f64
+                        if USE_ACC_SEARCH {
+                            (self.stat_num_acc_threshold_passed as f64
+                                / self.stats_positions_total as f64)
+                                * 100.0
+                        } else {
+                            0.0
+                        },
+                        (self.stat_num_adj_threshold_passed as f64
                             / self.stats_positions_total as f64)
                             * 100.0,
                         self.stats_win_adj as f64 / self.stats_num_games_total as f64 * 100.0,
@@ -372,7 +387,7 @@ impl SelfplayTrainer {
                     if let Some(adj_result) = Self::adjudicate(
                         &mut adj,
                         white_pov_score,
-                        stability < STABILITY_THRESHOLD,
+                        stability < STABILITY_THRESHOLD_ADJ,
                         engine.ply() as u32,
                         win_adj,
                         draw_adj,
@@ -662,7 +677,7 @@ impl<'a> SelfplayEngine<'a> {
         let stability =
             SelfplayTrainer::search_stability(self.search_qlk.depth_stats()).unwrap_or(1.0);
 
-        let use_acc = stability >= STABILITY_THRESHOLD;
+        let use_acc = stability >= STABILITY_THRESHOLD_ACC;
 
         let is_mate = engine::search::eval::is_mate(self.search_qlk.search_score() as Eval);
 

@@ -355,7 +355,7 @@ impl Movegen {
 
     #[inline(always)]
     fn calc_see_info(&mut self, board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
-        if self.depth <= 1 {
+        if !super::search::FLAG_SEE_ANYDEPTH && self.depth <= 1 {
             return;
         }
 

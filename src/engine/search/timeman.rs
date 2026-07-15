@@ -3,26 +3,15 @@ use std::time::Instant;
 use crate::engine::search::eval::{Eval, SCORE_INF, is_mate};
 use crate::engine::search::search_params::SearchParams;
 
-// 0 = off (flat /20)   1 = 14/24   2 = 12/26 (wide)   3 = 10/24 (lowmin)   4 = 14/28 (highmax)
-const PH_MODE: u8 = 0;
-
 const MOVE_OVERHEAD_MS: u64 = 10;
 
 const MATE_VERIFY_MARGIN: u32 = 2;
 const MATE_VERIFY_STABLE_ITERS: u32 = 1;
 const MATE_SOFT_SCALE: f64 = 0.60;
 
-const SUDDEN_DEATH_DIV: u64 = 20;
-const HORIZON_DIV_MIN: u64 = match PH_MODE {
-    2 => 12,
-    3 => 10,
-    _ => 14,
-};
-const HORIZON_DIV_MAX: u64 = match PH_MODE {
-    2 => 26,
-    4 => 28,
-    _ => 24,
-};
+const HORIZON_DIV_MIN: u64 = 14;
+const HORIZON_DIV_MAX: u64 = 28;
+
 const INC_NUM: u64 = 1;
 const INC_DEN: u64 = 2;
 
@@ -100,13 +89,7 @@ pub fn compute_limits(p: &SearchParams, b_move: bool, piece_count: u32) -> Optio
 
     let mtg: u64 = match p.movestogo {
         Some(m) => (m as u64).max(1),
-        None => {
-            if PH_MODE != 0 {
-                horizon_div(piece_count)
-            } else {
-                SUDDEN_DEATH_DIV
-            }
-        }
+        None => horizon_div(piece_count),
     };
 
     let cap_ms = (timeleft_ms * HARD_CAP_NUM / HARD_CAP_DEN).max(1);
