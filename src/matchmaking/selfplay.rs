@@ -5,21 +5,17 @@ use super::fen_feeder::SharedFenFeeder;
 use std::cell::SyncUnsafeCell;
 
 const DEBUG: bool = false;
-const ANNOTATION_DEPTH: u8 = 8;
-const USE_ACC_SEARCH: bool = false;
-const STABILITY_THRESHOLD_ACC: f64 = 0.58;
+const ANNOTATION_DEPTH: u8 = 9;
 
-const STABILITY_THRESHOLD_ADJ: f64 = 0.43; // = 0.13;
-// d9 = 0.295
-// d8 = 0.43
+const LABELING_HARD_NODES: u64 = 100_000_000;
 
 const INSUFFICIENT_MATERIAL_DRAW: bool = true;
 const THREE_FOLD_REPETITION_DRAW: bool = true;
 
 const WIN_ADJ_SCORE: i32 = 2000;
-const WIN_ADJ_PLIES: i32 = 5;
-const DRAW_ADJ_SCORE: i32 = 10;
-const DRAW_ADJ_PLIES: u32 = 10;
+const WIN_ADJ_PLIES: i32 = 7;
+const DRAW_ADJ_SCORE: i32 = 7;
+const DRAW_ADJ_PLIES: u32 = 17;
 const DRAW_ADJ_MIN_PLY: u32 = 60;
 
 use crate::{
@@ -43,7 +39,6 @@ use crate::{
 #[derive(Debug, Clone)]
 struct TrainingDataEntry {
     entry: sfbinpack::TrainingDataEntry,
-    stability: f64,
 }
 
 #[derive(Default)]
@@ -57,21 +52,38 @@ enum GameEnding {
     Natural,
     WinAdjudication,
     DrawAdjudication,
+    Terminated, // Node budget exceeded, cant guarantee optimal play
+}
+
+struct ShadowPly {
+    ply: u32,
+    white_score: i32,
+    instab_x100: f64,
+}
+
+struct ShadowFire {
+    fire_ply: u32,
+    gate: &'static str,
+    declared: i16,
+}
+
+struct ShadowGame {
+    seed_fen: String,
+    natural_result: i16,
+    plies: Vec<ShadowPly>,
+    would_fire: Option<ShadowFire>,
 }
 
 struct GameResult {
     entries: Vec<TrainingDataEntry>,
     ending: GameEnding,
+    shadow: Option<ShadowGame>,
 }
 
 struct SelfplayEngine<'a> {
     thread_id: usize,
-
     tables: &'a tables::Tables,
-
-    search_qlk: engine::search::search::Search<'a, { EngineForm::TacticalB }>,
-    search_acc: engine::search::search::Search<'a, { EngineForm::TacticalA }>,
-
+    search: engine::search::search::Search<'a, { EngineForm::TacticalB }>,
     zobrist_key: u64,
 }
 
@@ -80,10 +92,9 @@ pub struct SelfplayTrainer {
     stats_num_games_cp: usize,
     stats_num_games_total: usize,
     stats_positions_total: usize,
-    stat_num_adj_threshold_passed: usize,
-    stat_num_acc_threshold_passed: usize,
     stats_win_adj: usize,
     stats_draw_adj: usize,
+    stats_terminated: usize,
     stats_flushed_at: std::time::Instant,
     binpack_path: Option<String>,
 }
@@ -103,10 +114,9 @@ impl SelfplayTrainer {
             stats_num_games_cp: 0,
             stats_num_games_total: 0,
             stats_positions_total: 0,
-            stat_num_adj_threshold_passed: 0,
-            stat_num_acc_threshold_passed: 0,
             stats_win_adj: 0,
             stats_draw_adj: 0,
+            stats_terminated: 0,
             stats_flushed_at: std::time::Instant::now(),
             binpack_path: out_binpack_path.map(|s| s.to_string()),
         }
@@ -115,14 +125,26 @@ impl SelfplayTrainer {
     pub fn play_annotated(
         &mut self,
         threads: usize,
-        position_file_path: &str,
+        position_file_paths: &[String],
         from: Option<usize>,
         count: Option<usize>,
         max_positions: Option<usize>,
         win_adj: bool,
         draw_adj: bool,
+        adj_shadow_log: Option<&str>,
     ) -> anyhow::Result<()> {
-        let feeder = Box::new(SharedFenFeeder::new(position_file_path));
+        if adj_shadow_log.is_some() && (win_adj || draw_adj) {
+            return Err(anyhow::anyhow!(
+                "--adj-shadow-log requires adjudication off; drop --win-adj / --draw-adj"
+            ));
+        }
+        let shadow = adj_shadow_log.is_some();
+        let mut shadow_writer = match adj_shadow_log {
+            Some(path) => Some(std::io::BufWriter::new(std::fs::File::create(path)?)),
+            None => None,
+        };
+
+        let feeder = Box::new(SharedFenFeeder::new_multi(position_file_paths));
 
         if let Some(from) = from {
             let mut lock = feeder.lock();
@@ -170,7 +192,7 @@ impl SelfplayTrainer {
                     Some(s.spawn(move || {
                         util::pin_thread_for_worker(i);
                         Self::play_annotated_thread(
-                            i, tx_entries, feeder, tables, win_adj, draw_adj,
+                            i, tx_entries, feeder, tables, win_adj, draw_adj, shadow,
                         )
                     }))
                 })
@@ -182,8 +204,6 @@ impl SelfplayTrainer {
             self.stats_num_games_cp = 0;
             self.stats_num_games_total = 0;
             self.stats_positions_total = 0;
-            self.stat_num_adj_threshold_passed = 0;
-            self.stat_num_acc_threshold_passed = 0;
             self.stats_win_adj = 0;
             self.stats_draw_adj = 0;
 
@@ -196,15 +216,18 @@ impl SelfplayTrainer {
                         match game.ending {
                             GameEnding::WinAdjudication => self.stats_win_adj += 1,
                             GameEnding::DrawAdjudication => self.stats_draw_adj += 1,
+                            GameEnding::Terminated => {
+                                self.stats_terminated += 1;
+                                continue;
+                            }
                             GameEnding::Natural => {}
                         }
 
-                        for e in game.entries {
-                            self.stat_num_adj_threshold_passed +=
-                                (e.stability >= STABILITY_THRESHOLD_ADJ) as usize;
-                            self.stat_num_acc_threshold_passed +=
-                                (e.stability >= STABILITY_THRESHOLD_ACC) as usize;
+                        if let (Some(shadow), Some(w)) = (&game.shadow, shadow_writer.as_mut()) {
+                            Self::write_shadow_record(w, shadow).expect("shadow log write failed");
+                        }
 
+                        for e in game.entries {
                             if let Some(writer) = &mut self.binpack_writer {
                                 writer.write_entry(&e.entry).unwrap();
                             }
@@ -253,25 +276,16 @@ impl SelfplayTrainer {
                     };
 
                     println!(
-                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions so far, ~{:.02} per game avg. >=stab%: (acc={:.02}, adj={:.02}), win-adj%: {:.02}, draw-adj%: {:.02}, Binpack size: {}. ETA: {}",
+                        "Checkpoint after {} games ({:.02} mins). Games per minute: ~{:.02} ({:.02} avg). {} total positions, ~{:.02} per game avg. win-adj%: {:.02}, draw-adj%: {:.02}, term: {}, BP size: {}. ETA: {}",
                         self.stats_num_games_total,
                         self.stats_flushed_at.elapsed().as_secs_f64() / 60.0,
                         games_per_minute,
                         games_per_minute_stable,
                         self.stats_positions_total,
                         self.stats_positions_total as f64 / self.stats_num_games_total as f64,
-                        if USE_ACC_SEARCH {
-                            (self.stat_num_acc_threshold_passed as f64
-                                / self.stats_positions_total as f64)
-                                * 100.0
-                        } else {
-                            0.0
-                        },
-                        (self.stat_num_adj_threshold_passed as f64
-                            / self.stats_positions_total as f64)
-                            * 100.0,
                         self.stats_win_adj as f64 / self.stats_num_games_total as f64 * 100.0,
                         self.stats_draw_adj as f64 / self.stats_num_games_total as f64 * 100.0,
+                        self.stats_terminated,
                         util::byte_size_string(self.binpack_size_bytes()),
                         util::time_format(eta_ms)
                     );
@@ -298,6 +312,11 @@ impl SelfplayTrainer {
             );
         });
 
+        if let Some(mut w) = shadow_writer.take() {
+            use std::io::Write;
+            w.flush()?;
+        }
+
         Ok(())
     }
 
@@ -308,6 +327,7 @@ impl SelfplayTrainer {
         tables: &tables::Tables,
         win_adj: bool,
         draw_adj: bool,
+        shadow: bool,
     ) -> anyhow::Result<()> {
         let tt = std::cell::SyncUnsafeCell::new(
             engine::search::transposition::TranspositionTable::new(8),
@@ -315,6 +335,7 @@ impl SelfplayTrainer {
 
         let mut tm = std::cell::SyncUnsafeCell::new(timeman::TimeManager::new());
         tm.get_mut().disable();
+        tm.get_mut().set_nodes(LABELING_HARD_NODES);
 
         let mut engine = SelfplayEngine::new(thread_id, &tt, &tm, tables);
 
@@ -338,21 +359,28 @@ impl SelfplayTrainer {
                     result: 0,
                     score: 0,
                 },
-                stability: 0.0,
             };
 
             let initial_b_move = engine.b_move();
             let mut adj = AdjudicationState::default();
 
+            let mut shadow_adj = AdjudicationState::default();
+            let mut shadow_plies: Vec<ShadowPly> = Vec::new();
+            let mut shadow_would_fire: Option<ShadowFire> = None;
+
             // Main game loop
             let (result, ending) = loop {
-                let (bestmove, score, stability) = engine.new_move(ANNOTATION_DEPTH.into());
+                let (bestmove, score, stability, node_aborted) =
+                    engine.new_move(ANNOTATION_DEPTH.into());
+
+                if node_aborted {
+                    break (0, GameEnding::Terminated);
+                }
 
                 let mover_bmove = engine.b_move();
 
                 last_entry.entry.mv = Self::convert_move(mover_bmove, bestmove);
                 last_entry.entry.score = (score as i16).clamp(-10000, 10000);
-                last_entry.stability = stability;
                 training_entries.push(last_entry.clone());
                 last_entry.entry.pos = last_entry.entry.pos.after_move(last_entry.entry.mv);
                 last_entry.entry.ply += 1;
@@ -384,10 +412,37 @@ impl SelfplayTrainer {
 
                 if game_state == chess_v2::GameState::Ongoing {
                     let white_pov_score = if engine.b_move() { score } else { -score };
+
+                    if shadow {
+                        if shadow_would_fire.is_none() {
+                            if let Some((declared, fired)) = Self::adjudicate(
+                                &mut shadow_adj,
+                                white_pov_score,
+                                engine.ply() as u32,
+                                true,
+                                true,
+                            ) {
+                                shadow_would_fire = Some(ShadowFire {
+                                    fire_ply: engine.ply() as u32,
+                                    gate: if fired == GameEnding::WinAdjudication {
+                                        "win"
+                                    } else {
+                                        "draw"
+                                    },
+                                    declared,
+                                });
+                            }
+                        }
+                        shadow_plies.push(ShadowPly {
+                            ply: engine.ply() as u32,
+                            white_score: white_pov_score,
+                            instab_x100: stability,
+                        });
+                    }
+
                     if let Some(adj_result) = Self::adjudicate(
                         &mut adj,
                         white_pov_score,
-                        stability < STABILITY_THRESHOLD_ADJ,
                         engine.ply() as u32,
                         win_adj,
                         draw_adj,
@@ -433,9 +488,21 @@ impl SelfplayTrainer {
                 b_move = !b_move;
             }
 
+            let shadow_game = if shadow {
+                Some(ShadowGame {
+                    seed_fen: position.trim().to_string(),
+                    natural_result: result,
+                    plies: std::mem::take(&mut shadow_plies),
+                    would_fire: shadow_would_fire.take(),
+                })
+            } else {
+                None
+            };
+
             match tx.send(GameResult {
                 entries: training_entries.clone(),
                 ending,
+                shadow: shadow_game,
             }) {
                 Ok(_) => {}
                 // Handle disconnect
@@ -555,18 +622,43 @@ impl SelfplayTrainer {
         engine::search::stability::winprob_instability(stats).map(|v| v * 100.0)
     }
 
+    // FEN carries no '"' or '\', so it needs no JSON escaping.
+    fn write_shadow_record(w: &mut impl std::io::Write, g: &ShadowGame) -> std::io::Result<()> {
+        use std::io::Write;
+        write!(
+            w,
+            "{{\"seed_fen\":\"{}\",\"natural_result\":{},\"plies\":[",
+            g.seed_fen, g.natural_result
+        )?;
+        for (i, p) in g.plies.iter().enumerate() {
+            if i > 0 {
+                w.write_all(b",")?;
+            }
+            write!(w, "[{},{},{:.6}]", p.ply, p.white_score, p.instab_x100)?;
+        }
+        w.write_all(b"],\"would_fire\":")?;
+        match &g.would_fire {
+            Some(f) => write!(
+                w,
+                "{{\"fire_ply\":{},\"gate\":\"{}\",\"declared\":{}}}",
+                f.fire_ply, f.gate, f.declared
+            )?,
+            None => w.write_all(b"null")?,
+        }
+        w.write_all(b"}\n")
+    }
+
     fn adjudicate(
         adj: &mut AdjudicationState,
         white_score: i32,
-        stable: bool,
         ply: u32,
         win_adj: bool,
         draw_adj: bool,
     ) -> Option<(i16, GameEnding)> {
         if win_adj {
-            if stable && white_score >= WIN_ADJ_SCORE {
+            if white_score >= WIN_ADJ_SCORE {
                 adj.win_streak = adj.win_streak.max(0) + 1;
-            } else if stable && white_score <= -WIN_ADJ_SCORE {
+            } else if white_score <= -WIN_ADJ_SCORE {
                 adj.win_streak = adj.win_streak.min(0) - 1;
             } else {
                 adj.win_streak = 0;
@@ -582,7 +674,7 @@ impl SelfplayTrainer {
         }
 
         if draw_adj {
-            if stable && ply >= DRAW_ADJ_MIN_PLY && white_score.abs() <= DRAW_ADJ_SCORE {
+            if ply >= DRAW_ADJ_MIN_PLY && white_score.abs() <= DRAW_ADJ_SCORE {
                 adj.draw_streak += 1;
             } else {
                 adj.draw_streak = 0;
@@ -604,13 +696,7 @@ impl<'a> SelfplayEngine<'a> {
         tm: &'a SyncUnsafeCell<TimeManager>,
         tables: &'a tables::Tables,
     ) -> Self {
-        let search_qlk = Search::<{ EngineForm::TacticalB }>::new(
-            tables,
-            &tt,
-            &tm,
-            engine::search::repetition::RepetitionTable::new(),
-        );
-        let search_acc = Search::<{ EngineForm::TacticalA }>::new(
+        let search = Search::<{ EngineForm::TacticalB }>::new(
             tables,
             &tt,
             &tm,
@@ -620,91 +706,57 @@ impl<'a> SelfplayEngine<'a> {
         Self {
             thread_id,
             tables,
-            search_qlk,
-            search_acc,
+            search,
             zobrist_key: 0,
         }
     }
 
     fn new_game(&mut self, fen: &str) -> anyhow::Result<()> {
-        self.search_qlk.new_game();
+        self.search.new_game();
 
-        self.search_qlk
-            .load_from_fen(fen, self.tables)
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "Failed to load FEN \"{}\" during annotated selfplay - {:?}",
-                    fen,
-                    err
-                )
-            })?;
+        self.search.load_from_fen(fen, self.tables).map_err(|err| {
+            anyhow::anyhow!(
+                "Failed to load FEN \"{}\" during annotated selfplay - {:?}",
+                fen,
+                err
+            )
+        })?;
 
-        if USE_ACC_SEARCH {
-            self.search_acc.new_game();
-            self.search_acc
-                .load_from_fen(fen, self.tables)
-                .map_err(|err| {
-                    anyhow::anyhow!(
-                        "Failed to load FEN \"{}\" during annotated selfplay - {:?}",
-                        fen,
-                        err
-                    )
-                })?;
-        }
+        let board_zobrist = self.search.get_board_mut().zobrist_key();
 
-        let board_zobrist = self.search_qlk.get_board_mut().zobrist_key();
-
-        self.search_qlk
-            .get_rt_mut()
-            .push_position(board_zobrist, true);
-
-        if USE_ACC_SEARCH {
-            self.search_acc
-                .get_rt_mut()
-                .push_position(board_zobrist, true);
-        }
+        self.search.get_rt_mut().push_position(board_zobrist, true);
 
         self.zobrist_key = board_zobrist;
 
         Ok(())
     }
 
-    fn new_move(&mut self, search_depth: u8) -> (u16, i32, f64) {
-        self.search_qlk.new_search();
+    fn new_move(&mut self, search_depth: u8) -> (u16, i32, f64, bool) {
+        self.search.new_search();
 
-        let qlk_bestmove = self.search_qlk.search(search_depth.into());
+        let bestmove = self.search.search(search_depth.into());
 
-        let stability =
-            SelfplayTrainer::search_stability(self.search_qlk.depth_stats()).unwrap_or(1.0);
+        let node_aborted = self.search.was_node_aborted() || self.search.depth_stats().len() < 2;
 
-        let use_acc = stability >= STABILITY_THRESHOLD_ACC;
-
-        let is_mate = engine::search::eval::is_mate(self.search_qlk.search_score() as Eval);
-
-        let (bestmove, score) = if USE_ACC_SEARCH && use_acc && !is_mate {
-            self.search_acc.new_search();
-            self.search_acc.tt_mut().zero_depth_entries();
-
-            let acc_bestmove = self.search_acc.search(search_depth.into());
-            (acc_bestmove, self.search_acc.search_score())
+        let stability = if node_aborted {
+            0.0
         } else {
-            (qlk_bestmove, self.search_qlk.search_score())
+            SelfplayTrainer::search_stability(self.search.depth_stats())
+                .expect("winprob_instability None: <2 completed depths")
         };
 
+        let score = self.search.search_score();
+
         debug_assert!(
-            self.search_qlk.get_board_mut().zobrist_key() == self.zobrist_key,
+            self.search.get_board_mut().zobrist_key() == self.zobrist_key,
             "Qlk board changed during search!"
         );
-        debug_assert!(
-            !USE_ACC_SEARCH || self.search_acc.get_board_mut().zobrist_key() == self.zobrist_key,
-            "Acc board changed during search!"
-        );
 
-        (bestmove, score, stability)
+        (bestmove, score, stability, node_aborted)
     }
 
     fn make_move(&mut self, mv: u16) -> anyhow::Result<(GameState, u32)> {
-        let mut board = self.search_qlk.get_board_mut().clone();
+        let mut board = self.search.get_board_mut().clone();
 
         let nnue_update = match unsafe { board.make_move_nnue(mv, self.tables) } {
             Some(nnue_update) => nnue_update,
@@ -729,45 +781,33 @@ impl<'a> SelfplayEngine<'a> {
 
         let last_move_irreversible = board.half_moves() == 0;
 
-        self.search_qlk
-            .get_nnue_mut()
-            .make_move(nnue_update.clone());
-        self.search_qlk
+        self.search.get_nnue_mut().make_move(nnue_update.clone());
+        self.search
             .get_rt_mut()
             .push_position(board.zobrist_key(), last_move_irreversible);
-        self.search_qlk.get_board_mut().clone_from(&board);
-
-        if USE_ACC_SEARCH {
-            self.search_acc.get_nnue_mut().make_move(nnue_update);
-
-            self.search_acc
-                .get_rt_mut()
-                .push_position(board.zobrist_key(), last_move_irreversible);
-
-            self.search_acc.get_board_mut().clone_from(&board);
-        }
+        self.search.get_board_mut().clone_from(&board);
 
         self.zobrist_key = board.zobrist_key();
 
         Ok((
             SelfplayTrainer::check_game_state(&board, self.tables),
-            self.search_qlk.get_rt().is_repeated_times(self.zobrist_key),
+            self.search.get_rt().is_repeated_times(self.zobrist_key),
         ))
     }
 
     fn ply(&mut self) -> u16 {
-        self.search_qlk.get_board_mut().ply()
+        self.search.get_board_mut().ply()
     }
 
     fn b_move(&mut self) -> bool {
-        self.search_qlk.get_board_mut().b_move()
+        self.search.get_board_mut().b_move()
     }
 
     fn occupancy(&mut self) -> u64 {
-        self.search_qlk.get_board_mut().occupancy()
+        self.search.get_board_mut().occupancy()
     }
 
     fn bitboards(&mut self) -> &[u64; 16] {
-        self.search_qlk.get_board_mut().bitboards()
+        self.search.get_board_mut().bitboards()
     }
 }

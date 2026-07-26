@@ -355,10 +355,6 @@ impl Movegen {
 
     #[inline(always)]
     fn calc_see_info(&mut self, board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
-        if !super::search::FLAG_SEE_ANYDEPTH && self.depth <= 1 {
-            return;
-        }
-
         let bitboards = board.bitboards();
         let black_board = bitboards.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
         let white_board = bitboards.iter().take(8).fold(0u64, |acc, &bb| acc | bb);

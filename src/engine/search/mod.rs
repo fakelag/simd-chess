@@ -45,11 +45,11 @@ mod tests {
         const ITERATIONS: usize = 5;
 
         let results = [
-            ("startpos", util::FEN_STARTPOS, 17),
+            ("startpos", util::FEN_STARTPOS, 19),
             (
                 "kiwipete",
                 "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-                18,
+                17,
             ),
             (
                 "pawn_endgame",
@@ -59,7 +59,7 @@ mod tests {
             (
                 "queen_endgame",
                 "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1",
-                15,
+                16,
             ),
         ]
         .into_iter()
@@ -155,7 +155,7 @@ mod tests {
         }
 
         let tables = tables::Tables::new();
-        let feeder = SharedFenFeeder::new(POSITIONS_PATH);
+        let feeder = SharedFenFeeder::new_multi(&[POSITIONS_PATH.to_string()]);
         feeder.set_max_positions(NUM_POSITIONS);
         let start = std::time::Instant::now();
 

@@ -70,7 +70,6 @@ const EX_OUTER: u64 = const {
 };
 
 pub struct ZobristKeys {
-    pub hash_piece_squares: [[u64; 64]; 12],
     pub hash_piece_squares_new: [[u64; 64]; 16],
     pub hash_side_to_move: u64,
     pub hash_castling_rights: [u64; 16],
@@ -83,13 +82,15 @@ pub struct Tables {
     rook_move_mask: Box<[u64; Self::ROOK_TABLE_SIZE]>,
     bishop_move_mask: Box<[u64; Self::BISHOP_TABLE_SIZE]>,
     pub zobrist_hash_keys: Box<ZobristKeys>,
+    cuckoo_keys: Box<[u64; Self::CUCKOO_SIZE]>,
+    cuckoo_moves: Box<[u16; Self::CUCKOO_SIZE]>,
+    between_squares: Box<[u64; 64 * 64]>,
 }
 
 impl Tables {
     pub fn new() -> Self {
         let (
-            zobrist_hash_squares_new,
-            zobrist_hash_squares_old,
+            zobrist_hash_squares,
             zobrist_side_to_move,
             zobrist_castling_rights,
             zobrist_en_passant_squares,
@@ -100,20 +101,35 @@ impl Tables {
         let rook_move_mask = Self::gen_rook_move_table();
         let bishop_move_mask = Self::gen_bishop_move_table();
 
-        Self {
+        let mut tables = Self {
             rook_move_mask,
             bishop_move_mask,
             zobrist_hash_keys: Box::new(ZobristKeys {
-                hash_piece_squares: zobrist_hash_squares_old[1..].try_into().unwrap(),
-                hash_piece_squares_new: zobrist_hash_squares_new,
+                hash_piece_squares_new: zobrist_hash_squares,
                 hash_side_to_move: zobrist_side_to_move,
                 hash_castling_rights: zobrist_castling_rights,
                 hash_en_passant_squares: zobrist_en_passant_squares,
                 no_pawn_key,
                 hash_pawn_squares,
             }),
-        }
+            cuckoo_keys: vec![0u64; Self::CUCKOO_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+            cuckoo_moves: vec![0u16; Self::CUCKOO_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+            between_squares: vec![0u64; 64 * 64].into_boxed_slice().try_into().unwrap(),
+        };
+
+        tables.gen_between_squares();
+        tables.gen_cuckoo_table();
+
+        tables
     }
+
+    pub const CUCKOO_SIZE: usize = 1 << 13;
 
     pub const ROOK_OCCUPANCY_BITS: usize = 12;
     pub const BISHOP_OCCUPANCY_BITS: usize = 9;
@@ -414,98 +430,6 @@ impl Tables {
         }
 
         result
-    };
-
-    pub const LT_NON_SLIDER_THREAT_MASKS: [u64; 64] = const {
-        let mut moves = [0; 64];
-        let mut square = 0;
-
-        while square < 64 {
-            moves[square] |= Self::LT_KING_MOVE_MASKS[square];
-            moves[square] |= Self::LT_KNIGHT_MOVE_MASKS[square];
-            moves[square] |= Self::LT_PAWN_CAPTURE_MASKS[Side::White as usize][square];
-            moves[square] |= Self::LT_PAWN_CAPTURE_MASKS[Side::Black as usize][square];
-
-            moves[square] &= !(1 << square);
-
-            square += 1;
-        }
-
-        moves
-    };
-
-    pub const LT_SLIDER_THREAT_MASKS: [u64; 64] = const {
-        let mut moves = [0; 64];
-        let mut square = 0;
-
-        while square < 64 {
-            // Files + ranks
-            {
-                let mut rank = 0;
-                let file = square as u64 % 8;
-
-                while rank < 8 {
-                    moves[square] |= 1 << (rank * 8 + file);
-                    rank += 1;
-                }
-
-                let rank = square as u64 / 8;
-                let mut file = 0;
-
-                while file < 8 {
-                    moves[square] |= 1 << (rank * 8 + file);
-                    file += 1;
-                }
-            }
-
-            // Diagonals + anti-diagonals
-            {
-                let rank = square as u64 / 8;
-                let file = square as u64 % 8;
-
-                let mut rank_it = rank as i64;
-                let mut file_it = file as i64;
-
-                while rank_it < 8 && file_it >= 0 {
-                    moves[square] |= 1 << (rank_it * 8 + file_it);
-                    file_it -= 1;
-                    rank_it += 1;
-                }
-
-                rank_it = rank as i64;
-                file_it = file as i64;
-
-                while rank_it < 8 && file_it < 8 {
-                    moves[square] |= 1 << (rank_it * 8 + file_it);
-                    file_it += 1;
-                    rank_it += 1;
-                }
-
-                rank_it = rank as i64;
-                file_it = file as i64;
-
-                while rank_it >= 0 && file_it < 8 {
-                    moves[square] |= 1 << (rank_it * 8 + file_it);
-                    file_it += 1;
-                    rank_it -= 1;
-                }
-
-                rank_it = rank as i64;
-                file_it = file as i64;
-
-                while rank_it >= 0 && file_it >= 0 {
-                    moves[square] |= 1 << (rank_it * 8 + file_it);
-                    file_it -= 1;
-                    rank_it -= 1;
-                }
-            }
-
-            moves[square] &= !(1 << square);
-
-            square += 1;
-        }
-
-        moves
     };
 
     // Edge-inclusive king rays, split by slider type. Unlike LT_*_OCCUPANCY_MASKS these keep the
@@ -928,6 +852,109 @@ impl Tables {
         }
     }
 
+    fn gen_between_squares(&mut self) {
+        for sq1 in 0..64 {
+            for sq2 in 0..64 {
+                let (b1, b2) = (1u64 << sq1, 1u64 << sq2);
+
+                let between = if sq1 == sq2 {
+                    0
+                } else if self.get_slider_move_mask::<true>(sq1, 0) & b2 != 0 {
+                    self.get_slider_move_mask::<true>(sq1, b2)
+                        & self.get_slider_move_mask::<true>(sq2, b1)
+                } else if self.get_slider_move_mask::<false>(sq1, 0) & b2 != 0 {
+                    self.get_slider_move_mask::<false>(sq1, b2)
+                        & self.get_slider_move_mask::<false>(sq2, b1)
+                } else {
+                    0
+                };
+                self.between_squares[sq1 * 64 + sq2] = between;
+            }
+        }
+    }
+
+    fn gen_cuckoo_table(&mut self) {
+        use chess_v2::PieceIndex::*;
+
+        let side = self.zobrist_hash_keys.hash_side_to_move;
+        let mut count = 0usize;
+
+        for pc in [
+            WhiteKing,
+            WhiteQueen,
+            WhiteRook,
+            WhiteBishop,
+            WhiteKnight,
+            BlackKing,
+            BlackQueen,
+            BlackRook,
+            BlackBishop,
+            BlackKnight,
+        ] {
+            for s1 in 0..64 {
+                let attacks = match pc {
+                    WhiteKing | BlackKing => Self::LT_KING_MOVE_MASKS[s1],
+                    WhiteKnight | BlackKnight => Self::LT_KNIGHT_MOVE_MASKS[s1],
+                    WhiteRook | BlackRook => self.get_slider_move_mask::<true>(s1, 0),
+                    WhiteBishop | BlackBishop => self.get_slider_move_mask::<false>(s1, 0),
+                    WhiteQueen | BlackQueen => {
+                        self.get_slider_move_mask::<true>(s1, 0)
+                            | self.get_slider_move_mask::<false>(s1, 0)
+                    }
+                    _ => 0,
+                };
+
+                for s2 in (s1 + 1)..64usize {
+                    if attacks & (1u64 << s2) == 0 {
+                        continue;
+                    }
+
+                    let psq = &self.zobrist_hash_keys.hash_piece_squares_new;
+                    let mut key = psq[pc as usize][s1] ^ psq[pc as usize][s2] ^ side;
+                    let mut mv = (s1 as u16) | ((s2 as u16) << 6);
+
+                    let mut i = (key & 0x1fff) as usize;
+                    loop {
+                        std::mem::swap(&mut self.cuckoo_keys[i], &mut key);
+                        std::mem::swap(&mut self.cuckoo_moves[i], &mut mv);
+                        if mv == 0 {
+                            break;
+                        }
+                        i = if i == (key & 0x1fff) as usize {
+                            ((key >> 16) & 0x1fff) as usize
+                        } else {
+                            (key & 0x1fff) as usize
+                        };
+                    }
+                    count += 1;
+                }
+            }
+        }
+
+        debug_assert_eq!(count, 3668, "cuckoo table entry count mismatch");
+    }
+
+    #[inline(always)]
+    pub fn cuckoo_lookup(&self, key: u64) -> Option<u16> {
+        if key == 0 {
+            return None;
+        }
+        let j1 = (key & 0x1fff) as usize;
+        if self.cuckoo_keys[j1] == key {
+            return Some(self.cuckoo_moves[j1]);
+        }
+        let j2 = ((key >> 16) & 0x1fff) as usize;
+        if self.cuckoo_keys[j2] == key {
+            return Some(self.cuckoo_moves[j2]);
+        }
+        None
+    }
+
+    #[inline(always)]
+    pub fn between(&self, s1: usize, s2: usize) -> u64 {
+        self.between_squares[s1 * 64 + s2]
+    }
+
     fn gen_rook_move_table() -> Box<[u64; Self::ROOK_TABLE_SIZE]> {
         let mut moves: Box<[u64; Self::ROOK_TABLE_SIZE]> = vec![0u64; Self::ROOK_TABLE_SIZE]
             .into_boxed_slice()
@@ -1095,7 +1122,6 @@ impl Tables {
 
     pub fn gen_zobrist_hashes() -> (
         [[u64; 64]; 16],
-        [[u64; 64]; 13],
         u64,
         [u64; 16],
         [u64; 64],
@@ -1104,8 +1130,7 @@ impl Tables {
     ) {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-        let mut hash_squares_old = [[0u64; 64]; 13];
-        let mut hash_squares_new = [[0u64; 64]; 16];
+        let mut hash_squares = [[0u64; 64]; 16];
         let mut hash_side_to_move = 0;
         let mut hash_castling_rights: [u64; 16] = [0; 16];
         let mut zobrist_en_passant_squares = [0; 64];
@@ -1115,10 +1140,8 @@ impl Tables {
         for piece in 1..13 {
             for square in 0..64 {
                 let hash_key = rng.random::<u64>();
-                hash_squares_old[piece][square] = hash_key;
-                hash_squares_new
-                    [chess_v2::PieceIndex::from(util::PieceId::from(piece - 1)) as usize][square] =
-                    hash_key;
+                hash_squares[chess_v2::PieceIndex::from(util::PieceId::from(piece - 1)) as usize]
+                    [square] = hash_key;
             }
         }
 
@@ -1138,15 +1161,14 @@ impl Tables {
 
         for square in 0..64 {
             hash_pawn_squares[chess_v2::PieceIndex::WhitePawn as usize][square] =
-                hash_squares_new[chess_v2::PieceIndex::WhitePawn as usize][square];
+                hash_squares[chess_v2::PieceIndex::WhitePawn as usize][square];
 
             hash_pawn_squares[chess_v2::PieceIndex::BlackPawn as usize][square] =
-                hash_squares_new[chess_v2::PieceIndex::BlackPawn as usize][square];
+                hash_squares[chess_v2::PieceIndex::BlackPawn as usize][square];
         }
 
         (
-            hash_squares_new,
-            hash_squares_old,
+            hash_squares,
             hash_side_to_move,
             hash_castling_rights,
             zobrist_en_passant_squares,

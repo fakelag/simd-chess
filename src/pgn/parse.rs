@@ -134,6 +134,7 @@ impl PgnGame {
         if let Some((start, end)) = self.termination {
             return Some(match &st.buf[start..end] {
                 b"Normal" => PgnGameTermination::Normal,
+                b"Insufficient material" => PgnGameTermination::Normal,
                 b"Time forfeit" => PgnGameTermination::TimeForfeit,
                 b"Abandoned" => PgnGameTermination::Abandoned,
                 b"Rules infraction" => PgnGameTermination::RulesInfraction,

@@ -195,7 +195,7 @@ impl<'a> PgnParser<'a> {
 
             self.consume_while(|b| b.is_ascii_whitespace() || b == b'!' || b == b'?');
 
-            if self.peek() == Some(b'{') {
+            while self.peek() == Some(b'{') {
                 self.consume(); // consume '{'
                 self.consume_while(|b| b != b'}');
                 self.consume(); // consume '}'
@@ -690,6 +690,41 @@ mod tests {
             "1. d4 { [%clk 0:01:00] } g6 { [%clk 0:01:00] } 2. c4 { [%clk 0:01:00] } Bg7 { [%clk 0:01:00] } 3. Nf3 { [%clk 0:01:00] } d6 { [%clk 0:00:59] } 0-1",
             6,
         )];
+
+        let mut moves = Vec::new();
+        for pgn in pgns {
+            moves.clear();
+            let result = super::parse_moves(pgn.0, &mut board.clone(), &tables, &mut moves);
+            assert!(
+                result.is_ok(),
+                "Failed to parse PGN: {}: {}",
+                pgn.0,
+                result.err().unwrap()
+            );
+            assert_eq!(moves.len(), pgn.1);
+        }
+    }
+
+    #[test]
+    fn test_parse_pgn_double_comment() {
+        let mut board = chess_v2::ChessGame::new();
+        assert!(
+            board
+                .load_fen(util::FEN_STARTPOS, &tables::Tables::new())
+                .is_ok()
+        );
+        let tables = tables::Tables::new();
+
+        let pgns = [
+            (
+                "1. e4 { [%clk 0:05:00] } 1... e5 { [%clk 0:05:00] } 2. c4 { White offers draw } { [%eval -0.3] [%clk 0:09:49] } 2... Bc5 { [%clk 0:04:58] } 1-0",
+                4,
+            ),
+            (
+                "1. d4 { [%clk 0:01:00] } 1... e5 { [%clk 0:01:00] } 2. f4 { [%clk 0:01:00] } 2... d6 { Black offers draw } { [%clk 0:00:59] } 3. fxe5 { [%clk 0:00:58] } 1-0",
+                5,
+            ),
+        ];
 
         let mut moves = Vec::new();
         for pgn in pgns {

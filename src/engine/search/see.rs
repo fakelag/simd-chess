@@ -19,20 +19,15 @@ pub struct Pinning {
     pub relations: [u8; 64],
     pub pinners: u64,
     pub pinned: u64,
-    pub pinned_multi: u64,
 }
 
 impl Pinning {
     #[inline(always)]
     pub fn update_pinned_mask(&self, attacker_sq_mask: u64, out_pinned: &mut u64) {
         let is_pinner_mask = ((attacker_sq_mask & self.pinners == 0) as u64).wrapping_sub(1);
-        let mut pin_removed_mask = (1u64
+        let pin_removed_mask = (1u64
             .wrapping_shl(self.relations[attacker_sq_mask.trailing_zeros() as usize & 63] as u32))
             & is_pinner_mask;
-
-        if crate::engine::search::search::FLAG_SEE_PIN_MULTI {
-            pin_removed_mask &= !self.pinned_multi;
-        }
 
         *out_pinned &= !pin_removed_mask
     }
@@ -47,7 +42,6 @@ pub fn calc_pinnings(
 ) -> Pinning {
     let mut pinners = 0u64;
     let mut pinned = 0u64;
-    let mut pinned_multi = 0u64;
     let mut relations = [0u8; 64];
 
     let bitboards = board.bitboards();
@@ -94,10 +88,6 @@ pub fn calc_pinnings(
 
         relations[attacker_sq] = blocker_sq as u8;
 
-        if crate::engine::search::search::FLAG_SEE_PIN_MULTI {
-            pinned_multi |= pinned & path_occupied & is_blocker_mask;
-        }
-
         pinned |= path_occupied & is_blocker_mask;
         pinners |= (1u64 << attacker_sq) & is_blocker_mask;
     }
@@ -106,7 +96,6 @@ pub fn calc_pinnings(
         relations,
         pinners,
         pinned,
-        pinned_multi,
     }
 }
 
@@ -410,19 +399,6 @@ pub fn see_threshold(
         return false;
     }
 
-    if crate::engine::search::search::FLAG_SEE_PIN_STRICT
-        && entry_pins_reject(
-            pins,
-            &mut pinned,
-            &king_online_pinned,
-            to_sq_mask,
-            from_sq_mask,
-            b_move,
-        )
-    {
-        return false;
-    }
-
     // 2. Possible recapture:
     // Update to net gain/loss after initial stm's piece has been recaptured
     exchange = score_table[last_moved_piece as usize] - exchange;
@@ -432,16 +408,14 @@ pub fn see_threshold(
         return true;
     }
 
-    if !crate::engine::search::search::FLAG_SEE_PIN_STRICT
-        && entry_pins_reject(
-            pins,
-            &mut pinned,
-            &king_online_pinned,
-            to_sq_mask,
-            from_sq_mask,
-            b_move,
-        )
-    {
+    if entry_pins_reject(
+        pins,
+        &mut pinned,
+        &king_online_pinned,
+        to_sq_mask,
+        from_sq_mask,
+        b_move,
+    ) {
         return false;
     }
 
@@ -1515,25 +1489,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_see_pin_multi_battery() {
-        let result = see_threshold_from_fen("k7/4r3/4q3/8/2N1R3/8/8/4K3 b - - 0 1", "e6c4", 0);
+    // #[test]
+    // fn test_see_pin_multi_battery() {
+    //     let result = see_threshold_from_fen("k7/4r3/4q3/8/2N1R3/8/8/4K3 b - - 0 1", "e6c4", 0);
 
-        assert_eq!(
-            result,
-            crate::engine::search::search::FLAG_SEE_PIN_MULTI,
-            "battery pinner Re7 still pins Re4 after Qe6 departs"
-        );
-    }
+    //     assert_eq!(
+    //         result,
+    //         crate::engine::search::search::FLAG_SEE_PIN_MULTI,
+    //         "battery pinner Re7 still pins Re4 after Qe6 departs"
+    //     );
+    // }
 
-    #[test]
-    fn test_see_pin_strict_early_true() {
-        let result = see_threshold_from_fen("k7/4r3/3r4/8/4N3/8/8/4K3 w - - 0 1", "e4d6", 0);
+    // #[test]
+    // fn test_see_pin_strict_early_true() {
+    //     let result = see_threshold_from_fen("k7/4r3/3r4/8/4N3/8/8/4K3 w - - 0 1", "e4d6", 0);
 
-        assert_eq!(
-            result,
-            !crate::engine::search::search::FLAG_SEE_PIN_STRICT,
-            "pinned Ne4 capturing off-line at d6 is illegal despite exchange<=0 early-true"
-        );
-    }
+    //     assert_eq!(
+    //         result,
+    //         !crate::engine::search::search::FLAG_SEE_PIN_STRICT,
+    //         "pinned Ne4 capturing off-line at d6 is illegal despite exchange<=0 early-true"
+    //     );
+    // }
 }

@@ -314,6 +314,10 @@ pub fn time_format(ms: u64) -> String {
     }
 }
 
+pub fn pin_thread_to(core: usize) {
+    core_affinity::set_for_current(core_affinity::CoreId { id: core });
+}
+
 pub fn pin_thread_for_worker(index: usize) {
     const PHYSICAL_CORES: usize = 16;
 

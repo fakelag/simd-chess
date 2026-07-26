@@ -2,11 +2,13 @@
 /bin
 /data
 /openings
-/matchcfg
+/matchcfg*
 /analysis
+/scratch
 *.bat
 *.txt
 *.zip
 *.bin
 *.binpack
 *.csv
+todo-*.md

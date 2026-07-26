@@ -23,30 +23,17 @@ use crate::{
 const EVAL_NNUE: bool = true;
 const EVAL_CACHE: bool = false;
 
+const CHECK_EXT_DEPTH_MULT: u16 = 2;
+
 const FLAG_NMP_MATE_CLAMP: bool = false;
 
-const NMP_EVAL_R_DIV: Eval = 256;
+const NMP_EVAL_R_DIV: Eval = 192;
 const NMP_EVAL_R_MAX: u8 = 3;
-
-const FLAG_NMP_EVAL_R_TUNED: bool = false;
-const NMP_EVAL_R_DIV_TUNED: Eval = 192;
-
-const FLAG_SE_VERIFICATION_NO_IIR: bool = false;
-const FLAG_SE_VERIFICATION_TT_FIX: bool = false;
-
-const FLAG_SE_DOUBLEEXTEND: bool = true;
-const SE_DOUBLEEXTEND_MAX: u8 = 11;
 
 // const FLAG_LMR_CUTNODE: bool = false;
 // const LMR_CUTNODE_R: i16 = 2;
 
 const FLAG_TT_50MV_GUARD: bool = false;
-
-pub const FLAG_SEE_PIN_MULTI: bool = false;
-pub const FLAG_SEE_PIN_STRICT: bool = false;
-
-pub const FLAG_SEE_ANYDEPTH: bool = true;
-pub const FLAG_EP_CAPTUREONLY: bool = true;
 
 const LMP_MAX_DEPTH: u8 = 8;
 
@@ -62,7 +49,7 @@ macro_rules! net_size {
         512
     };
 }
-const NET_OSIZE: usize = 8;
+pub const NET_OSIZE: usize = 8;
 
 const QS_MOVE_STACK_SIZE: usize = 128;
 const MOVE_STACK_SIZE: usize = PV_DEPTH * 2 + QS_MOVE_STACK_SIZE;
@@ -147,7 +134,6 @@ pub struct Search<'a, const F: EngineForm> {
     lmr_table: [[u8; 64]; 64],
     move_stack: [(u8, u8); PV_DEPTH],
     excluded_move: u16,
-    se_double_exts: u8,
     cont_history: Box<[[[i16; 768]; 768]; 2]>,
 
     movegen_stack: Box<[UnsafeCell<MoveBuffer>; MOVE_STACK_SIZE]>,
@@ -158,6 +144,8 @@ pub struct Search<'a, const F: EngineForm> {
 
     tm: &'a SyncUnsafeCell<TimeManager>,
     root_best_nodes: u64,
+
+    search_depth: u8,
 }
 
 impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
@@ -197,6 +185,8 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
         'outer: for depth in 1..=target_depth {
             let mut margin = INITIAL_BOUND_MARGIN;
 
+            self.search_depth = depth;
+
             let (mut alpha, mut beta) = if depth >= 4 {
                 (
                     self.score.saturating_sub(INITIAL_BOUND_MARGIN),
@@ -232,7 +222,6 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 }
 
                 if score <= alpha {
-                    // beta = alpha; // search stability
                     alpha = score.saturating_sub(margin);
                     margin += margin / 3;
                     continue;
@@ -269,6 +258,10 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 };
 
                 if self.tm_mut().should_stop(&report) {
+                    break 'outer;
+                }
+
+                if self.tm_mut().soft_nodes_reached(self.node_count) {
                     break 'outer;
                 }
 
@@ -326,7 +319,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             cut_moves: [[0; 2]; PV_DEPTH],
             move_stack: [(0, 0); PV_DEPTH],
             excluded_move: 0,
-            se_double_exts: 0,
             cont_history: unsafe {
                 let layout = std::alloc::Layout::new::<[[[i16; 768]; 768]; 2]>();
                 let ptr = std::alloc::alloc_zeroed(layout) as *mut [[[i16; 768]; 768]; 2];
@@ -363,6 +355,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             },
             depth_stats: Vec::new(),
             root_best_nodes: 0,
+            search_depth: 0,
         };
 
         s.nnue.load(&s.chess);
@@ -394,10 +387,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         self.eval_stack = [0; PV_DEPTH];
         self.move_stack = [(0, 0); PV_DEPTH];
         self.excluded_move = 0;
-
-        if FLAG_SE_DOUBLEEXTEND {
-            self.se_double_exts = 0;
-        }
 
         for entry in self.cont_history.iter_mut() {
             for p in entry.iter_mut() {
@@ -498,6 +487,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         &self.depth_stats
     }
     #[inline(always)]
+    pub fn was_node_aborted(&self) -> bool {
+        self.is_stopping
+    }
+    #[inline(always)]
     pub fn get_rt(&self) -> &RepetitionTable {
         &self.rt
     }
@@ -553,6 +546,17 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 return 0;
             }
 
+            if alpha < 0
+                && self
+                    .rt
+                    .check_upcoming_cycle(&self.chess, self.tables, self.ply as i32)
+            {
+                alpha = 0;
+                if alpha >= beta {
+                    return 0;
+                }
+            }
+
             let mating_ceiling = SCORE_INF - self.ply as Eval - 1;
             if alpha >= mating_ceiling {
                 return mating_ceiling;
@@ -561,12 +565,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             beta = beta.min(mating_ceiling);
         }
 
+        let can_extend = (self.ply as u16) < CHECK_EXT_DEPTH_MULT * self.search_depth as u16;
+
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
-        depth += in_check as u8;
+        depth += (in_check && can_extend) as u8;
 
         let excluded_move = std::mem::take(&mut self.excluded_move);
 
-        let tt_probe = if FLAG_SE_VERIFICATION_TT_FIX || excluded_move == 0 {
+        let tt_probe = if excluded_move == 0 {
             self.tt_mut()
                 .probe(self.chess.zobrist_key(), depth, alpha, beta)
         } else {
@@ -579,10 +585,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut tt_bound = BoundType::UpperBound;
 
         if let Some(ref probe) = tt_probe {
-            if prune_node
-                && (!FLAG_TT_50MV_GUARD || self.chess.half_moves() < 90)
-                && (!FLAG_SE_VERIFICATION_TT_FIX || excluded_move == 0)
-            {
+            if prune_node && (!FLAG_TT_50MV_GUARD || self.chess.half_moves() < 90) {
                 if let Some(score) = probe.score {
                     return Self::score_from_tt(score, self.ply);
                 }
@@ -600,10 +603,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             _ => true,
         };
         depth -= if flag_enable_iir {
-            (depth >= 4
-                && tt_move_index == 0xFF
-                && prune_node
-                && (!FLAG_SE_VERIFICATION_NO_IIR || excluded_move == 0)) as u8
+            (depth >= 4 && tt_move_index == 0xFF && prune_node) as u8
         } else {
             0
         };
@@ -648,6 +648,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             if flag_enable_nmp
                 && depth >= 3
+                && corrected_eval >= beta
                 && self.chess.has_non_pawn_mat(self.chess.b_move() as usize)
             {
                 let ep_square = self.chess.make_null_move(self.tables);
@@ -659,12 +660,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 };
 
                 let new_depth = if nmp_r_enabled {
-                    let div = if FLAG_NMP_EVAL_R_TUNED {
-                        NMP_EVAL_R_DIV_TUNED
-                    } else {
-                        NMP_EVAL_R_DIV
-                    };
-                    let r_eval = ((corrected_eval as i32 - beta as i32) / div as i32)
+                    let r_eval = ((corrected_eval as i32 - beta as i32) / NMP_EVAL_R_DIV as i32)
                         .clamp(0, NMP_EVAL_R_MAX as i32) as u8;
                     let r = 2 + depth / 3 + r_eval;
                     depth.saturating_sub(r)
@@ -742,7 +738,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let singular_move = if flag_enable_se
             && prune_node
-            && (!FLAG_SE_VERIFICATION_TT_FIX || excluded_move == 0)
             && depth >= 8
             && tt_move_index != 0xFF
             && tt_depth >= depth.saturating_sub(3)
@@ -805,15 +800,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
 
                 if s_score < singular_beta {
-                    if FLAG_SE_DOUBLEEXTEND {
-                        extension = 1
-                            + (non_pv_node
-                                && s_score < singular_beta - 20
-                                && self.se_double_exts < SE_DOUBLEEXTEND_MAX)
-                                as u8;
-                    } else {
-                        extension = 1;
-                    }
+                    extension =
+                        1 + (non_pv_node && s_score < singular_beta - 20 && can_extend) as u8;
                 } else if singular_beta >= beta {
                     // Multi-cut: even without the TT move, score >= beta
                     return singular_beta;
@@ -961,10 +949,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             let new_depth = depth - 1 + extension;
 
-            if FLAG_SE_DOUBLEEXTEND {
-                self.se_double_exts += (extension == 2) as u8;
-            }
-
             let score = if num_legal_moves == 0 {
                 -self.go(-beta, -alpha, new_depth)
             } else if late_move_reduction {
@@ -1030,10 +1014,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             self.ply -= 1;
             self.chess = board_copy;
             self.nnue.rollback_move();
-
-            if FLAG_SE_DOUBLEEXTEND {
-                self.se_double_exts -= (extension == 2) as u8;
-            }
 
             if self.is_stopping {
                 self.rt.pop_position();

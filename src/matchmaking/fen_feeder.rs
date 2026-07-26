@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::io::Read;
 
 use super::matchmaking::PositionFeeder;
+use crate::engine::{chess_v2::ChessGame, tables};
 
 pub struct SharedFenFeeder {
     inner: std::sync::Arc<std::sync::Mutex<FenFeeder>>,
@@ -15,9 +17,9 @@ impl Clone for SharedFenFeeder {
 }
 
 impl SharedFenFeeder {
-    pub fn new(path: &str) -> Self {
+    pub fn new_multi(paths: &[String]) -> Self {
         Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(FenFeeder::new(path))),
+            inner: std::sync::Arc::new(std::sync::Mutex::new(FenFeeder::new_multi(paths))),
         }
     }
 
@@ -38,18 +40,21 @@ impl PositionFeeder for SharedFenFeeder {
     }
 }
 
-pub struct FenFeeder {
-    positions_total: usize,
-    cursor: usize,
-    max_positions_to_play: Option<usize>,
+struct FileReader {
+    name: String,
     chunk: Vec<String>,
     overflow: String,
     buf: Vec<u8>,
     reader: std::io::BufReader<std::fs::File>,
+    lines: usize,
+    stride: f64,
+    pass: f64,
+    active: bool,
+    served: u64,
 }
 
-impl FenFeeder {
-    pub fn new(path: &str) -> Self {
+impl FileReader {
+    fn new(path: &str) -> Self {
         let mut num_lines = 0;
 
         let file = std::fs::File::open(path).expect("Failed to open FEN file");
@@ -58,11 +63,9 @@ impl FenFeeder {
         let mut buf = vec![0; 1024 * 1024 * 4];
         loop {
             let n = reader.read(&mut buf).expect("Failed to read FEN file");
-
             if n == 0 {
                 break;
             }
-
             num_lines += buf[..n]
                 .iter()
                 .fold(0, |acc, &b| acc + if b == b'\n' { 1 } else { 0 });
@@ -71,23 +74,21 @@ impl FenFeeder {
         let file = std::fs::File::open(path).expect("Failed to open FEN file");
 
         Self {
-            cursor: 0,
-            max_positions_to_play: None,
-            positions_total: num_lines,
+            name: path.to_string(),
             chunk: Vec::new(),
             overflow: String::new(),
-            reader: std::io::BufReader::new(file),
             buf,
+            reader: std::io::BufReader::new(file),
+            lines: num_lines,
+            stride: if num_lines > 0 {
+                1.0 / num_lines as f64
+            } else {
+                0.0
+            },
+            pass: 0.0,
+            active: num_lines > 0,
+            served: 0,
         }
-    }
-
-    pub fn positions_total(&self) -> usize {
-        self.positions_total
-    }
-
-    pub fn set_max_positions(&mut self, max: usize) {
-        self.max_positions_to_play = Some(max);
-        self.cursor = 0;
     }
 
     fn read_chunk(&mut self) {
@@ -131,29 +132,143 @@ impl FenFeeder {
         }
     }
 
-    pub fn next_position(&mut self) -> Option<String> {
-        if let Some(max) = self.max_positions_to_play {
-            if self.cursor >= max {
-                return None;
-            }
-        } else {
-            panic!("max_positions_to_play not set");
+    fn next_line(&mut self) -> Option<String> {
+        if let Some(line) = self.chunk.pop() {
+            return Some(line);
+        }
+        self.read_chunk();
+        self.chunk.pop()
+    }
+}
+
+pub struct FenFeeder {
+    files: Vec<FileReader>,
+    seen: HashSet<u64>,
+    board: ChessGame,
+    tables: tables::Tables,
+    cursor: usize,
+    max_positions_to_play: Option<usize>,
+    positions_total: usize,
+    served_total: u64,
+    dup_skips: u64,
+    unparsed: u64,
+}
+
+impl FenFeeder {
+    pub fn new_multi(paths: &[String]) -> Self {
+        assert!(!paths.is_empty(), "FenFeeder needs at least one input file");
+
+        let files: Vec<FileReader> = paths.iter().map(|p| FileReader::new(p)).collect();
+        let positions_total: usize = files.iter().map(|f| f.lines).sum();
+
+        for f in &files {
+            let mix = if positions_total > 0 {
+                f.lines as f64 / positions_total as f64 * 100.0
+            } else {
+                0.0
+            };
         }
 
-        let position = self.chunk.pop();
+        Self {
+            files,
+            seen: HashSet::new(),
+            board: ChessGame::new(),
+            tables: tables::Tables::new(),
+            cursor: 0,
+            max_positions_to_play: None,
+            positions_total,
+            served_total: 0,
+            dup_skips: 0,
+            unparsed: 0,
+        }
+    }
 
-        match position {
-            Some(p) => {
-                self.cursor += 1;
-                Some(p)
-            }
-            None => {
-                self.read_chunk();
-                if let Some(position) = self.chunk.pop() {
-                    self.cursor += 1;
-                    Some(position)
+    pub fn positions_total(&self) -> usize {
+        self.positions_total
+    }
+
+    pub fn set_max_positions(&mut self, max: usize) {
+        self.max_positions_to_play = Some(max);
+        self.cursor = 0;
+    }
+
+    /// Canonical seed key of `fen`, or `None` if it fails to parse.
+    fn key_of(&mut self, fen: &str) -> Option<u64> {
+        self.board.load_fen(fen, &self.tables).ok()?;
+        Some(self.board.canonical_seed_key(&self.tables))
+    }
+
+    fn log_mix(&self) {
+        let parts: Vec<String> = self
+            .files
+            .iter()
+            .map(|f| {
+                let share = if self.served_total > 0 {
+                    f.served as f64 / self.served_total as f64 * 100.0
                 } else {
-                    None
+                    0.0
+                };
+                format!("{:.1}%", share)
+            })
+            .collect();
+    }
+
+    pub fn next_position(&mut self) -> Option<String> {
+        let max = self
+            .max_positions_to_play
+            .expect("max_positions_to_play not set");
+
+        if self.cursor >= max {
+            return None;
+        }
+
+        loop {
+            let pick = self
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.active)
+                .min_by(|(_, a), (_, b)| a.pass.partial_cmp(&b.pass).unwrap())
+                .map(|(i, _)| i);
+
+            let Some(i) = pick else {
+                return None;
+            };
+
+            let mut served_line = None;
+            loop {
+                match self.files[i].next_line() {
+                    None => break,
+                    Some(line) => match self.key_of(&line) {
+                        None => {
+                            self.unparsed += 1;
+                            continue;
+                        }
+                        Some(key) => {
+                            if !self.seen.insert(key) {
+                                self.dup_skips += 1;
+                                continue;
+                            }
+                            served_line = Some(line);
+                            break;
+                        }
+                    },
+                }
+            }
+
+            match served_line {
+                Some(line) => {
+                    self.files[i].pass += self.files[i].stride;
+                    self.files[i].served += 1;
+                    self.cursor += 1;
+                    self.served_total += 1;
+                    if self.served_total % 100_000 == 0 {
+                        self.log_mix();
+                    }
+                    return Some(line);
+                }
+                None => {
+                    self.files[i].active = false;
                 }
             }
         }

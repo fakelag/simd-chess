@@ -193,9 +193,10 @@ fn main() {
             let mut threads = None;
             let mut out_path = None;
             let mut max_positions = None;
-            let mut positions_path = None;
+            let mut positions_paths: Vec<String> = Vec::new();
             let mut win_adj = false;
             let mut draw_adj = false;
+            let mut adj_shadow_log = None;
 
             loop {
                 let arg = match arg_it.next() {
@@ -210,25 +211,30 @@ fn main() {
                         max_positions = Some(arg_it.next().unwrap().parse().unwrap())
                     }
                     "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
-                    "--positions" => positions_path = Some(arg_it.next().unwrap()),
+                    "--positions" => positions_paths.push(arg_it.next().unwrap()),
                     "--out" => out_path = Some(arg_it.next().unwrap()),
                     "--win-adj" => win_adj = true,
                     "--draw-adj" => draw_adj = true,
+                    "--adj-shadow-log" => adj_shadow_log = Some(arg_it.next().unwrap()),
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
 
             let mut selfplay = matchmaking::selfplay::SelfplayTrainer::new(out_path.as_deref());
 
-            let positions_file_path = positions_path.expect("Expected positions path");
+            assert!(
+                !positions_paths.is_empty(),
+                "Expected at least one --positions path"
+            );
             selfplay.play_annotated(
                 threads.unwrap_or(1),
-                &positions_file_path,
+                &positions_paths,
                 from,
                 games,
                 max_positions,
                 win_adj,
                 draw_adj,
+                adj_shadow_log.as_deref(),
             )
         }
         "train" => {
@@ -299,13 +305,14 @@ fn main() {
                 fno_duplicates: false,
                 fpick: pgn::extract::MovePick::Random,
                 fattempts_per_position: 1,
-                fsharpness_threshold: None,
+                fsharpness_top_percent: None,
                 fsharpness_depth: 7,
+                fout_shard_size: 0,
             };
 
             let mut arg_it = std::env::args().skip(2);
 
-            let mut in_path = None;
+            let mut in_paths: Vec<String> = Vec::new();
             let mut out_path = None;
             let mut threads = 1usize;
             loop {
@@ -326,8 +333,9 @@ fn main() {
                     "--attempts" => {
                         params.fattempts_per_position = arg_it.next().unwrap().parse().unwrap()
                     }
-                    "--sharpness-threshold" => {
-                        params.fsharpness_threshold = Some(arg_it.next().unwrap().parse().unwrap())
+                    "--sharpness-top-percent" => {
+                        params.fsharpness_top_percent =
+                            Some(arg_it.next().unwrap().parse().unwrap())
                     }
                     "--sharpness-depth" => {
                         params.fsharpness_depth = arg_it.next().unwrap().parse().unwrap()
@@ -335,21 +343,132 @@ fn main() {
                     "--threads" => threads = arg_it.next().unwrap().parse().unwrap(),
                     "--no-duplicates" => params.fno_duplicates = true,
                     "--completed-only" => params.fcompleted_only = true,
-                    "--db" => in_path = Some(arg_it.next().unwrap()),
+                    "--db" => in_paths.push(arg_it.next().unwrap()),
                     "--core" => {
                         core_affinity::set_for_current(core_affinity::CoreId {
                             id: arg_it.next().unwrap().parse().unwrap(),
                         });
                     }
                     "--out" => out_path = Some(arg_it.next().unwrap()),
+                    "--out-shard-size" => {
+                        params.fout_shard_size = arg_it.next().unwrap().parse().unwrap()
+                    }
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
 
-            let in_path = in_path.expect("Expected path to pgn input file");
+            assert!(
+                !in_paths.is_empty(),
+                "Expected at least one --db input file"
+            );
             let out_path = out_path.expect("Expected output path");
 
-            pgn::extract::extract_positions(&in_path, &out_path, params, threads)
+            pgn::extract::extract_positions(&in_paths, &out_path, params, threads)
+        }
+        "tune" => {
+            let mut arg_it = std::env::args().skip(2);
+
+            let mut fen_path = None;
+            let mut depth = 8u8;
+            let mut quantiles: Vec<f64> = vec![];
+
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--fen" => fen_path = Some(arg_it.next().unwrap()),
+                    "--depth" => depth = arg_it.next().unwrap().parse().unwrap(),
+                    "--quantiles" => {
+                        quantiles = arg_it
+                            .next()
+                            .unwrap()
+                            .split(',')
+                            .map(|s| s.parse().unwrap())
+                            .collect()
+                    }
+                    "--core" => {
+                        core_affinity::set_for_current(core_affinity::CoreId {
+                            id: arg_it.next().unwrap().parse().unwrap(),
+                        });
+                    }
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            let fen_path = fen_path.expect("Expected --fen <file>");
+            if quantiles.is_empty() {
+                quantiles = vec![0.1, 0.25, 0.5, 0.75, 0.9];
+            }
+
+            let tables = tables::Tables::new();
+            let file = std::fs::File::open(&fen_path)
+                .unwrap_or_else(|e| panic!("failed to open FEN file {}: {}", fen_path, e));
+
+            let mut boards = Vec::new();
+            for line in std::io::BufRead::lines(std::io::BufReader::new(file)) {
+                let line = line.unwrap();
+                let fen = line.trim();
+                if fen.is_empty() {
+                    continue;
+                }
+                let mut board = chess_v2::ChessGame::new();
+                if board.load_fen(fen, &tables).is_ok() {
+                    boards.push(board);
+                }
+            }
+
+            println!(
+                "tuning over {} positions at depth {} (raw winprob_instability)",
+                boards.len(),
+                depth
+            );
+            let cuts =
+                pgn::tuner::tune_thresholds(boards.into_iter(), 16, depth, &tables, &quantiles);
+            for (q, cut) in quantiles.iter().zip(cuts.iter()) {
+                println!("q{:.4} -> raw instability {:.6}", q, cut);
+            }
+
+            Ok(())
+        }
+        "metrics" => {
+            let mut arg_it = std::env::args().skip(2);
+
+            let mut fen_path = None;
+            let mut binpack_paths: Vec<String> = vec![];
+            let mut lineage_keys_path = None;
+            let mut out_prefix = "scratch/tmp_metrics".to_string();
+
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--fen" => fen_path = Some(arg_it.next().unwrap()),
+                    "--binpack" => binpack_paths.push(arg_it.next().unwrap()),
+                    "--lineage-keys" => lineage_keys_path = Some(arg_it.next().unwrap()),
+                    "--out" => out_prefix = arg_it.next().unwrap(),
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            match (fen_path, binpack_paths.is_empty()) {
+                (Some(fen), true) => pgn::metrics::run_fen_stats(&fen, &out_prefix),
+                (None, false) => {
+                    let path_refs = binpack_paths.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+                    pgn::metrics::run_binpack_metrics(
+                        &path_refs,
+                        lineage_keys_path.as_deref(),
+                        &out_prefix,
+                    )
+                }
+                (Some(_), false) => panic!("Pass exactly one of --fen / --binpack, not both"),
+                (None, true) => panic!("Expected --fen <file> or --binpack <file> (repeatable)"),
+            }
         }
         "gui" => {
             let mut arg_it = std::env::args().skip(2);

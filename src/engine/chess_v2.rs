@@ -2,7 +2,7 @@ use crate::{
     engine::tables::{self, Tables},
     nnue::nnue::{self, UpdatableNnue},
     pop_ls1b,
-    util::{self, print_m512_epi64},
+    util::{self},
 };
 use std::arch::x86_64::*;
 
@@ -1340,41 +1340,27 @@ impl ChessGame {
             MV_FLAG_DPP => {
                 let new_ep_square = if self.b_move { to_sq + 8 } else { to_sq - 8 };
 
-                if crate::search::search::FLAG_EP_CAPTUREONLY {
-                    let ntm_offset = stm_offset ^ 8;
-                    unsafe {
-                        let attacker_pawns = *self
-                            .board
-                            .bitboards
-                            .get_unchecked(PieceIndex::WhitePawn as usize + ntm_offset);
-                        let ep_attack_squares = *Tables::LT_PAWN_CAPTURE_MASKS
-                            [self.b_move as usize]
-                            .get_unchecked(new_ep_square as usize);
+                let ntm_offset = stm_offset ^ 8;
+                unsafe {
+                    let attacker_pawns = *self
+                        .board
+                        .bitboards
+                        .get_unchecked(PieceIndex::WhitePawn as usize + ntm_offset);
+                    let ep_attack_squares = *Tables::LT_PAWN_CAPTURE_MASKS[self.b_move as usize]
+                        .get_unchecked(new_ep_square as usize);
 
-                        let no_ep_attackers = (ep_attack_squares & attacker_pawns) == 0;
+                    let no_ep_attackers = (ep_attack_squares & attacker_pawns) == 0;
 
-                        let ep_mask = (no_ep_attackers as u64).wrapping_sub(1);
+                    let ep_mask = (no_ep_attackers as u64).wrapping_sub(1);
 
-                        next_ep_square = new_ep_square & (ep_mask as u8);
-
-                        // Add new en passant square to Zobrist key
-                        // Safety: Any pseudovalid move guarantees ep_square to be in range [8, =15] | [48, =55]
-                        self.zobrist_key ^= zb_keys
-                            .hash_en_passant_squares
-                            .get_unchecked(new_ep_square as usize)
-                            & ep_mask;
-                    }
-                } else {
-                    debug_assert!(new_ep_square != 0);
-                    next_ep_square = new_ep_square;
+                    next_ep_square = new_ep_square & (ep_mask as u8);
 
                     // Add new en passant square to Zobrist key
-                    unsafe {
-                        // Safety: Any pseudovalid move guarantees ep_square to be in range [8, =15] | [48, =55]
-                        self.zobrist_key ^= zb_keys
-                            .hash_en_passant_squares
-                            .get_unchecked(new_ep_square as usize);
-                    }
+                    // Safety: Any pseudovalid move guarantees ep_square to be in range [8, =15] | [48, =55]
+                    self.zobrist_key ^= zb_keys
+                        .hash_en_passant_squares
+                        .get_unchecked(new_ep_square as usize)
+                        & ep_mask;
                 }
 
                 nnue::NnueUpdate::quiet(from_piece as u8, from_piece as u8, from_sq, to_sq)
@@ -1806,7 +1792,7 @@ impl ChessGame {
             }
         }
 
-        if crate::search::search::FLAG_EP_CAPTUREONLY && self.en_passant != 0 {
+        if self.en_passant != 0 {
             let stm_offset = (self.b_move as usize) << 3;
             let ep_attackers = Tables::LT_PAWN_CAPTURE_MASKS[!self.b_move as usize]
                 [self.en_passant as usize]
@@ -1998,6 +1984,53 @@ impl ChessGame {
         };
 
         (board_key, pawn_key, non_pawn_key)
+    }
+
+    pub fn calc_color_flipped_zobrist_key(&self, tables: &Tables) -> u64 {
+        let zb_keys = &tables.zobrist_hash_keys;
+
+        let mut board_key = 0u64;
+
+        for square in 0..64usize {
+            debug_assert!(zb_keys.hash_piece_squares_new[8][square] == 0);
+            debug_assert!(zb_keys.hash_piece_squares_new[0][square] == 0);
+
+            let piece_id = self.piece_at(square as u8);
+            board_key ^= zb_keys.hash_piece_squares_new[piece_id ^ 8][square ^ 56];
+        }
+
+        let flipped_ep = if self.en_passant == 0 {
+            0
+        } else {
+            self.en_passant ^ 56
+        };
+
+        debug_assert!(zb_keys.hash_en_passant_squares[0] == 0);
+
+        board_key ^= zb_keys.hash_en_passant_squares[flipped_ep as usize];
+
+        let flipped_castles = ((self.castles & 0b1100) >> 2) | ((self.castles & 0b0011) << 2);
+        board_key ^= zb_keys.hash_castling_rights[flipped_castles as usize];
+
+        board_key ^= if self.b_move {
+            0
+        } else {
+            zb_keys.hash_side_to_move
+        };
+
+        board_key
+    }
+
+    pub fn canonical_seed_key_parts(&self, tables: &Tables) -> (u64, u64) {
+        (
+            self.zobrist_key,
+            self.calc_color_flipped_zobrist_key(tables),
+        )
+    }
+
+    pub fn canonical_seed_key(&self, tables: &Tables) -> u64 {
+        let (own_key, flipped) = self.canonical_seed_key_parts(tables);
+        own_key.min(flipped)
     }
 
     // Sets move flags based on board state that can't be derived from move string
@@ -3159,5 +3192,124 @@ mod tests {
             let generated_fen = board.gen_fen();
             assert_eq!(generated_fen, fen);
         }
+    }
+
+    const CANONICAL_FLIP_PAIRS: [(&str, &str); 3] = [
+        // capturable ep, white <-> black to move
+        (
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            "4k3/8/8/8/3Pp3/8/8/4K3 b - d3 0 1",
+        ),
+        // asymmetric castling rights Kq <-> Qk
+        (
+            "r3k2r/8/8/8/8/8/8/R3K2R b Kq - 0 1",
+            "r3k2r/8/8/8/8/8/8/R3K2R w Qk - 0 1",
+        ),
+        // asymmetric piece placement
+        (
+            "8/2k5/8/8/4B3/8/5N2/6K1 w - - 0 1",
+            "6k1/5n2/8/4b3/8/8/2K5/8 b - - 0 1",
+        ),
+    ];
+
+    #[test]
+    fn test_canonical_flip_identity() {
+        let tables = Tables::new();
+        let mut orig = ChessGame::new();
+        let mut flipped = ChessGame::new();
+
+        for (orig_fen, flipped_fen) in CANONICAL_FLIP_PAIRS {
+            assert!(orig.load_fen(orig_fen, &tables).is_ok());
+            assert!(flipped.load_fen(flipped_fen, &tables).is_ok());
+
+            assert_eq!(
+                orig.calc_color_flipped_zobrist_key(&tables),
+                flipped.zobrist_key(),
+                "flip of {} should key as {}",
+                orig_fen,
+                flipped_fen
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonical_symmetry() {
+        let tables = Tables::new();
+        let mut orig = ChessGame::new();
+        let mut flipped = ChessGame::new();
+
+        for (orig_fen, flipped_fen) in CANONICAL_FLIP_PAIRS {
+            assert!(orig.load_fen(orig_fen, &tables).is_ok());
+            assert!(flipped.load_fen(flipped_fen, &tables).is_ok());
+
+            assert_eq!(
+                orig.canonical_seed_key(&tables),
+                flipped.canonical_seed_key(&tables),
+                "{} and its mirror {} must share a canonical key",
+                orig_fen,
+                flipped_fen
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonical_ep_normalization() {
+        let tables = Tables::new();
+        let mut with_ep = ChessGame::new();
+        let mut without_ep = ChessGame::new();
+
+        // Non-capturable ep (no black pawn on d4/f4).
+        assert!(
+            with_ep
+                .load_fen("4k3/8/8/8/4P3/8/8/4K3 b - e3 0 1", &tables)
+                .is_ok()
+        );
+        assert!(
+            without_ep
+                .load_fen("4k3/8/8/8/4P3/8/8/4K3 b - - 0 1", &tables)
+                .is_ok()
+        );
+        assert_eq!(
+            with_ep.canonical_seed_key(&tables),
+            without_ep.canonical_seed_key(&tables),
+            "non-capturable ep must normalize away"
+        );
+
+        // Capturable ep (black pawn on f4) must not normalize away.
+        assert!(
+            with_ep
+                .load_fen("4k3/8/8/8/4Pp2/8/8/4K3 b - e3 0 1", &tables)
+                .is_ok()
+        );
+        assert!(
+            without_ep
+                .load_fen("4k3/8/8/8/4Pp2/8/8/4K3 b - - 0 1", &tables)
+                .is_ok()
+        );
+        assert_ne!(
+            with_ep.canonical_seed_key(&tables),
+            without_ep.canonical_seed_key(&tables),
+            "capturable ep must survive normalization"
+        );
+
+        let mut made = ChessGame::new();
+        assert!(
+            made.load_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1", &tables)
+                .is_ok()
+        );
+        let dpp = made.fix_move(util::create_move("e2e4"));
+        assert!(unsafe { made.make_move(dpp, &tables) });
+
+        let mut always_emit = ChessGame::new();
+        assert!(
+            always_emit
+                .load_fen("4k3/8/8/8/4P3/8/8/4K3 b - e3 0 1", &tables)
+                .is_ok()
+        );
+        assert_eq!(
+            made.canonical_seed_key(&tables),
+            always_emit.canonical_seed_key(&tables),
+            "make_move and always-emit-FEN paths must key identically"
+        );
     }
 }

@@ -58,6 +58,7 @@ pub struct TimeManager {
     stability: u32,
     stopped: bool,
     nodes: u64,
+    soft_nodes: u64,
     prev_score: Eval,
 }
 
@@ -119,6 +120,7 @@ impl TimeManager {
             stability: 0,
             prev_score: 0,
             nodes: 0,
+            soft_nodes: 0,
         }
     }
 
@@ -130,6 +132,7 @@ impl TimeManager {
         self.prev_score = 0;
         self.start = Instant::now();
         self.nodes = 0;
+        self.soft_nodes = 0;
     }
 
     pub fn enable(&mut self, limits: TimeLimits, start: Instant) {
@@ -140,11 +143,21 @@ impl TimeManager {
         self.stability = 0;
         self.prev_score = 0;
         self.nodes = 0;
+        self.soft_nodes = 0;
         self.start = start;
     }
 
     pub fn set_nodes(&mut self, nodes: u64) {
         self.nodes = nodes;
+    }
+
+    pub fn set_soft_nodes(&mut self, nodes: u64) {
+        self.soft_nodes = nodes;
+    }
+
+    #[inline(always)]
+    pub fn soft_nodes_reached(&self, nodes: u64) -> bool {
+        self.soft_nodes > 0 && nodes >= self.soft_nodes
     }
 
     pub fn stop(&mut self) {
