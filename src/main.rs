@@ -11,44 +11,22 @@
 use std::cell::SyncUnsafeCell;
 
 use crossbeam::channel;
-use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::engine::ownbook::OwnBook;
-use crate::engine::search::search_params::SearchParams;
 use crate::engine::search::{EngineForm, SearchStrategy, repetition};
-use crate::uci::uci::{UciCommand, chess_uci};
-use crate::{
-    engine::{
+use crate::engine::{
         chess_v2,
         search::{self},
         tables,
-    },
-    ui::chess_ui::ChessUi,
 };
+use crate::uci::uci::{UciCommand, chess_uci};
 
-mod clipb;
 mod engine;
 mod matchmaking;
 mod nnue;
 mod pgn;
 mod uci;
-mod ui;
-mod uicomponents;
 mod util;
-mod window;
-
-fn chess_ui() -> anyhow::Result<()> {
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Poll);
-
-    let chess_ui = ChessUi::new("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    // "8/PPPPPPPP/7k/8/8/7K/pppppppp/8 w KQkq - 0 1");
-
-    let mut app = window::App::new(chess_ui);
-    event_loop.run_app(&mut app)?;
-
-    Ok(())
-}
 
 fn get_opening_book(
     uci_context: &uci::context::UciContext<uci::uci::UciOptions>,
@@ -475,27 +453,6 @@ fn main() {
                 (Some(_), false) => panic!("Pass exactly one of --fen / --binpack, not both"),
                 (None, true) => panic!("Expected --fen <file> or --binpack <file> (repeatable)"),
             }
-        }
-        "gui" => {
-            let mut arg_it = std::env::args().skip(2);
-            loop {
-                let arg = match arg_it.next() {
-                    Some(a) => a,
-                    None => break,
-                };
-
-                match arg.as_str() {
-                    "--pin" => {
-                        let core_id: usize = arg_it.next().unwrap().parse().unwrap();
-                        core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
-                        println!("Pinned GUI thread to core {}", core_id);
-                    }
-                    _ => panic!("Unknown argument: {}", arg),
-                }
-            }
-
-            // chess_ui()
-            Ok(())
         }
         "uci" => {
             let mut arg_it = std::env::args().skip(2);

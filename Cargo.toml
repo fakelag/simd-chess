@@ -4,12 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-imgui = "0.12.0"
-imgui-wgpu = "0.25.0"
-imgui-winit-support = "0.13.0"
 pollster = "0.4.0"
 wgpu = "25.0.2"
-winit = "0.30.0"
 image = { version = "0.24", features = ["png"] }
 clipboard = "0.5.0"
 rand = "0.9.1"
@@ -17,11 +13,15 @@ anyhow = "1.0.98"
 crossbeam = "0.8.4"
 core_affinity = "0.8.3"
 sfbinpack = { version = "0.4.3", features = ["bmi2"] }
-bullet = { git = "https://github.com/jw1912/bullet", rev = "e37db79", package = "bullet_lib" }
+bullet = { git = "https://github.com/jw1912/bullet", rev = "cebc78a", package = "bullet_lib", features = [
+    "cuda",
+] }
 zstd = "0.13.3"
+llvm-mca = "0.1.0"
 
 [profile.release]
 debug = true
 lto = "fat"
 panic = "abort"
 codegen-unit = 1
+# debug-assertions = true
