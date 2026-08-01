@@ -45,6 +45,20 @@ impl RepetitionTable {
     }
 
     #[inline(always)]
+    pub fn push_hash(&mut self, hash: u64) {
+        let cursor = self.cursor & (REPTABLE_SIZE - 1);
+        self.hashes[cursor] = hash;
+        self.cursor += 1;
+
+        debug_assert!(
+            self.cursor <= REPTABLE_SIZE,
+            "Repetition table overflow: cursor = {}, size = {}",
+            self.cursor,
+            REPTABLE_SIZE
+        );
+    }
+
+    #[inline(always)]
     pub fn pop_position(&mut self) {
         debug_assert!(self.cursor > 0, "Cannot pop from an empty repetition table");
         self.cursor -= 1;
@@ -67,9 +81,9 @@ impl RepetitionTable {
     }
 
     #[inline(always)]
-    pub fn is_repeated_search(&self, hash: u64, half_moves: usize) -> bool {
+    pub fn is_repeated_search(&self, hash: u64, half_moves: usize, null_halfmoves: usize) -> bool {
         let cursor = self.cursor & (REPTABLE_SIZE - 1);
-        let end = half_moves.min(cursor);
+        let end = half_moves.min(cursor).min(null_halfmoves);
 
         let mut i = 2;
         while i <= end {
@@ -79,7 +93,7 @@ impl RepetitionTable {
             if unsafe { *self.hashes.get_unchecked(cursor - i) } == hash {
                 return true;
             }
-            i += 2;
+            i += 1;
         }
 
         false
@@ -103,9 +117,18 @@ impl RepetitionTable {
     }
 
     #[inline(always)]
-    pub fn check_upcoming_cycle(&self, board: &ChessGame, tables: &Tables, ply: i32) -> bool {
+    pub fn check_upcoming_cycle(
+        &self,
+        board: &ChessGame,
+        tables: &Tables,
+        ply: i32,
+        null_halfmoves: usize,
+    ) -> bool {
         let cursor = self.cursor & (REPTABLE_SIZE - 1);
-        let end = (board.half_moves() as usize).min(cursor);
+
+        let end = (board.half_moves() as usize)
+            .min(cursor)
+            .min(null_halfmoves);
 
         if end < 3 {
             return false;
@@ -385,7 +408,7 @@ mod tests {
 
             let hm = board.half_moves() as usize;
             assert_eq!(
-                table.is_repeated_search(board.zobrist_key(), hm),
+                table.is_repeated_search(board.zobrist_key(), hm, usize::MAX),
                 is_repeated,
                 "Move {} search-repeat mismatch",
                 mv_string
@@ -423,7 +446,7 @@ mod tests {
                 // On contiguous history the specialized search variant must agree with the
                 // general scan, and the constructed final move must register as a repetition.
                 assert_eq!(
-                    reptable.is_repeated_search(key, hm),
+                    reptable.is_repeated_search(key, hm, usize::MAX),
                     reptable.is_repeated(key),
                     "search vs scan mismatch: len {}, move index {}",
                     i,
@@ -431,7 +454,7 @@ mod tests {
                 );
                 if index + 1 == i {
                     assert!(
-                        reptable.is_repeated_search(key, hm),
+                        reptable.is_repeated_search(key, hm, usize::MAX),
                         "final move must repeat, len {}",
                         i
                     );
@@ -440,6 +463,33 @@ mod tests {
                 reptable.push_position(key, board.half_moves() == 0);
             }
         }
+    }
+
+    #[test]
+    fn test_is_repeated_search_bounds() {
+        let mut rt = RepetitionTable::new();
+        for i in 0..12 {
+            rt.push_position(0x1000 + i, false);
+        }
+        let cursor = rt.cursor;
+        let target = 0xABCD_u64;
+
+        // Even distance within both bounds is found.
+        rt.hashes[cursor - 4] = target;
+        assert!(rt.is_repeated_search(target, 100, 100));
+
+        // The null bound stops the walk before reaching distance 4.
+        assert!(!rt.is_repeated_search(target, 100, 2));
+        // The half-move bound does the same.
+        assert!(!rt.is_repeated_search(target, 2, 100));
+
+        // Odd distances are visited too (the root double-push shifts history parity), so an
+        // odd-distance plant within bounds is found.
+        rt.hashes[cursor - 4] = 0x1000;
+        rt.hashes[cursor - 3] = target;
+        assert!(rt.is_repeated_search(target, 100, 100));
+        // ...but still gated by the bounds.
+        assert!(!rt.is_repeated_search(target, 2, 100));
     }
 
     #[test]
@@ -521,11 +571,11 @@ mod tests {
         play(&mut board, &tables, "f6g8");
 
         assert!(
-            rt.check_upcoming_cycle(&board, &tables, 100),
+            rt.check_upcoming_cycle(&board, &tables, 100, usize::MAX),
             "Nh4-f3 reaches the position 3 plies back"
         );
         assert!(
-            !rt.check_upcoming_cycle(&board, &tables, 3),
+            !rt.check_upcoming_cycle(&board, &tables, 3, usize::MAX),
             "ply <= i must not fire (in-tree guard)"
         );
     }
@@ -538,7 +588,7 @@ mod tests {
 
         let mut rt = RepetitionTable::new();
         rt.push_position(board.zobrist_key(), true);
-        assert!(!rt.check_upcoming_cycle(&board, &tables, 100));
+        assert!(!rt.check_upcoming_cycle(&board, &tables, 100, usize::MAX));
 
         for mv in ["g1f3", "g8f6", "b1c3", "b8c6"] {
             play(&mut board, &tables, mv);
@@ -547,7 +597,7 @@ mod tests {
         play(&mut board, &tables, "f1e2");
 
         assert!(
-            !rt.check_upcoming_cycle(&board, &tables, 100),
+            !rt.check_upcoming_cycle(&board, &tables, 100, usize::MAX),
             "distinct reversible moves are not an upcoming repetition"
         );
     }

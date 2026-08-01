@@ -37,7 +37,10 @@ const FLAG_TT_50MV_GUARD: bool = false;
 
 const LMP_MAX_DEPTH: u8 = 8;
 
-// "../../../nnue/adjtest-C.bin"
+//  "../../../nnue/w2-10M-512-b8.bin"
+// "../../../nnue/v1-10M-512-b8.bin"
+// "../../../nnue/v1-20M-512-b8.bin"
+// "../../../nnue/v1-20M-1024-b8.bin"
 macro_rules! net_path {
     () => {
         "../../../nnue/w2-10M-512-b8.bin"
@@ -113,6 +116,7 @@ pub struct Search<'a, const F: EngineForm> {
     nnue: Box<nnue::LazyNnue<{ net_size!() }, NET_OSIZE>>,
 
     ply: u8,
+    null_halfmoves: u32,
     is_stopping: bool,
     info_print_enabled: bool,
 
@@ -198,6 +202,7 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
 
             loop {
                 self.ply = 0;
+                self.null_halfmoves = self.rt.cursor as u32;
 
                 // println!(
                 //     "Going depth {} with alpha = {}, beta = {}",
@@ -304,6 +309,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             tables,
             node_count: 0,
             ply: 0,
+            null_halfmoves: 0,
             is_stopping: false,
             info_print_enabled: false,
             score: -SCORE_INF,
@@ -542,14 +548,23 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let non_pv_node = alpha == beta - 1;
 
         if ply > 0 {
-            if self.chess.half_moves() >= 100 || self.rt.is_repeated(self.chess.zobrist_key()) {
+            let repeated = self.rt.is_repeated_search(
+                self.chess.zobrist_key(),
+                self.chess.half_moves() as usize,
+                self.null_halfmoves as usize,
+            );
+
+            if self.chess.half_moves() >= 100 || repeated {
                 return 0;
             }
 
             if alpha < 0
-                && self
-                    .rt
-                    .check_upcoming_cycle(&self.chess, self.tables, self.ply as i32)
+                && self.rt.check_upcoming_cycle(
+                    &self.chess,
+                    self.tables,
+                    self.ply as i32,
+                    self.null_halfmoves as usize,
+                )
             {
                 alpha = 0;
                 if alpha >= beta {
@@ -670,7 +685,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 };
 
                 self.ply += 1;
+                let saved_null_hm = self.null_halfmoves;
+
+                self.null_halfmoves = 0;
                 let score = -self.go(-beta, -beta + 1, new_depth);
+                self.null_halfmoves = saved_null_hm;
+
                 self.ply -= 1;
 
                 self.chess.rollback_null_move(ep_square, self.tables);
@@ -687,8 +707,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
         }
 
-        self.rt
-            .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
+        self.rt.push_hash(self.chess.zobrist_key());
 
         let cont_idx_ply1 = if ply >= 1 {
             let (p, d) = self.move_stack[ply - 1];
@@ -807,8 +826,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     return singular_beta;
                 }
 
-                self.rt
-                    .push_position(self.chess.zobrist_key(), self.chess.half_moves() == 0);
+                self.rt.push_hash(self.chess.zobrist_key());
             }
 
             if num_legal_moves > lmp_threshold
@@ -935,6 +953,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             self.ply += 1;
 
+            self.null_halfmoves += 1;
+
             let is_non_capture = (mv & MV_FLAG_CAP) == 0;
 
             if is_non_capture {
@@ -1012,6 +1032,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             num_legal_moves += 1;
 
             self.ply -= 1;
+            self.null_halfmoves -= 1;
+
             self.chess = board_copy;
             self.nnue.rollback_move();
 
@@ -1894,13 +1916,15 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 return;
             }
 
-            rt.push_position(board.zobrist_key(), board.half_moves() == 0);
+            rt.push_hash(board.zobrist_key());
 
             board_keys[board_keys_cursor] = board.zobrist_key();
             board_keys_cursor += 1;
         }
 
-        if board.half_moves() >= 100 || rt.is_repeated(board.zobrist_key()) {
+        if board.half_moves() >= 100
+            || rt.is_repeated_search(board.zobrist_key(), board.half_moves() as usize, usize::MAX)
+        {
             return;
         }
 
@@ -1925,11 +1949,17 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 break;
             }
 
-            if board.half_moves() >= 100 || rt.is_repeated(board.zobrist_key()) {
+            if board.half_moves() >= 100
+                || rt.is_repeated_search(
+                    board.zobrist_key(),
+                    board.half_moves() as usize,
+                    usize::MAX,
+                )
+            {
                 break;
             }
 
-            rt.push_position(board.zobrist_key(), board.half_moves() == 0);
+            rt.push_hash(board.zobrist_key());
 
             board_keys[board_keys_cursor] = board.zobrist_key();
             board_keys_cursor += 1;
