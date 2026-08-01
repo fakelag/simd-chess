@@ -1,8 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::Mutex;
 
-use crate::engine::chess_v2::ChessGame;
+use sfbinpack::TrainingDataEntry;
+use sfbinpack::chess::castling_rights::CastlingRights;
+use sfbinpack::chess::color::Color;
+use sfbinpack::chess::coords::Square;
+use sfbinpack::chess::piecetype::PieceType;
+use sfbinpack::chess::position::Position;
+
+use crate::engine::chess_v2::{ChessGame, PieceIndex};
 use crate::engine::search::search::NET_OSIZE;
 use crate::engine::tables::Tables;
 
@@ -140,10 +148,94 @@ pub fn run_fen_stats(fen_path: &str, out_prefix: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+const NSHARDS: usize = 1024;
+const BATCH_TARGET: usize = 16 * 1024;
+const FLAG_NONLINEAGE: u8 = 0b01;
+const FLAG_LINEAGE: u8 = 0b10;
+
+#[derive(Default)]
+struct Shard {
+    seen: HashSet<u64>,
+    lineage_flags: HashMap<u64, u8>,
+    unique: u64,
+    mirror_hits: u64,
+    exact_dups: u64,
+}
+
+impl Shard {
+    fn observe(&mut self, own_key: u64, flipped: u64) {
+        if !self.seen.insert(own_key) {
+            self.exact_dups += 1;
+        } else if own_key != flipped && self.seen.contains(&flipped) {
+            self.mirror_hits += 1;
+        } else {
+            self.unique += 1;
+        }
+    }
+}
+
+#[derive(Default)]
+struct Locals {
+    total: u64,
+    bucket_counts: [u64; NET_OSIZE],
+    ply_counts: Vec<u64>,
+    result_all: [u64; 3],
+    result_lineage: [u64; 3],
+}
+
+impl Locals {
+    fn bump_ply(&mut self, ply: usize) {
+        if ply >= self.ply_counts.len() {
+            self.ply_counts.resize(ply + 1, 0);
+        }
+        self.ply_counts[ply] += 1;
+    }
+}
+
+struct Batch {
+    entries: Vec<TrainingDataEntry>,
+    game_starts: Vec<usize>,
+}
+
+fn board_from_sf(pos: &Position, tables: &Tables) -> ChessGame {
+    let mut bb = [0u64; 16];
+    for (color, off) in [(Color::White, 0usize), (Color::Black, 8usize)] {
+        bb[PieceIndex::WhiteKing as usize + off] = pos.pieces_bb_color(color, PieceType::King).bits();
+        bb[PieceIndex::WhiteQueen as usize + off] =
+            pos.pieces_bb_color(color, PieceType::Queen).bits();
+        bb[PieceIndex::WhiteRook as usize + off] = pos.pieces_bb_color(color, PieceType::Rook).bits();
+        bb[PieceIndex::WhiteBishop as usize + off] =
+            pos.pieces_bb_color(color, PieceType::Bishop).bits();
+        bb[PieceIndex::WhiteKnight as usize + off] =
+            pos.pieces_bb_color(color, PieceType::Knight).bits();
+        bb[PieceIndex::WhitePawn as usize + off] = pos.pieces_bb_color(color, PieceType::Pawn).bits();
+    }
+
+    let cr = pos.castling_rights();
+    let castles = ((cr.contains(CastlingRights::WHITE_KING_SIDE) as u8) << 3)
+        | ((cr.contains(CastlingRights::WHITE_QUEEN_SIDE) as u8) << 2)
+        | ((cr.contains(CastlingRights::BLACK_KING_SIDE) as u8) << 1)
+        | (cr.contains(CastlingRights::BLACK_QUEEN_SIDE) as u8);
+
+    let ep = pos.ep_square();
+    let en_passant = if ep == Square::NONE { 0 } else { ep.index() as u8 };
+
+    ChessGame::from_position_parts(
+        bb,
+        pos.side_to_move() == Color::Black,
+        castles,
+        en_passant,
+        pos.rule50_counter() as u32,
+        tables,
+    )
+}
+
 pub fn run_binpack_metrics(
     binpack_paths: &[&str],
     lineage_keys_path: Option<&str>,
     out_prefix: &str,
+    threads: Option<usize>,
+    track_uniqueness: bool,
 ) -> anyhow::Result<()> {
     let tables = Tables::new();
 
@@ -161,100 +253,182 @@ pub fn run_binpack_metrics(
         None => None,
     };
 
-    const FLAG_NONLINEAGE: u8 = 0b01;
-    const FLAG_LINEAGE: u8 = 0b10;
+    let lineage_keys = lineage_keys.as_ref();
 
-    let mut seen_forms: HashMap<u64, u8> = HashMap::new();
-    let mut lineage_flags: HashMap<u64, u8> = HashMap::new();
-    let mut tally = UniquenessTally::default();
+    let num_threads = threads
+        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+        .unwrap_or(1)
+        .max(1);
+    println!("metrics: {num_threads} worker threads, {NSHARDS} shards");
 
-    let mut bucket_counts = [0u64; NET_OSIZE];
-    let mut ply_counts: Vec<u64> = Vec::new();
+    let shards: Vec<Mutex<Shard>> = (0..NSHARDS).map(|_| Mutex::new(Shard::default())).collect();
+    let worker_locals: Mutex<Vec<Locals>> = Mutex::new(Vec::new());
 
-    let mut result_all = [0u64; 3];
-    let mut result_lineage = [0u64; 3];
+    let (tx, rx) = crossbeam::channel::bounded::<Batch>(num_threads * 4);
 
-    let mut board = ChessGame::new();
-    let mut current_game_lineage = false;
-    let mut counter: u64 = 0;
+    std::thread::scope(|s| {
+        for _ in 0..num_threads {
+            let rx = rx.clone();
+            let shards = &shards;
+            let tables = &tables;
+            let worker_locals = &worker_locals;
+            s.spawn(move || {
+                let mut local = Locals::default();
+                for batch in rx.iter() {
+                    for gi in 0..batch.game_starts.len() {
+                        let start = batch.game_starts[gi];
+                        let end = batch
+                            .game_starts
+                            .get(gi + 1)
+                            .copied()
+                            .unwrap_or(batch.entries.len());
 
-    let mut last_report_time = std::time::Instant::now();
+                        let mut game_lineage = false;
+                        for (j, entry) in batch.entries[start..end].iter().enumerate() {
+                            let g = board_from_sf(&entry.pos, tables);
+                            let (own_key, flipped) = g.canonical_seed_key_parts(tables);
+                            let canonical = own_key.min(flipped);
 
-    for binpack_path in binpack_paths {
-        let mut reader = sfbinpack::CompressedTrainingDataEntryReader::new(binpack_path)
-            .map_err(|e| anyhow::anyhow!("failed to open binpack {}: {}", binpack_path, e))?;
+                            if j == 0 {
+                                game_lineage = lineage_keys.is_some_and(|k| k.contains(&canonical));
+                            }
 
-        let mut prev_entry: Option<sfbinpack::TrainingDataEntry> = None;
+                            local.total += 1;
+                            local.bucket_counts[output_bucket(g.occupancy().count_ones())] += 1;
+                            local.bump_ply(entry.ply as usize);
+                            let bin = (entry.result.clamp(-1, 1) + 1) as usize;
+                            local.result_all[bin] += 1;
+                            if game_lineage {
+                                local.result_lineage[bin] += 1;
+                            }
 
-        println!("reading binpack {}...", binpack_path);
+                            if track_uniqueness || lineage_keys.is_some() {
+                                let mut sh =
+                                    shards[(canonical as usize) & (NSHARDS - 1)].lock().unwrap();
+                                if track_uniqueness {
+                                    sh.observe(own_key, flipped);
+                                }
+                                if lineage_keys.is_some() {
+                                    let flag = if game_lineage {
+                                        FLAG_LINEAGE
+                                    } else {
+                                        FLAG_NONLINEAGE
+                                    };
+                                    *sh.lineage_flags.entry(canonical).or_insert(0) |= flag;
+                                }
+                            }
+                        }
+                    }
+                }
+                worker_locals.lock().unwrap().push(local);
+            });
+        }
+        drop(rx);
 
-        while reader.has_next() {
-            let entry = reader.next();
-            tally.total += 1;
-            counter += 1;
+        let mut counter: u64 = 0;
+        let mut last_report_time = std::time::Instant::now();
+        let mut batch = Batch {
+            entries: Vec::with_capacity(BATCH_TARGET),
+            game_starts: Vec::new(),
+        };
+        let mut prev: Option<TrainingDataEntry> = None;
 
-            if last_report_time.elapsed().as_secs() >= 5 {
-                let fs = reader.file_size().max(1);
-                println!(
-                    "read {} entries (file {:.1}%)",
-                    counter,
-                    reader.read_bytes() as f64 / fs as f64 * 100.0
-                );
-
-                last_report_time = std::time::Instant::now();
-            }
-
-            let fen = entry.pos.fen();
-            if board.load_fen(&fen, &tables).is_err() {
-                tally.parse_failures += 1;
-                prev_entry = Some(entry);
-                continue;
-            }
-
-            let (own_key, flipped) = board.canonical_seed_key_parts(&tables);
-            let canonical = own_key.min(flipped);
-
-            let is_game_start = match &prev_entry {
-                None => true,
-                Some(prev) => !prev.is_continuation(&entry),
+        for binpack_path in binpack_paths {
+            let mut reader = match sfbinpack::CompressedTrainingDataEntryReader::new(binpack_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("failed to open binpack {binpack_path}: {e}");
+                    continue;
+                }
             };
-            if is_game_start {
-                current_game_lineage = lineage_keys
-                    .as_ref()
-                    .is_some_and(|keys| keys.contains(&canonical));
-            }
+            println!("reading binpack {binpack_path}...");
 
-            tally.observe(canonical, own_key, &mut seen_forms);
+            while reader.has_next() {
+                let entry = reader.next();
+                counter += 1;
 
-            let bucket = output_bucket(board.occupancy().count_ones());
-            bucket_counts[bucket] += 1;
-
-            let ply = entry.ply as usize;
-            if ply >= ply_counts.len() {
-                ply_counts.resize(ply + 1, 0);
-            }
-            ply_counts[ply] += 1;
-
-            let result_bin = (entry.result.clamp(-1, 1) + 1) as usize;
-            result_all[result_bin] += 1;
-
-            if lineage_keys.is_some() {
-                let flag = if current_game_lineage {
-                    FLAG_LINEAGE
-                } else {
-                    FLAG_NONLINEAGE
+                let is_start = match &prev {
+                    None => true,
+                    Some(p) => !p.is_continuation(&entry),
                 };
-                *lineage_flags.entry(canonical).or_insert(0) |= flag;
-                if current_game_lineage {
-                    result_lineage[result_bin] += 1;
+
+                if is_start && batch.entries.len() >= BATCH_TARGET {
+                    let full = std::mem::replace(
+                        &mut batch,
+                        Batch {
+                            entries: Vec::with_capacity(BATCH_TARGET),
+                            game_starts: Vec::new(),
+                        },
+                    );
+                    tx.send(full).unwrap();
+                }
+                if is_start {
+                    batch.game_starts.push(batch.entries.len());
+                }
+                batch.entries.push(entry);
+                prev = Some(entry);
+
+                if last_report_time.elapsed().as_secs() >= 5 {
+                    let fs = reader.file_size().max(1);
+                    println!(
+                        "read {} entries (file {:.1}%)",
+                        counter,
+                        reader.read_bytes() as f64 / fs as f64 * 100.0
+                    );
+                    last_report_time = std::time::Instant::now();
                 }
             }
 
-            prev_entry = Some(entry);
+            prev = None;
+        }
+
+        if !batch.entries.is_empty() {
+            tx.send(batch).unwrap();
+        }
+        drop(tx);
+    });
+
+    let mut tally = UniquenessTally::default();
+    let mut bucket_counts = [0u64; NET_OSIZE];
+    let mut ply_counts: Vec<u64> = Vec::new();
+    let mut result_all = [0u64; 3];
+    let mut result_lineage = [0u64; 3];
+
+    for local in worker_locals.into_inner().unwrap() {
+        tally.total += local.total;
+        tally.parsed += local.total;
+        for (b, c) in local.bucket_counts.iter().enumerate() {
+            bucket_counts[b] += c;
+        }
+        if local.ply_counts.len() > ply_counts.len() {
+            ply_counts.resize(local.ply_counts.len(), 0);
+        }
+        for (i, c) in local.ply_counts.iter().enumerate() {
+            ply_counts[i] += c;
+        }
+        for i in 0..3 {
+            result_all[i] += local.result_all[i];
+            result_lineage[i] += local.result_lineage[i];
         }
     }
 
-    tally.print("corpus uniqueness");
+    if track_uniqueness {
+        for sh in &shards {
+            let sh = sh.lock().unwrap();
+            tally.unique += sh.unique;
+            tally.mirror_hits += sh.mirror_hits;
+            tally.exact_dups += sh.exact_dups;
+        }
+    }
+
+    if track_uniqueness {
+        tally.print("corpus uniqueness");
+    } else {
+        println!("--- corpus uniqueness ---");
+        println!("total lines/entries : {}", tally.total);
+        println!("parsed positions    : {}", tally.parsed);
+        println!("(uniqueness tracking disabled via --no-uniqueness)");
+    }
 
     println!("--- output-bucket histogram (material count) ---");
     for (b, count) in bucket_counts.iter().enumerate() {
@@ -262,14 +436,15 @@ pub fn run_binpack_metrics(
     }
 
     let (lineage_unique, overlap_unique) = if lineage_keys.is_some() {
-        let lineage_unique = lineage_flags
-            .values()
-            .filter(|f| *f & FLAG_LINEAGE != 0)
-            .count() as u64;
-        let overlap_unique = lineage_flags
-            .values()
-            .filter(|f| **f == (FLAG_LINEAGE | FLAG_NONLINEAGE))
-            .count() as u64;
+        let mut lineage_unique = 0u64;
+        let mut overlap_unique = 0u64;
+        for sh in &shards {
+            let sh = sh.lock().unwrap();
+            for f in sh.lineage_flags.values() {
+                lineage_unique += (f & FLAG_LINEAGE != 0) as u64;
+                overlap_unique += (*f == (FLAG_LINEAGE | FLAG_NONLINEAGE)) as u64;
+            }
+        }
         let rate = if lineage_unique == 0 {
             0.0
         } else {
@@ -350,4 +525,47 @@ fn load_canonical_key_set(
     }
 
     Ok((keys, failures))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_position_parts_matches_load_fen() {
+        let tables = Tables::new();
+
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/8/3pP3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 3",
+            "rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq e6 0 2",
+            "r3k2r/8/8/8/8/8/8/R3K2R w Kq - 5 20",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 b - - 0 1",
+            "8/8/8/4k3/8/2K5/8/8 w - - 0 1",
+        ];
+
+        let mut lf = ChessGame::new();
+        for fen in fens {
+            let sf = Position::from_fen(fen);
+            let direct = board_from_sf(&sf, &tables);
+            lf.load_fen(fen, &tables).unwrap();
+
+            assert_eq!(
+                direct.canonical_seed_key_parts(&tables),
+                lf.canonical_seed_key_parts(&tables),
+                "canonical key mismatch for {fen}"
+            );
+            assert_eq!(
+                direct.occupancy(),
+                lf.occupancy(),
+                "occupancy mismatch for {fen}"
+            );
+            assert_eq!(
+                direct.bitboards(),
+                lf.bitboards(),
+                "bitboard mismatch for {fen}"
+            );
+            assert_eq!(direct.b_move(), lf.b_move(), "stm mismatch for {fen}");
+        }
+    }
 }

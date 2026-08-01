@@ -1792,6 +1792,12 @@ impl ChessGame {
             }
         }
 
+        self.finalize_board_state(tables);
+
+        Ok(fen_length)
+    }
+
+    fn finalize_board_state(&mut self, tables: &Tables) {
         if self.en_passant != 0 {
             let stm_offset = (self.b_move as usize) << 3;
             let ep_attackers = Tables::LT_PAWN_CAPTURE_MASKS[!self.b_move as usize]
@@ -1807,8 +1813,24 @@ impl ChessGame {
             self.calc_initial_zobrist_key(tables);
         self.spt = self.calc_spt();
         self.occupancy = self.calc_occupancy();
+    }
 
-        Ok(fen_length)
+    pub fn from_position_parts(
+        bitboards: [u64; 16],
+        b_move: bool,
+        castles: u8,
+        en_passant: u8,
+        half_moves: u32,
+        tables: &Tables,
+    ) -> Self {
+        let mut game = Self::new();
+        game.board.bitboards = bitboards;
+        game.b_move = b_move;
+        game.castles = castles;
+        game.en_passant = en_passant;
+        game.half_moves = half_moves;
+        game.finalize_board_state(tables);
+        game
     }
 
     fn calc_spt(&self) -> [u8; 64] {

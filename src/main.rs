@@ -440,6 +440,8 @@ fn main() {
             let mut binpack_paths: Vec<String> = vec![];
             let mut lineage_keys_path = None;
             let mut out_prefix = "scratch/tmp_metrics".to_string();
+            let mut threads: Option<usize> = None;
+            let mut track_uniqueness = true;
 
             loop {
                 let arg = match arg_it.next() {
@@ -452,6 +454,8 @@ fn main() {
                     "--binpack" => binpack_paths.push(arg_it.next().unwrap()),
                     "--lineage-keys" => lineage_keys_path = Some(arg_it.next().unwrap()),
                     "--out" => out_prefix = arg_it.next().unwrap(),
+                    "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--no-uniqueness" => track_uniqueness = false,
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
@@ -464,6 +468,8 @@ fn main() {
                         &path_refs,
                         lineage_keys_path.as_deref(),
                         &out_prefix,
+                        threads,
+                        track_uniqueness,
                     )
                 }
                 (Some(_), false) => panic!("Pass exactly one of --fen / --binpack, not both"),
