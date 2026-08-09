@@ -398,7 +398,7 @@ pub fn parse_position<'a>(
     };
 
     if let Some(rep_table) = &mut repetition_table {
-        rep_table.push_position(board.zobrist_key(), true);
+        rep_table.push_hash(board.zobrist_key());
     }
 
     if let Some("moves") = moves_it.next() {
@@ -414,8 +414,7 @@ pub fn parse_position<'a>(
             }
 
             if let Some(rep_table) = &mut repetition_table {
-                let is_irreversible = board.half_moves() == 0;
-                rep_table.push_position(board.zobrist_key(), is_irreversible);
+                rep_table.push_hash(board.zobrist_key());
             }
         }
     }

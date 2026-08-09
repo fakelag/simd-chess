@@ -17,6 +17,17 @@ use bullet::{
 
 use crate::nnue::nnue;
 
+#[macro_export]
+macro_rules! loader_filter {
+    ($entry:expr, $move_type:ident, $piece_type:ident) => {
+        $entry.ply >= 16
+            && !$entry.pos.is_checked($entry.pos.side_to_move())
+            && $entry.score.unsigned_abs() <= 10000
+            && $entry.mv.mtype() == $move_type::Normal
+            && $entry.pos.piece_at($entry.mv.to()).piece_type() == $piece_type::None
+    };
+}
+
 pub fn train<const OB: usize>(
     name: &str,
     binpack_paths: &[&str],
@@ -57,11 +68,7 @@ pub fn train<const OB: usize>(
         let buffer_size_mb = 1024;
         let threads = 4;
         fn filter(entry: &TrainingDataEntry) -> bool {
-            entry.ply >= 16
-                && !entry.pos.is_checked(entry.pos.side_to_move())
-                && entry.score.unsigned_abs() <= 10000
-                && entry.mv.mtype() == MoveType::Normal
-                && entry.pos.piece_at(entry.mv.to()).piece_type() == PieceType::None
+            crate::loader_filter!(entry, MoveType, PieceType)
         }
 
         loader::SfBinpackLoader::new_concat_multiple(binpack_paths, buffer_size_mb, threads, filter)

@@ -9,6 +9,7 @@ use sfbinpack::chess::color::Color;
 use sfbinpack::chess::coords::Square;
 use sfbinpack::chess::piecetype::PieceType;
 use sfbinpack::chess::position::Position;
+use sfbinpack::chess::r#move::MoveType;
 
 use crate::engine::chess_v2::{ChessGame, PieceIndex};
 use crate::engine::search::search::NET_OSIZE;
@@ -174,9 +175,15 @@ impl Shard {
     }
 }
 
+fn loader_eligible(entry: &TrainingDataEntry) -> bool {
+    crate::loader_filter!(entry, MoveType, PieceType)
+}
+
 #[derive(Default)]
 struct Locals {
     total: u64,
+    games: u64,
+    eligible: u64,
     bucket_counts: [u64; NET_OSIZE],
     ply_counts: Vec<u64>,
     result_all: [u64; 3],
@@ -284,6 +291,7 @@ pub fn run_binpack_metrics(
                             .unwrap_or(batch.entries.len());
 
                         let mut game_lineage = false;
+                        local.games += 1;
                         for (j, entry) in batch.entries[start..end].iter().enumerate() {
                             let g = board_from_sf(&entry.pos, tables);
                             let (own_key, flipped) = g.canonical_seed_key_parts(tables);
@@ -294,6 +302,7 @@ pub fn run_binpack_metrics(
                             }
 
                             local.total += 1;
+                            local.eligible += loader_eligible(entry) as u64;
                             local.bucket_counts[output_bucket(g.occupancy().count_ones())] += 1;
                             local.bump_ply(entry.ply as usize);
                             let bin = (entry.result.clamp(-1, 1) + 1) as usize;
@@ -389,6 +398,8 @@ pub fn run_binpack_metrics(
     });
 
     let mut tally = UniquenessTally::default();
+    let mut games = 0u64;
+    let mut eligible = 0u64;
     let mut bucket_counts = [0u64; NET_OSIZE];
     let mut ply_counts: Vec<u64> = Vec::new();
     let mut result_all = [0u64; 3];
@@ -397,6 +408,8 @@ pub fn run_binpack_metrics(
     for local in worker_locals.into_inner().unwrap() {
         tally.total += local.total;
         tally.parsed += local.total;
+        games += local.games;
+        eligible += local.eligible;
         for (b, c) in local.bucket_counts.iter().enumerate() {
             bucket_counts[b] += c;
         }
@@ -429,6 +442,25 @@ pub fn run_binpack_metrics(
         println!("parsed positions    : {}", tally.parsed);
         println!("(uniqueness tracking disabled via --no-uniqueness)");
     }
+
+    println!(
+        "games               : {} ({:.2} positions/game)",
+        games,
+        if games == 0 {
+            0.0
+        } else {
+            tally.parsed as f64 / games as f64
+        }
+    );
+    println!(
+        "loader eligible     : {} ({:.3}%)",
+        eligible,
+        if tally.parsed == 0 {
+            0.0
+        } else {
+            eligible as f64 / tally.parsed as f64 * 100.0
+        }
+    );
 
     println!("--- output-bucket histogram (material count) ---");
     for (b, count) in bucket_counts.iter().enumerate() {
@@ -494,6 +526,8 @@ pub fn run_binpack_metrics(
     let summary_path = format!("{out_prefix}_summary.csv");
     let mut f = File::create(&summary_path)?;
     tally.write_summary_rows(&mut f)?;
+    writeln!(f, "games,{games}")?;
+    writeln!(f, "loader_eligible,{eligible}")?;
     writeln!(f, "lineage_unique,{lineage_unique}")?;
     writeln!(f, "lineage_overlap_unique,{overlap_unique}")?;
     println!("wrote {summary_path}");

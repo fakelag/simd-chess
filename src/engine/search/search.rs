@@ -116,7 +116,7 @@ pub struct Search<'a, const F: EngineForm> {
     nnue: Box<nnue::LazyNnue<{ net_size!() }, NET_OSIZE>>,
 
     ply: u8,
-    null_halfmoves: u32,
+    null_cursor: usize,
     is_stopping: bool,
     info_print_enabled: bool,
 
@@ -155,6 +155,11 @@ pub struct Search<'a, const F: EngineForm> {
 impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
     fn search(&mut self, depth: Option<u8>) -> u16 {
         const INITIAL_BOUND_MARGIN: Eval = 17;
+
+        assert!(
+            self.rt.top() != Some(self.chess.zobrist_key()),
+            "repetition table already contains the root position"
+        );
 
         let search_start = std::time::Instant::now();
         let mut node_count = 0;
@@ -202,7 +207,7 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
 
             loop {
                 self.ply = 0;
-                self.null_halfmoves = self.rt.cursor as u32;
+                self.null_cursor = 0;
 
                 // println!(
                 //     "Going depth {} with alpha = {}, beta = {}",
@@ -309,7 +314,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             tables,
             node_count: 0,
             ply: 0,
-            null_halfmoves: 0,
+            null_cursor: 0,
             is_stopping: false,
             info_print_enabled: false,
             score: -SCORE_INF,
@@ -448,9 +453,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             return;
         }
 
-        let mut pv_moves: Vec<u16> = self.pv[0..self.pv_length as usize].to_vec();
-
-        self.extend_pv_from_tt(&mut pv_moves);
+        let pv_moves = self.get_pv();
 
         let ms = search_start.elapsed().as_millis() as u64;
         let nps = self.node_count * 1000 / ms.max(1);
@@ -480,9 +483,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn get_board_mut(&mut self) -> &mut ChessGame {
         &mut self.chess
     }
-    #[inline(always)]
-    pub fn get_pv(&self) -> &[u16] {
-        &self.pv[0..self.pv_length as usize]
+    pub fn get_pv(&self) -> Vec<u16> {
+        let mut pv: Vec<u16> = self.pv[0..self.pv_length as usize].to_vec();
+        self.extend_pv_from_tt(&mut pv);
+        pv
     }
     #[inline(always)]
     pub fn get_depth(&self) -> u8 {
@@ -496,6 +500,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     pub fn was_node_aborted(&self) -> bool {
         self.is_stopping
     }
+    #[inline(always)]
+    fn null_halfmoves(&self) -> usize {
+        debug_assert!(self.rt.cursor >= self.null_cursor);
+        self.rt.cursor - self.null_cursor
+    }
+
     #[inline(always)]
     pub fn get_rt(&self) -> &RepetitionTable {
         &self.rt
@@ -548,10 +558,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let non_pv_node = alpha == beta - 1;
 
         if ply > 0 {
-            let repeated = self.rt.is_repeated_search(
+            let null_bound = self.null_halfmoves();
+
+            let repeated = self.rt.is_repeated_search::<2>(
                 self.chess.zobrist_key(),
                 self.chess.half_moves() as usize,
-                self.null_halfmoves as usize,
+                null_bound,
             );
 
             if self.chess.half_moves() >= 100 || repeated {
@@ -563,7 +575,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     &self.chess,
                     self.tables,
                     self.ply as i32,
-                    self.null_halfmoves as usize,
+                    null_bound,
                 )
             {
                 alpha = 0;
@@ -685,11 +697,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 };
 
                 self.ply += 1;
-                let saved_null_hm = self.null_halfmoves;
+                let saved_null_cursor = self.null_cursor;
 
-                self.null_halfmoves = 0;
+                self.null_cursor = self.rt.cursor;
                 let score = -self.go(-beta, -beta + 1, new_depth);
-                self.null_halfmoves = saved_null_hm;
+                self.null_cursor = saved_null_cursor;
 
                 self.ply -= 1;
 
@@ -953,8 +965,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             self.ply += 1;
 
-            self.null_halfmoves += 1;
-
             let is_non_capture = (mv & MV_FLAG_CAP) == 0;
 
             if is_non_capture {
@@ -1032,7 +1042,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             num_legal_moves += 1;
 
             self.ply -= 1;
-            self.null_halfmoves -= 1;
 
             self.chess = board_copy;
             self.nnue.rollback_move();
@@ -1902,18 +1911,38 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         return (legal_move, legal_move);
     }
 
-    fn extend_pv_from_tt(&self, out: &mut Vec<u16>) {
+    pub fn extend_pv_from_tt(&self, out: &mut Vec<u16>) {
         let mut board = self.chess.clone();
         let mut rt = self.rt.clone();
+
+        assert!(
+            rt.top() != Some(board.zobrist_key()),
+            "the repetition table must not contain the root when extending the PV"
+        );
+
+        rt.push_hash(board.zobrist_key());
 
         let mut board_keys = [0u64; PV_DEPTH];
         let mut board_keys_cursor = 0usize;
 
-        for &mv in out.iter() {
+        let mut terminated_at = None;
+
+        for (index, &mv) in out.iter().enumerate() {
             if !unsafe { board.make_move(mv, self.tables) }
                 || board.in_check(self.tables, !board.b_move())
             {
                 return;
+            }
+
+            if board.half_moves() >= 100
+                || rt.is_repeated_search::<2>(
+                    board.zobrist_key(),
+                    board.half_moves() as usize,
+                    usize::MAX,
+                )
+            {
+                terminated_at = Some(index + 1);
+                break;
             }
 
             rt.push_hash(board.zobrist_key());
@@ -1922,9 +1951,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             board_keys_cursor += 1;
         }
 
-        if board.half_moves() >= 100
-            || rt.is_repeated_search(board.zobrist_key(), board.half_moves() as usize, usize::MAX)
-        {
+        if let Some(len) = terminated_at {
+            out.truncate(len);
             return;
         }
 
@@ -1950,7 +1978,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
 
             if board.half_moves() >= 100
-                || rt.is_repeated_search(
+                || rt.is_repeated_search::<2>(
                     board.zobrist_key(),
                     board.half_moves() as usize,
                     usize::MAX,

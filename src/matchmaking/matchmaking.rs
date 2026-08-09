@@ -148,7 +148,7 @@ impl Matchmaking {
 
         if let Some(repetition_table) = &mut self.versus_3fr {
             repetition_table.clear();
-            repetition_table.push_position(self.board.zobrist_key(), true);
+            repetition_table.push_hash(self.board.zobrist_key());
         }
 
         Ok(())
@@ -198,7 +198,7 @@ impl Matchmaking {
         self.update_legal_moves();
 
         if let Some(repetition_table) = &mut self.versus_3fr {
-            repetition_table.push_position(self.board.zobrist_key(), self.board.half_moves() == 0);
+            repetition_table.push_hash(self.board.zobrist_key());
         }
 
         Ok(true)
@@ -274,7 +274,9 @@ impl Matchmaking {
             Some(GameResult::OutOfTime(util::Side::from(self.board.b_move())))
         } else {
             let is_3fr = if let Some(repetition_table) = &mut self.versus_3fr {
-                repetition_table.is_repeated_times(self.board.zobrist_key()) >= 3
+                repetition_table
+                    .is_repeated_times(self.board.zobrist_key(), self.board.half_moves() as usize)
+                    >= 3
             } else {
                 false
             };
