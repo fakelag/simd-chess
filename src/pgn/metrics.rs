@@ -179,6 +179,18 @@ fn loader_eligible(entry: &TrainingDataEntry) -> bool {
     crate::loader_filter!(entry, MoveType, PieceType)
 }
 
+const SCORE_BANDS: [i32; 6] = [50, 100, 200, 400, 800, i32::MAX];
+const N_SCORE_BUCKETS: usize = SCORE_BANDS.len() * 2;
+
+fn score_bucket(score: i32) -> usize {
+    let mag = SCORE_BANDS.iter().position(|b| score.abs() < *b).unwrap();
+    if score < 0 {
+        SCORE_BANDS.len() - 1 - mag
+    } else {
+        SCORE_BANDS.len() + mag
+    }
+}
+
 #[derive(Default)]
 struct Locals {
     total: u64,
@@ -188,6 +200,9 @@ struct Locals {
     ply_counts: Vec<u64>,
     result_all: [u64; 3],
     result_lineage: [u64; 3],
+    wdl_abs_sum: f64,
+    wdl_sq_sum: f64,
+    score_result: [[u64; 3]; N_SCORE_BUCKETS],
 }
 
 impl Locals {
@@ -301,8 +316,17 @@ pub fn run_binpack_metrics(
                                 game_lineage = lineage_keys.is_some_and(|k| k.contains(&canonical));
                             }
 
+                            let eligible = loader_eligible(entry);
                             local.total += 1;
-                            local.eligible += loader_eligible(entry) as u64;
+                            local.eligible += eligible as u64;
+                            if eligible {
+                                let bin = (entry.result.clamp(-1, 1) + 1) as usize;
+                                let disagree = bin as f64 * 0.5
+                                    - crate::engine::search::stability::win_prob(entry.score as i32);
+                                local.wdl_abs_sum += disagree.abs();
+                                local.wdl_sq_sum += disagree * disagree;
+                                local.score_result[score_bucket(entry.score as i32)][bin] += 1;
+                            }
                             local.bucket_counts[output_bucket(g.occupancy().count_ones())] += 1;
                             local.bump_ply(entry.ply as usize);
                             let bin = (entry.result.clamp(-1, 1) + 1) as usize;
@@ -400,6 +424,9 @@ pub fn run_binpack_metrics(
     let mut tally = UniquenessTally::default();
     let mut games = 0u64;
     let mut eligible = 0u64;
+    let mut wdl_abs_sum = 0.0f64;
+    let mut wdl_sq_sum = 0.0f64;
+    let mut score_result = [[0u64; 3]; N_SCORE_BUCKETS];
     let mut bucket_counts = [0u64; NET_OSIZE];
     let mut ply_counts: Vec<u64> = Vec::new();
     let mut result_all = [0u64; 3];
@@ -410,6 +437,13 @@ pub fn run_binpack_metrics(
         tally.parsed += local.total;
         games += local.games;
         eligible += local.eligible;
+        wdl_abs_sum += local.wdl_abs_sum;
+        wdl_sq_sum += local.wdl_sq_sum;
+        for (b, counts) in local.score_result.iter().enumerate() {
+            for (i, c) in counts.iter().enumerate() {
+                score_result[b][i] += c;
+            }
+        }
         for (b, c) in local.bucket_counts.iter().enumerate() {
             bucket_counts[b] += c;
         }
@@ -461,6 +495,39 @@ pub fn run_binpack_metrics(
             eligible as f64 / tally.parsed as f64 * 100.0
         }
     );
+
+    if eligible > 0 {
+        let n = eligible as f64;
+        println!("--- result vs eval disagreement (loader-eligible, STM-relative) ---");
+        println!(
+            "mean |result_wp - wp(score)| : {:.5}   mean squared: {:.5}",
+            wdl_abs_sum / n,
+            wdl_sq_sum / n
+        );
+        println!("score_band          count      loss%    draw%     win%");
+        for (b, counts) in score_result.iter().enumerate() {
+            let tot: u64 = counts.iter().sum();
+            if tot == 0 {
+                continue;
+            }
+            let lo = if b < SCORE_BANDS.len() {
+                SCORE_BANDS.len() - 1 - b
+            } else {
+                b - SCORE_BANDS.len()
+            };
+            let label = if b < SCORE_BANDS.len() {
+                format!("-{}", SCORE_BANDS[lo])
+            } else {
+                format!("+{}", SCORE_BANDS[lo])
+            };
+            println!(
+                "{label:>10} {tot:>14}  {:>7.2}  {:>7.2}  {:>7.2}",
+                counts[0] as f64 / tot as f64 * 100.0,
+                counts[1] as f64 / tot as f64 * 100.0,
+                counts[2] as f64 / tot as f64 * 100.0
+            );
+        }
+    }
 
     println!("--- output-bucket histogram (material count) ---");
     for (b, count) in bucket_counts.iter().enumerate() {
