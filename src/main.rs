@@ -297,6 +297,7 @@ fn main() {
             let mut arg_it = std::env::args().skip(2);
 
             let mut in_paths: Vec<String> = Vec::new();
+            let mut duplicate_files: Vec<String> = Vec::new();
             let mut out_path = None;
             let mut threads = 1usize;
             loop {
@@ -328,6 +329,7 @@ fn main() {
                     "--no-duplicates" => params.fno_duplicates = true,
                     "--completed-only" => params.fcompleted_only = true,
                     "--db" => in_paths.push(arg_it.next().unwrap()),
+                    "--duplicate-file" => duplicate_files.push(arg_it.next().unwrap()),
                     "--core" => {
                         core_affinity::set_for_current(core_affinity::CoreId {
                             id: arg_it.next().unwrap().parse().unwrap(),
@@ -345,9 +347,13 @@ fn main() {
                 !in_paths.is_empty(),
                 "Expected at least one --db input file"
             );
+            assert!(
+                duplicate_files.is_empty() || params.fno_duplicates,
+                "--duplicate-file requires --no-duplicates"
+            );
             let out_path = out_path.expect("Expected output path");
 
-            pgn::extract::extract_positions(&in_paths, &out_path, params, threads)
+            pgn::extract::extract_positions(&in_paths, &out_path, &duplicate_files, params, threads)
         }
         "tune" => {
             let mut arg_it = std::env::args().skip(2);

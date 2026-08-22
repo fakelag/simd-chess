@@ -1,8 +1,8 @@
 use std::{
     cell::SyncUnsafeCell,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::File,
-    io::{BufReader, Read},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     sync::{
         Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -124,6 +124,161 @@ fn open_pgn_source<'a>(
             "Unsupported pgn file extension: {:?}",
             other
         )),
+    }
+}
+
+const DEDUP_READ_CAP: usize = 1 << 20;
+const DEDUP_FLUSH_KEYS: usize = 1 << 15;
+const DEDUP_AVG_FEN_BYTES: u64 = 72;
+
+fn create_initial_dedup_set(
+    fen_paths: &[String],
+    threads: usize,
+    tables: &tables::Tables,
+) -> anyhow::Result<Mutex<HashMap<u64, bool>>> {
+    if fen_paths.is_empty() {
+        return Ok(Mutex::new(HashMap::new()));
+    }
+
+    let threads = threads.max(1);
+    let total_size: u64 = fen_paths
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    let dedup: Mutex<HashMap<u64, bool>> = Mutex::new(HashMap::with_capacity(
+        (total_size / DEDUP_AVG_FEN_BYTES).max(1) as usize,
+    ));
+    let failures = AtomicUsize::new(0);
+
+    println!(
+        "Seeding dedup set from {} duplicate-file(s) with {} threads...",
+        fen_paths.len(),
+        threads
+    );
+
+    for path in fen_paths {
+        let size = std::fs::metadata(path)
+            .map_err(|e| anyhow::anyhow!("failed to stat duplicate-file {}: {}", path, e))?
+            .len();
+        if size == 0 {
+            continue;
+        }
+
+        let per_thread = size.div_ceil(threads as u64);
+
+        std::thread::scope(|s| -> anyhow::Result<()> {
+            let mut handles = Vec::with_capacity(threads);
+            for t in 0..threads as u64 {
+                let start = t * per_thread;
+                let end = ((t + 1) * per_thread).min(size);
+                if start >= end {
+                    break;
+                }
+
+                let dedup = &dedup;
+                let failures = &failures;
+                handles
+                    .push(s.spawn(move || dedup_worker(path, start, end, tables, dedup, failures)));
+            }
+
+            let mut err = None;
+            for h in handles {
+                if let Err(e) = h.join().expect("dedup worker panicked") {
+                    err.get_or_insert(e);
+                }
+            }
+            match err {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        })?;
+    }
+
+    println!(
+        "Seeded dedup set with {} canonical keys ({} FEN parse failures)",
+        dedup.lock().unwrap().len(),
+        failures.load(Ordering::Relaxed)
+    );
+
+    Ok(dedup)
+}
+
+fn dedup_worker(
+    path: &str,
+    start: u64,
+    end: u64,
+    tables: &tables::Tables,
+    dedup: &Mutex<HashMap<u64, bool>>,
+    failures: &AtomicUsize,
+) -> anyhow::Result<()> {
+    let mut file = File::open(path)
+        .map_err(|e| anyhow::anyhow!("failed to open duplicate-file {}: {}", path, e))?;
+
+    let mut pos = if start == 0 {
+        0
+    } else {
+        file.seek(SeekFrom::Start(start - 1))?;
+        start - 1
+    };
+
+    let mut reader = BufReader::with_capacity(DEDUP_READ_CAP, file);
+
+    if start != 0 {
+        let mut partial = Vec::new();
+        pos += reader.read_until(b'\n', &mut partial)? as u64;
+    }
+
+    let mut board = ChessGame::new();
+    let mut local: Vec<u64> = Vec::with_capacity(DEDUP_FLUSH_KEYS);
+    let mut local_failures = 0usize;
+    let mut line: Vec<u8> = Vec::new();
+
+    while pos < end {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
+        }
+        pos += n as u64;
+
+        let fen = match std::str::from_utf8(&line) {
+            Ok(s) => s.trim(),
+            Err(_) => {
+                local_failures += 1;
+                continue;
+            }
+        };
+        if fen.is_empty() {
+            continue;
+        }
+
+        if board.load_fen(fen, tables).is_err() {
+            local_failures += 1;
+            continue;
+        }
+
+        local.push(board.canonical_seed_key(tables));
+        if local.len() >= DEDUP_FLUSH_KEYS {
+            flush_dedup_keys(&mut local, dedup);
+        }
+    }
+
+    flush_dedup_keys(&mut local, dedup);
+    if local_failures > 0 {
+        failures.fetch_add(local_failures, Ordering::Relaxed);
+    }
+
+    Ok(())
+}
+
+fn flush_dedup_keys(local: &mut Vec<u64>, dedup: &Mutex<HashMap<u64, bool>>) {
+    if local.is_empty() {
+        return;
+    }
+    let mut map = dedup.lock().unwrap();
+    for key in local.drain(..) {
+        map.insert(key, true);
     }
 }
 
@@ -575,6 +730,7 @@ fn stats_logger(
 pub fn extract_positions(
     db_paths: &[String],
     out_path: &str,
+    duplicate_files: &[String],
     params: PositionExtractParams,
     threads: usize,
 ) -> anyhow::Result<()> {
@@ -616,7 +772,8 @@ pub fn extract_positions(
         .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
 
-    let dedup: Mutex<HashMap<u64, bool>> = Mutex::new(HashMap::new());
+    let dedup: Mutex<HashMap<u64, bool>> =
+        create_initial_dedup_set(duplicate_files, threads, &tables)?;
 
     let sharpness_raw_cut = match params.fsharpness_top_percent {
         Some(top_percent) => Some(calibrate_sharpness_cut(
