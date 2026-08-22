@@ -121,8 +121,15 @@ where
             "HS must be a multiple of 32 for SIMD evaluation"
         );
 
-        let weights = &self.output_weights[bucket as usize];
-        let bias = self.output_bias[bucket as usize];
+        debug_assert!((bucket as usize) < OB);
+        // Safety: bucket is produced by Search::output_bucket(), which is
+        // bounded by NET_OSIZE == OB.
+        let (weights, bias) = unsafe {
+            (
+                self.output_weights.get_unchecked(bucket as usize),
+                *self.output_bias.get_unchecked(bucket as usize),
+            )
+        };
 
         let mut output = Self::screlu_dot(stm, ntm, weights);
 

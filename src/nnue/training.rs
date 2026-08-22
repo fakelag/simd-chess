@@ -34,8 +34,9 @@ pub fn train<const OB: usize>(
     out_path: &str,
     valid_set_path: Option<&str>,
     hidden_size: usize,
+    superbatches: usize,
+    wdl: f32,
 ) {
-    let superbatches = 320;
     let initial_lr = 0.001;
     let final_lr = 0.001 * 0.3f32.powi(5);
 
@@ -48,7 +49,7 @@ pub fn train<const OB: usize>(
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
-        wdl_scheduler: wdl::ConstantWDL { value: 0.75 },
+        wdl_scheduler: wdl::ConstantWDL { value: wdl },
         lr_scheduler: lr::CosineDecayLR {
             initial_lr,
             final_lr,

@@ -54,12 +54,12 @@ mod tests {
             (
                 "pawn_endgame",
                 "8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1",
-                21,
+                20,
             ),
             (
                 "queen_endgame",
                 "8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1",
-                16,
+                14,
             ),
         ]
         .into_iter()
@@ -99,6 +99,7 @@ mod tests {
             };
 
             let mut total_cycles = 0;
+            let mut min_cycles = u64::MAX;
             let mut nodes = 0;
             let mut pv = Vec::new();
 
@@ -109,24 +110,33 @@ mod tests {
             for _ in 0..ITERATIONS {
                 let result = bench();
 
+                min_cycles = min_cycles.min(result.0);
                 total_cycles += result.0;
                 nodes = result.1;
                 pv = result.2;
             }
 
-            (name, depth, total_cycles / ITERATIONS as u64, nodes, pv)
+            (
+                name,
+                depth,
+                min_cycles,
+                total_cycles / ITERATIONS as u64,
+                nodes,
+                pv,
+            )
         })
         .collect::<Vec<_>>();
 
         results
             .iter()
-            .for_each(|(name, depth, avg_cycles, nodes, pv)| {
+            .for_each(|(name, depth, min_cycles, avg_cycles, nodes, pv)| {
                 std::hint::black_box(pv);
                 println!(
-                    "[{:<13}] {:>2} iterations {:>6} avg Mcycles, {:>10} nodes, {:>2} depth",
+                    "[{:<13}] {:>2} iterations {:>6} avg Mcycles, {:>6} min Mcycles, {:>10} nodes, {:>2} depth",
                     name,
                     ITERATIONS,
                     avg_cycles / 1_000_000,
+                    min_cycles / 1_000_000,
                     nodes,
                     depth
                 );

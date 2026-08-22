@@ -150,11 +150,13 @@ pub enum MovegenPhase {
 }
 
 pub struct See {
+    pub pieces_board: __m512i,
     pub black_board: u64,
     pub white_board: u64,
-    pub pieces_board: [u64; 8],
     pub pins: [see::Pinning; 2],
 }
+
+const _: () = assert!(std::mem::align_of::<See>() >= 64);
 
 #[repr(align(64))]
 pub struct MoveBuffer {
@@ -203,6 +205,34 @@ fn zero_fill_avx512<const CHUNKS: usize>(ptr: *mut u8) {
         for i in 0..CHUNKS {
             _mm512_storeu_si512(ptr.add(i * 64) as *mut _, zero);
         }
+    }
+}
+
+#[inline(always)]
+fn zero_tail<const N: usize>(buf: &mut [u32; N], n: usize) {
+    debug_assert!(n <= N);
+    let seg = n.next_power_of_two().min(N).max(16);
+
+    let mut i = n;
+    while i < seg {
+        let rem = seg - i;
+        let mask = if rem >= 16 {
+            u16::MAX
+        } else {
+            ((1u32 << rem) - 1) as u16
+        };
+
+        // Safety: i < seg <= N, and the masked store writes only lanes inside
+        // [i, seg), so it never touches memory past the buffer.
+        unsafe {
+            _mm512_mask_storeu_epi32(
+                buf.as_mut_ptr().add(i) as *mut i32,
+                mask,
+                _mm512_setzero_si512(),
+            );
+        }
+
+        i += 16;
     }
 }
 
@@ -356,15 +386,18 @@ impl Movegen {
     #[inline(always)]
     fn calc_see_info(&mut self, board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
         let bitboards = board.bitboards();
-        let black_board = bitboards.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
-        let white_board = bitboards.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
-        let mut pieces_board = [0u64; 8];
-        bitboards
-            .iter()
-            .take(8)
-            .zip(bitboards.iter().skip(8))
-            .enumerate()
-            .for_each(|(i, (w, b))| pieces_board[i] = *w | *b);
+
+        let (black_board, white_board, pieces_board) = unsafe {
+            let white_x8 = _mm512_loadu_epi64(bitboards.as_ptr() as *const i64);
+            let black_x8 = _mm512_loadu_epi64(bitboards.as_ptr().add(8) as *const i64);
+
+            (
+                _mm512_reduce_or_epi64(black_x8) as u64,
+                _mm512_reduce_or_epi64(white_x8) as u64,
+                _mm512_or_epi64(white_x8, black_x8),
+            )
+        };
+
         let pins = [
             see::calc_pinnings(false, board, black_board, white_board),
             see::calc_pinnings(true, board, black_board, white_board),
@@ -397,9 +430,6 @@ impl Movegen {
                 MovegenPhase::MoveCapGen => unsafe {
                     let cut_0 = self.cut_moves[0] as i16;
                     let cut_1 = self.cut_moves[1] as i16;
-
-                    zero_fill_avx512::<8>(buffer.move_list_caps.as_mut_ptr() as *mut u8);
-                    zero_fill_avx512::<16>(buffer.move_list_quiets.as_mut_ptr() as *mut u8);
 
                     self.calc_see_info(board, buffer);
 
@@ -485,6 +515,8 @@ impl Movegen {
                         *mv = Self::score_capture_see(*mv, &buffer.see_info, tables, board);
                     }
 
+                    zero_tail(&mut buffer.move_list_caps, self.cap_count as usize);
+
                     sorting::u32::sort_u32_desc_avx512(
                         &mut buffer.move_list_caps,
                         self.cap_count as usize,
@@ -530,6 +562,8 @@ impl Movegen {
                         let mv = buffer.move_list_quiets.get_unchecked_mut(i as usize);
                         *mv = Self::score_quiet(*mv, board.spt(), history_moves, cont_hist);
                     }
+
+                    zero_tail(&mut buffer.move_list_quiets, self.quiet_count as usize);
 
                     Self::sort_noinline(&mut buffer.move_list_quiets, self.quiet_count as usize);
 
@@ -620,6 +654,14 @@ impl Movegen {
 
             debug_assert!(move_list[32..].iter().any(|&m| m == mv));
 
+            Self::move_index_tail(mv, move_list)
+        }
+    }
+
+    #[inline(never)]
+    fn move_index_tail(mv: u16, move_list: &[u16; 256]) -> u8 {
+        // Safety: the caller has established that mv is present past index 32.
+        unsafe {
             32 + move_list
                 .get_unchecked(32..)
                 .iter()

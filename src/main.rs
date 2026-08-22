@@ -225,6 +225,8 @@ fn main() {
 
             let mut hidden_size = 128;
             let mut output_size = 1;
+            let mut superbatches = 320;
+            let mut wdl = 0.75;
 
             loop {
                 let arg = match arg_it.next() {
@@ -238,6 +240,8 @@ fn main() {
                     "--out" => out_path = Some(arg_it.next().unwrap()),
                     "--hs" => hidden_size = arg_it.next().unwrap().parse().unwrap(),
                     "--os" => output_size = arg_it.next().unwrap().parse().unwrap(),
+                    "--superbatches" => superbatches = arg_it.next().unwrap().parse().unwrap(),
+                    "--wdl" => wdl = arg_it.next().unwrap().parse().unwrap(),
                     _ => panic!("Unknown argument: {}", arg),
                 }
             }
@@ -256,6 +260,8 @@ fn main() {
                         &out_path.expect("Expected output path"),
                         valid_path.as_deref(),
                         hidden_size,
+                        superbatches,
+                        wdl,
                     );
                 }};
             }

@@ -21,6 +21,25 @@ pub struct Pinning {
     pub pinned: u64,
 }
 
+#[inline(always)]
+fn pb_xor_at(pb: __m512i, idx: usize, val: u64) -> __m512i {
+    debug_assert!(idx < 8);
+    // Safety: idx < 8 keeps the set bit inside the 8 qword lanes.
+    unsafe {
+        std::hint::assert_unchecked(idx < 8);
+        _mm512_mask_xor_epi64(pb, 1u8 << idx, pb, _mm512_set1_epi64(val as i64))
+    }
+}
+
+#[inline(always)]
+fn pb_lane<const I: u64>(pb: __m512i) -> u64 {
+    // Safety: I < 8 selects a valid qword lane; the broadcast puts it in lane 0.
+    unsafe {
+        let bcast = _mm512_permutexvar_epi64(_mm512_set1_epi64(I as i64), pb);
+        _mm_cvtsi128_si64(_mm512_castsi512_si128(bcast)) as u64
+    }
+}
+
 impl Pinning {
     #[inline(always)]
     pub fn update_pinned_mask(&self, attacker_sq_mask: u64, out_pinned: &mut u64) {
@@ -225,7 +244,7 @@ pub fn calc_pinnings(
 //         }
 
 //         let (attacker_piece, attacker_sq_mask) =
-//             lva(stm_attackers, &piece_board, pinner_avoid[!b_move as usize]);
+//             lva(stm_attackers, piece_board, pinner_avoid[!b_move as usize]);
 
 //         // println!(
 //         //     "SEE Attacker piece: {:?}, attacker sq: {}, exchange index: {}",
@@ -340,7 +359,7 @@ pub fn see_threshold(
     threshold: i16,
     mut black_board: u64,
     mut white_board: u64,
-    mut piece_board: [u64; 8],
+    mut piece_board: __m512i,
     pins: Option<&[Pinning; 2]>,
 ) -> bool {
     let mut pinned = if let Some(pins) = &pins {
@@ -355,7 +374,7 @@ pub fn see_threshold(
     let from_sq_mask: u64 = 1u64 << from_sq;
 
     let king_online_pinned = {
-        let kings_board = piece_board[PIECE_KING];
+        let kings_board = pb_lane::<{ PIECE_KING as u64 }>(piece_board);
         let white_king = (kings_board & white_board).trailing_zeros() as usize;
         let black_king = (kings_board & black_board).trailing_zeros() as usize;
         unsafe { std::hint::assert_unchecked(white_king < 64 && black_king < 64) };
@@ -423,8 +442,8 @@ pub fn see_threshold(
     *[&mut white_board, &mut black_board][!b_move as usize] &= !remove_piece_mask;
 
     // Make the move on the bitboards
-    piece_board[from_piece as usize] ^= from_sq_mask | to_sq_mask;
-    piece_board[to_piece as usize & 7] ^= remove_piece_mask;
+    piece_board = pb_xor_at(piece_board, from_piece as usize, from_sq_mask | to_sq_mask);
+    piece_board = pb_xor_at(piece_board, to_piece as usize & 7, remove_piece_mask);
 
     let mut full_board = black_board | white_board;
 
@@ -443,8 +462,8 @@ pub fn see_threshold(
         )
     };
 
-    let lva = |stm_attackers: u64, piece_board: &[u64; 8], avoid: u64| unsafe {
-        let piece_board_x8 = _mm512_loadu_epi64(piece_board.as_ptr() as *const i64);
+    let lva = |stm_attackers: u64, piece_board: __m512i, avoid: u64| unsafe {
+        let piece_board_x8 = piece_board;
         let stm_attackers_x8 = _mm512_set1_epi64(stm_attackers as i64);
         let and_result = _mm512_and_epi64(piece_board_x8, stm_attackers_x8);
         let lane_mask = _mm512_test_epi64_mask(and_result, and_result);
@@ -491,14 +510,18 @@ pub fn see_threshold(
         }
 
         let (attacker_piece, attacker_sq_mask) =
-            lva(stm_attackers, &piece_board, pinner_avoid[!b_move as usize]);
+            lva(stm_attackers, piece_board, pinner_avoid[!b_move as usize]);
 
         unsafe {
             std::hint::assert_unchecked(attacker_piece < 8);
         }
 
-        piece_board[last_moved_piece as usize] ^= to_sq_mask;
-        piece_board[attacker_piece as usize] ^= to_sq_mask | attacker_sq_mask;
+        piece_board = pb_xor_at(piece_board, last_moved_piece as usize, to_sq_mask);
+        piece_board = pb_xor_at(
+            piece_board,
+            attacker_piece as usize,
+            to_sq_mask | attacker_sq_mask,
+        );
         all_attackers ^= attacker_sq_mask;
         full_board ^= attacker_sq_mask;
         is_pass = !is_pass;
@@ -532,16 +555,16 @@ pub fn see_threshold(
                 let attack_mask =
                     unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
 
-                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
-                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+                let queen_board = pb_lane::<{ PIECE_QUEEN as u64 }>(piece_board);
+                let bishop_board = pb_lane::<{ PIECE_BISHOP as u64 }>(piece_board);
 
                 all_attackers |= (queen_board | bishop_board) & attack_mask;
             }
             PIECE_ROOK => {
                 let attack_mask = unsafe { calc_slider_attacks::<true>(tables, full_board, to_sq) };
 
-                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
-                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
+                let queen_board = pb_lane::<{ PIECE_QUEEN as u64 }>(piece_board);
+                let rook_board = pb_lane::<{ PIECE_ROOK as u64 }>(piece_board);
 
                 all_attackers |= (queen_board | rook_board) & attack_mask;
             }
@@ -551,9 +574,9 @@ pub fn see_threshold(
                 let bishop_attack_mask =
                     unsafe { calc_slider_attacks::<false>(tables, full_board, to_sq) };
 
-                let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
-                let rook_board = piece_board[PieceIndex::WhiteRook as usize];
-                let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
+                let queen_board = pb_lane::<{ PIECE_QUEEN as u64 }>(piece_board);
+                let rook_board = pb_lane::<{ PIECE_ROOK as u64 }>(piece_board);
+                let bishop_board = pb_lane::<{ PIECE_BISHOP as u64 }>(piece_board);
 
                 all_attackers |= (queen_board | rook_board) & rook_attack_mask;
                 all_attackers |= (queen_board | bishop_board) & bishop_attack_mask;
@@ -594,7 +617,7 @@ pub unsafe fn calc_attackers(
     full_board: u64,
     black_board: u64,
     white_board: u64,
-    piece_board: [u64; 8],
+    piece_board: __m512i,
     sq_index: u8,
 ) -> u64 {
     let sq_index = sq_index as usize;
@@ -606,19 +629,19 @@ pub unsafe fn calc_attackers(
     let pawn_attack_mask_white = tables::Tables::LT_PAWN_CAPTURE_MASKS[0][sq_index as usize];
     let pawn_attack_mask_black = tables::Tables::LT_PAWN_CAPTURE_MASKS[1][sq_index as usize];
 
-    let all_pawn_board = piece_board[PieceIndex::WhitePawn as usize];
+    let all_pawn_board = pb_lane::<{ PieceIndex::WhitePawn as u64 }>(piece_board);
     let mut attackers = all_pawn_board & black_board & pawn_attack_mask_white;
     attackers |= all_pawn_board & white_board & pawn_attack_mask_black;
 
     let knight_attack_mask = tables::Tables::LT_KNIGHT_MOVE_MASKS[sq_index as usize];
-    attackers |= piece_board[PieceIndex::WhiteKnight as usize] & knight_attack_mask;
+    attackers |= pb_lane::<{ PieceIndex::WhiteKnight as u64 }>(piece_board) & knight_attack_mask;
 
     let king_attack_mask = tables::Tables::LT_KING_MOVE_MASKS[sq_index as usize];
-    attackers |= piece_board[PieceIndex::WhiteKing as usize] & king_attack_mask;
+    attackers |= pb_lane::<{ PieceIndex::WhiteKing as u64 }>(piece_board) & king_attack_mask;
 
-    let rook_board = piece_board[PieceIndex::WhiteRook as usize];
-    let bishop_board = piece_board[PieceIndex::WhiteBishop as usize];
-    let queen_board = piece_board[PieceIndex::WhiteQueen as usize];
+    let rook_board = pb_lane::<{ PieceIndex::WhiteRook as u64 }>(piece_board);
+    let bishop_board = pb_lane::<{ PieceIndex::WhiteBishop as u64 }>(piece_board);
+    let queen_board = pb_lane::<{ PieceIndex::WhiteQueen as u64 }>(piece_board);
 
     let rook_moves = unsafe { calc_slider_attacks::<true>(tables, full_board, sq_index) };
     let bishop_moves = unsafe { calc_slider_attacks::<false>(tables, full_board, sq_index) };
@@ -850,7 +873,7 @@ mod tests {
         real_eval: Eval,
         black_board: u64,
         white_board: u64,
-        piece_board: [u64; 8],
+        piece_board: __m512i,
         pins: Option<&[Pinning; 2]>,
     ) {
         [
@@ -942,13 +965,12 @@ mod tests {
             let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
             let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
 
-            let mut piece_board: [u64; 8] = [0u64; 8];
-            bitboards
-                .iter()
-                .take(8)
-                .zip(bitboards.iter().skip(8))
-                .enumerate()
-                .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+            let piece_board = unsafe {
+                _mm512_or_epi64(
+                    _mm512_loadu_epi64(bitboards.as_ptr() as *const i64),
+                    _mm512_loadu_epi64(bitboards.as_ptr().add(8) as *const i64),
+                )
+            };
 
             let pins = if with_pins {
                 Some([
@@ -1443,13 +1465,12 @@ mod tests {
         let black_board = bitboards.iter().skip(8).fold(0, |acc, &bb| acc | bb);
         let white_board = bitboards.iter().take(8).fold(0, |acc, &bb| acc | bb);
 
-        let mut piece_board = [0u64; 8];
-        bitboards
-            .iter()
-            .take(8)
-            .zip(bitboards.iter().skip(8))
-            .enumerate()
-            .for_each(|(index, (w, b))| piece_board[index] = *w | *b);
+        let piece_board = unsafe {
+            _mm512_or_epi64(
+                _mm512_loadu_epi64(bitboards.as_ptr() as *const i64),
+                _mm512_loadu_epi64(bitboards.as_ptr().add(8) as *const i64),
+            )
+        };
 
         let pins = [
             calc_pinnings(false, &board, black_board, white_board),

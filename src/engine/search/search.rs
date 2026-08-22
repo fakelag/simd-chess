@@ -1,4 +1,5 @@
-﻿use std::cell::{SyncUnsafeCell, UnsafeCell};
+﻿use std::arch::x86_64::*;
+use std::cell::{SyncUnsafeCell, UnsafeCell};
 use std::mem::MaybeUninit;
 
 use crate::{
@@ -1012,7 +1013,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     //     r += LMR_CUTNODE_R;
                     // }
 
-                    r.clamp(1, new_depth as i16) as u8
+                    r.max(1).min(new_depth as i16) as u8
                 };
 
                 let proof_score = -self.go(-alpha - 1, -alpha, new_depth - r);
@@ -1247,21 +1248,30 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let (qsee_bb_black, qsee_bb_white, qsee_bb_pieces, qsee_pins) =
             if flag_enable_qs_see_prune && !in_check {
                 let bbs = self.chess.bitboards();
-                let bb_black = bbs.iter().skip(8).fold(0u64, |acc, &bb| acc | bb);
-                let bb_white = bbs.iter().take(8).fold(0u64, |acc, &bb| acc | bb);
-                let mut bb_pieces = [0u64; 8];
-                bbs.iter()
-                    .take(8)
-                    .zip(bbs.iter().skip(8))
-                    .enumerate()
-                    .for_each(|(i, (w, b))| bb_pieces[i] = *w | *b);
+
+                let (bb_black, bb_white, bb_pieces) = unsafe {
+                    let white_x8 = _mm512_loadu_epi64(bbs.as_ptr() as *const i64);
+                    let black_x8 = _mm512_loadu_epi64(bbs.as_ptr().add(8) as *const i64);
+
+                    (
+                        _mm512_reduce_or_epi64(black_x8) as u64,
+                        _mm512_reduce_or_epi64(white_x8) as u64,
+                        _mm512_or_epi64(white_x8, black_x8),
+                    )
+                };
+
                 let pins = [
                     see::calc_pinnings(false, &self.chess, bb_black, bb_white),
                     see::calc_pinnings(true, &self.chess, bb_black, bb_white),
                 ];
                 (bb_black, bb_white, bb_pieces, Some(pins))
             } else {
-                (0, 0, [0u64; 8], None)
+                (
+                    0,
+                    0,
+                    unsafe { std::arch::x86_64::_mm512_setzero_si512() },
+                    None,
+                )
             };
 
         let mut moves = CaptureOrdering::new();
