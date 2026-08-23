@@ -23,7 +23,7 @@ use crate::{
     },
     pgn::fen_shard::ShardedFenWriter,
     pgn::parse::{self, PgnGame, PgnGameTermination, PgnReadBuf},
-    pgn::tuner,
+    tools::tuner,
     util,
 };
 

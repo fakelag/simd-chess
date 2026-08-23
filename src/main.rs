@@ -15,9 +15,9 @@ use crossbeam::channel;
 use crate::engine::ownbook::OwnBook;
 use crate::engine::search::{EngineForm, SearchStrategy, repetition};
 use crate::engine::{
-        chess_v2,
-        search::{self},
-        tables,
+    chess_v2,
+    search::{self},
+    tables,
 };
 use crate::uci::uci::{UciCommand, chess_uci};
 
@@ -25,6 +25,7 @@ mod engine;
 mod matchmaking;
 mod nnue;
 mod pgn;
+mod tools;
 mod uci;
 mod util;
 
@@ -99,7 +100,7 @@ fn search_thread(
                 let best_move = book_move.unwrap_or_else(|| search_engine.search(go.params.depth));
 
                 if debug && book_move.is_some() {
-                        println!("info depth 0 score cp 0 (book)");
+                    println!("info depth 0 score cp 0 (book)");
                 }
 
                 println!(
@@ -277,6 +278,59 @@ fn main() {
 
             Ok(())
         }
+        "shuffle" => {
+            let mut arg_it = std::env::args().skip(2);
+
+            let mut in_paths: Vec<String> = Vec::new();
+            let mut out_path = None;
+            let mut threads = None;
+            let mut no_duplicates = false;
+
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--in" => {
+                        let path = arg_it.next().unwrap();
+                        if std::path::Path::new(&path).is_dir() {
+                            let mut dir_files: Vec<String> = std::fs::read_dir(&path)
+                                .unwrap_or_else(|e| panic!("Failed to read dir {}: {}", path, e))
+                                .filter_map(|e| e.ok())
+                                .map(|e| e.path())
+                                .filter(|p| {
+                                    p.is_file() && p.extension().is_some_and(|x| x == "binpack")
+                                })
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .collect();
+                            // Deterministic order regardless of filesystem enumeration.
+                            dir_files.sort();
+                            in_paths.extend(dir_files);
+                        } else {
+                            in_paths.push(path);
+                        }
+                    }
+                    "--out" => out_path = Some(arg_it.next().unwrap()),
+                    "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
+                    "--no-duplicates" => no_duplicates = true,
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            in_paths.retain(|p| seen.insert(p.clone()));
+
+            let out_path = out_path.expect("Expected --out <file>");
+            let threads = threads.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+            });
+
+            tools::shuffle::run_shuffle(&in_paths, &out_path, threads, no_duplicates)
+        }
         "pgnextract" => {
             let mut params = pgn::extract::PositionExtractParams {
                 ffrom_ply: 0,
@@ -416,7 +470,7 @@ fn main() {
                 depth
             );
             let cuts =
-                pgn::tuner::tune_thresholds(boards.into_iter(), 16, depth, &tables, &quantiles);
+                tools::tuner::tune_thresholds(boards.into_iter(), 16, depth, &tables, &quantiles);
             for (q, cut) in quantiles.iter().zip(cuts.iter()) {
                 println!("q{:.4} -> raw instability {:.6}", q, cut);
             }
@@ -451,10 +505,10 @@ fn main() {
             }
 
             match (fen_path, binpack_paths.is_empty()) {
-                (Some(fen), true) => pgn::metrics::run_fen_stats(&fen, &out_prefix),
+                (Some(fen), true) => tools::metrics::run_fen_stats(&fen, &out_prefix),
                 (None, false) => {
                     let path_refs = binpack_paths.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-                    pgn::metrics::run_binpack_metrics(
+                    tools::metrics::run_binpack_metrics(
                         &path_refs,
                         lineage_keys_path.as_deref(),
                         &out_prefix,
@@ -515,6 +569,164 @@ fn main() {
             });
 
             result
+        }
+        "genopenings" => {
+            let mut out_path = None;
+            let mut params = tools::genopenings::GenOpeningsParams {
+                count: 100,
+                plies: 8,
+                seed: 0,
+                see_floor: None,
+                eval_bound: 300,
+                screen_depth: 6,
+                out_shard_size: 0,
+                threads: 1,
+                sharpness_top_percent: None,
+            };
+
+            let mut arg_it = std::env::args().skip(2);
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--out" => out_path = Some(arg_it.next().unwrap()),
+                    "--count" => params.count = arg_it.next().unwrap().parse().unwrap(),
+                    "--plies" => params.plies = arg_it.next().unwrap().parse().unwrap(),
+                    "--seed" => params.seed = arg_it.next().unwrap().parse().unwrap(),
+                    "--see-floor" => {
+                        params.see_floor = Some(arg_it.next().unwrap().parse().unwrap())
+                    }
+                    "--eval-bound" => params.eval_bound = arg_it.next().unwrap().parse().unwrap(),
+                    "--screen-depth" => {
+                        params.screen_depth = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--out-shard-size" => {
+                        params.out_shard_size = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--threads" => params.threads = arg_it.next().unwrap().parse().unwrap(),
+                    "--sharpness-top-percent" => {
+                        params.sharpness_top_percent = Some(arg_it.next().unwrap().parse().unwrap())
+                    }
+                    "--core" => {
+                        core_affinity::set_for_current(core_affinity::CoreId {
+                            id: arg_it.next().unwrap().parse().unwrap(),
+                        });
+                    }
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            let out_path = out_path.expect("Expected output path");
+
+            tools::genopenings::run_genopenings(&out_path, params)
+        }
+        "labelstudy" => {
+            let mut arg_it = std::env::args().skip(2);
+
+            let mut binpacks: Vec<String> = vec![];
+            let mut out_csv = "scratch/tmp_label_study.csv".to_string();
+            let mut params = tools::labelstudy::LabelStudyParams {
+                count: 10000,
+                seed: 0,
+                min_ply: 16,
+                max_abs_score: 10000,
+                fixed_depth: 8,
+                ref_depth: 16,
+                soft_budgets: vec![2000, 5000, 20000],
+                max_scan: 0,
+                threads: 1,
+                ref_max_nodes: 0,
+                training_filters: false,
+                warm_tt: false,
+                warm_tt_mb: 8,
+                warmup_plies: 128,
+                soft_max_depth: 0,
+                print_sample: false,
+                fen_file: None,
+                only_idx: vec![],
+                hard_node_cap: 0,
+                core_list: vec![],
+            };
+
+            loop {
+                let arg = match arg_it.next() {
+                    Some(a) => a,
+                    None => break,
+                };
+
+                match arg.as_str() {
+                    "--binpack" => binpacks.push(arg_it.next().unwrap()),
+                    "--out" => out_csv = arg_it.next().unwrap(),
+                    "--count" => params.count = arg_it.next().unwrap().parse().unwrap(),
+                    "--seed" => params.seed = arg_it.next().unwrap().parse().unwrap(),
+                    "--min-ply" => params.min_ply = arg_it.next().unwrap().parse().unwrap(),
+                    "--max-abs-score" => {
+                        params.max_abs_score = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--fixed-depth" => params.fixed_depth = arg_it.next().unwrap().parse().unwrap(),
+                    "--ref-depth" => params.ref_depth = arg_it.next().unwrap().parse().unwrap(),
+                    "--soft-nodes" => {
+                        params.soft_budgets = arg_it
+                            .next()
+                            .unwrap()
+                            .split(',')
+                            .map(|s| s.parse().unwrap())
+                            .collect()
+                    }
+                    "--max-scan" => params.max_scan = arg_it.next().unwrap().parse().unwrap(),
+                    "--threads" => params.threads = arg_it.next().unwrap().parse().unwrap(),
+                    "--ref-max-nodes" => {
+                        params.ref_max_nodes = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--training-filters" => params.training_filters = true,
+                    "--warm-tt" => params.warm_tt = true,
+                    "--warm-tt-mb" => params.warm_tt_mb = arg_it.next().unwrap().parse().unwrap(),
+                    "--warmup-plies" => {
+                        params.warmup_plies = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--soft-max-depth" => {
+                        params.soft_max_depth = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--print-sample" => params.print_sample = true,
+                    "--fen-file" => params.fen_file = Some(arg_it.next().unwrap()),
+                    "--only-idx" => {
+                        params.only_idx = arg_it
+                            .next()
+                            .unwrap()
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.parse().unwrap())
+                            .collect()
+                    }
+                    "--hard-node-cap" => {
+                        params.hard_node_cap = arg_it.next().unwrap().parse().unwrap()
+                    }
+                    "--core-list" => {
+                        params.core_list = arg_it
+                            .next()
+                            .unwrap()
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.parse().unwrap())
+                            .collect()
+                    }
+                    "--core" => {
+                        core_affinity::set_for_current(core_affinity::CoreId {
+                            id: arg_it.next().unwrap().parse().unwrap(),
+                        });
+                    }
+                    _ => panic!("Unknown argument: {}", arg),
+                }
+            }
+
+            if binpacks.is_empty() && params.fen_file.is_none() {
+                panic!("Expected --binpack <file> (repeatable), or --fen-file <file> for the lab");
+            }
+            let path_refs = binpacks.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+            tools::labelstudy::run_label_study(&path_refs, &out_csv, params)
         }
         _ => panic!("Unknown mode: {}", mode),
     };

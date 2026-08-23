@@ -219,7 +219,7 @@ struct Batch {
     game_starts: Vec<usize>,
 }
 
-fn board_from_sf(pos: &Position, tables: &Tables) -> ChessGame {
+pub(crate) fn board_from_sf(pos: &Position, tables: &Tables) -> ChessGame {
     let mut bb = [0u64; 16];
     for (color, off) in [(Color::White, 0usize), (Color::Black, 8usize)] {
         bb[PieceIndex::WhiteKing as usize + off] = pos.pieces_bb_color(color, PieceType::King).bits();
