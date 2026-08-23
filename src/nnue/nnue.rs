@@ -48,6 +48,50 @@ fn screlu(x: i16) -> i32 {
     y * y
 }
 
+#[inline(always)]
+fn screlu_dp(acc: __m512i, v: __m512i, weights_x32: __m512i) -> __m512i {
+    unsafe {
+        let c = _mm512_min_epi16(
+            _mm512_max_epi16(v, _mm512_setzero_si512()),
+            _mm512_set1_epi16(QA),
+        );
+        _mm512_dpwssd_epi32(acc, _mm512_mullo_epi16(c, weights_x32), c)
+    }
+}
+
+#[inline(always)]
+fn sum4(accs: [__m512i; 4]) -> __m512i {
+    unsafe {
+        _mm512_add_epi32(
+            _mm512_add_epi32(accs[0], accs[1]),
+            _mm512_add_epi32(accs[2], accs[3]),
+        )
+    }
+}
+
+#[inline(always)]
+unsafe fn apply_block<const NA: usize, const NS: usize>(
+    src_p: *const i16,
+    add_p: &[*const i16; NA],
+    sub_p: &[*const i16; NS],
+    off: usize,
+) -> __m512i {
+    unsafe {
+        let mut v = _mm512_load_si512(src_p.add(off) as *const _);
+        let mut a = 0;
+        while a < NA {
+            v = _mm512_add_epi16(v, _mm512_load_si512(add_p[a].add(off) as *const _));
+            a += 1;
+        }
+        let mut s = 0;
+        while s < NS {
+            v = _mm512_sub_epi16(v, _mm512_load_si512(sub_p[s].add(off) as *const _));
+            s += 1;
+        }
+        v
+    }
+}
+
 // Maps PieceIndex -> NNUE index
 const NNUE_PIECE_INDICES: [usize; 8] = [
     0, // unused
@@ -110,6 +154,26 @@ where
     }
 
     #[inline(always)]
+    fn finalize(&self, dot: i32, bucket: u8) -> i16 {
+        debug_assert!((bucket as usize) < OB);
+        let bias = unsafe { *self.output_bias.get_unchecked(bucket as usize) };
+
+        let mut output = dot;
+        output /= i32::from(QA);
+        output += i32::from(bias);
+        output *= QS;
+        output /= i32::from(QA) * i32::from(QB);
+
+        debug_assert!(
+            output >= i32::from(i16::MIN) && output <= i32::from(i16::MAX),
+            "NNUE output overflow: {}",
+            output,
+        );
+
+        output as i16
+    }
+
+    #[inline(always)]
     pub fn evaluate(
         &self,
         stm: &Accumulator<HS, OB>,
@@ -122,66 +186,168 @@ where
         );
 
         debug_assert!((bucket as usize) < OB);
-        // Safety: bucket is produced by Search::output_bucket(), which is
-        // bounded by NET_OSIZE == OB.
-        let (weights, bias) = unsafe {
-            (
-                self.output_weights.get_unchecked(bucket as usize),
-                *self.output_bias.get_unchecked(bucket as usize),
-            )
-        };
+        let weights = unsafe { self.output_weights.get_unchecked(bucket as usize) };
 
-        let mut output = Self::screlu_dot(stm, ntm, weights);
+        let output = self.finalize(Self::screlu_dot(stm, ntm, weights), bucket);
 
-        output /= i32::from(QA);
-        output += i32::from(bias);
-        output *= QS;
-        output /= i32::from(QA) * i32::from(QB);
-
-        debug_assert!(
-            output >= i32::from(i16::MIN) && output <= i32::from(i16::MAX),
-            "NNUE output overflow: {}",
-            output,
-        );
         debug_assert_eq!(
             self.evaluate_naive(stm, ntm, bucket),
-            output as i16,
+            output,
             "NNUE output mismatch"
         );
 
-        output as i16
+        output
     }
 
     #[inline(always)]
-    fn screlu_lane(
-        stm: &Accumulator<HS, OB>,
-        ntm: &Accumulator<HS, OB>,
-        w: &[i16; 2 * HS],
-        seg32: usize,
-        max_x32: __m512i,
-        min_x32: __m512i,
+    unsafe fn fused_apply_dot_half<const NA: usize, const NS: usize>(
+        &self,
+        src: &Accumulator<HS, OB>,
+        dst: &mut Accumulator<HS, OB>,
+        add_ids: [usize; NA],
+        sub_ids: [usize; NS],
+        w_half: *const i16,
+    ) -> __m512i {
+        unsafe {
+            let src_p = src.vals.as_ptr();
+            let dst_p = dst.vals.as_mut_ptr();
+            let add_p = add_ids.map(|id| self.feature_weights[id].vals.as_ptr());
+            let sub_p = sub_ids.map(|id| self.feature_weights[id].vals.as_ptr());
+
+            let mut accs = [_mm512_setzero_si512(); 4];
+
+            for i in 0..HS / 128 {
+                for chunk in 0..4 {
+                    let offset = i * 128 + chunk * 32;
+
+                    let block_x32 = apply_block(src_p, &add_p, &sub_p, offset);
+                    _mm512_store_si512(dst_p.add(offset) as *mut _, block_x32);
+
+                    accs[chunk] = screlu_dp(
+                        accs[chunk],
+                        block_x32,
+                        _mm512_load_si512(w_half.add(offset) as *const _),
+                    );
+                }
+            }
+
+            sum4(accs)
+        }
+    }
+
+    #[inline(always)]
+    pub fn evaluate_fused(
+        &self,
+        src: &AccumulatorPair<HS, OB>,
+        dst: &mut AccumulatorPair<HS, OB>,
+        update: &NnueUpdate,
+        b_move: bool,
+        bucket: u8,
+    ) -> i16 {
+        assert!(
+            HS % 128 == 0,
+            "HS must be a multiple of 128 for fused SIMD evaluation"
+        );
+
+        debug_assert!((bucket as usize) < OB);
+        let weights = unsafe { self.output_weights.get_unchecked(bucket as usize).as_ptr() };
+
+        let (w_white, w_black) = if b_move {
+            (unsafe { weights.add(HS) }, weights)
+        } else {
+            (weights, unsafe { weights.add(HS) })
+        };
+
+        let dot = unsafe {
+            let (wsum, bsum) = match update {
+                NnueUpdate::NnueUpdateAddSub((add, sub)) => {
+                    let (wa, ba) = (feature_safety!(add >> 16), feature_safety!(add & 0xFFFF));
+                    let (ws, bs) = (feature_safety!(sub >> 16), feature_safety!(sub & 0xFFFF));
+                    (
+                        self.fused_apply_dot_half(&src.white, &mut dst.white, [wa], [ws], w_white),
+                        self.fused_apply_dot_half(&src.black, &mut dst.black, [ba], [bs], w_black),
+                    )
+                }
+                NnueUpdate::NnueUpdateAddSubSub((add, sub1, sub2)) => {
+                    let (wa, ba) = (feature_safety!(add >> 16), feature_safety!(add & 0xFFFF));
+                    let (ws1, bs1) = (feature_safety!(sub1 >> 16), feature_safety!(sub1 & 0xFFFF));
+                    let (ws2, bs2) = (feature_safety!(sub2 >> 16), feature_safety!(sub2 & 0xFFFF));
+                    (
+                        self.fused_apply_dot_half(
+                            &src.white,
+                            &mut dst.white,
+                            [wa],
+                            [ws1, ws2],
+                            w_white,
+                        ),
+                        self.fused_apply_dot_half(
+                            &src.black,
+                            &mut dst.black,
+                            [ba],
+                            [bs1, bs2],
+                            w_black,
+                        ),
+                    )
+                }
+                NnueUpdate::NnueUpdateAddAddSubSub((add1, add2, sub1, sub2)) => {
+                    std::hint::cold_path();
+                    self.add2_sub2_fused_noinline(
+                        src, dst, *add1, *add2, *sub1, *sub2, w_white, w_black,
+                    )
+                }
+            };
+
+            _mm512_reduce_add_epi32(_mm512_add_epi32(wsum, bsum))
+        };
+
+        let output = self.finalize(dot, bucket);
+
+        debug_assert_eq!(
+            {
+                let stm = [&dst.white, &dst.black][b_move as usize];
+                let ntm = [&dst.black, &dst.white][b_move as usize];
+                self.evaluate_naive(stm, ntm, bucket)
+            },
+            output,
+            "NNUE fused output mismatch"
+        );
+
+        output
+    }
+
+    #[inline(never)]
+    fn add2_sub2_fused_noinline(
+        &self,
+        src: &AccumulatorPair<HS, OB>,
+        dst: &mut AccumulatorPair<HS, OB>,
+        add1: u32,
+        add2: u32,
+        sub1: u32,
+        sub2: u32,
+        w_white: *const i16,
+        w_black: *const i16,
     ) -> (__m512i, __m512i) {
         unsafe {
-            let stm_input_x32 = _mm512_load_si512(stm.vals.as_ptr().add(seg32 * 32) as *const _);
-            let ntm_input_x32 = _mm512_load_si512(ntm.vals.as_ptr().add(seg32 * 32) as *const _);
-            let stm_weight_x32 = _mm512_load_si512(w[..HS].as_ptr().add(seg32 * 32) as *const _);
-            let ntm_weight_x32 = _mm512_load_si512(w[HS..].as_ptr().add(seg32 * 32) as *const _);
-
-            let stm_input_clipped_x32 =
-                _mm512_max_epi16(_mm512_min_epi16(stm_input_x32, max_x32), min_x32);
-            let ntm_input_clipped_x32 =
-                _mm512_max_epi16(_mm512_min_epi16(ntm_input_x32, max_x32), min_x32);
-
-            let stm_output_x32 = _mm512_madd_epi16(
-                _mm512_mullo_epi16(stm_input_clipped_x32, stm_weight_x32),
-                stm_input_clipped_x32,
-            );
-            let ntm_output_x32 = _mm512_madd_epi16(
-                _mm512_mullo_epi16(ntm_input_clipped_x32, ntm_weight_x32),
-                ntm_input_clipped_x32,
-            );
-
-            (stm_output_x32, ntm_output_x32)
+            let (wa1, ba1) = (feature_safety!(add1 >> 16), feature_safety!(add1 & 0xFFFF));
+            let (wa2, ba2) = (feature_safety!(add2 >> 16), feature_safety!(add2 & 0xFFFF));
+            let (ws1, bs1) = (feature_safety!(sub1 >> 16), feature_safety!(sub1 & 0xFFFF));
+            let (ws2, bs2) = (feature_safety!(sub2 >> 16), feature_safety!(sub2 & 0xFFFF));
+            (
+                self.fused_apply_dot_half(
+                    &src.white,
+                    &mut dst.white,
+                    [wa1, wa2],
+                    [ws1, ws2],
+                    w_white,
+                ),
+                self.fused_apply_dot_half(
+                    &src.black,
+                    &mut dst.black,
+                    [ba1, ba2],
+                    [bs1, bs2],
+                    w_black,
+                ),
+            )
         }
     }
 
@@ -194,33 +360,31 @@ where
         debug_assert!(HS % 128 == 0);
 
         unsafe {
-            let qa_x32 = _mm512_set1_epi16(QA);
-            let zero_x32 = _mm512_setzero_si512();
+            let stm_p = stm.vals.as_ptr();
+            let ntm_p = ntm.vals.as_ptr();
+            let w_stm = weights.as_ptr();
+            let w_ntm = w_stm.add(HS);
 
-            let mut acc0 = _mm512_setzero_si512();
-            let mut acc1 = _mm512_setzero_si512();
-            let mut acc2 = _mm512_setzero_si512();
-            let mut acc3 = _mm512_setzero_si512();
+            let mut stm_accs = [_mm512_setzero_si512(); 4];
+            let mut ntm_accs = [_mm512_setzero_si512(); 4];
 
-            let mut i = 0;
-            while i < HS / 32 {
-                let (stm0, ntm0) = Self::screlu_lane(stm, ntm, weights, i, qa_x32, zero_x32);
-                let (stm1, ntm1) = Self::screlu_lane(stm, ntm, weights, i + 1, qa_x32, zero_x32);
-                let (stm2, ntm2) = Self::screlu_lane(stm, ntm, weights, i + 2, qa_x32, zero_x32);
-                let (stm3, ntm3) = Self::screlu_lane(stm, ntm, weights, i + 3, qa_x32, zero_x32);
-
-                acc0 = _mm512_add_epi32(acc0, _mm512_add_epi32(stm0, ntm0));
-                acc1 = _mm512_add_epi32(acc1, _mm512_add_epi32(stm1, ntm1));
-                acc2 = _mm512_add_epi32(acc2, _mm512_add_epi32(stm2, ntm2));
-                acc3 = _mm512_add_epi32(acc3, _mm512_add_epi32(stm3, ntm3));
-
-                i += 4;
+            for i in 0..HS / 128 {
+                for chunk in 0..4 {
+                    let offset = i * 128 + chunk * 32;
+                    stm_accs[chunk] = screlu_dp(
+                        stm_accs[chunk],
+                        _mm512_load_si512(stm_p.add(offset) as *const _),
+                        _mm512_load_si512(w_stm.add(offset) as *const _),
+                    );
+                    ntm_accs[chunk] = screlu_dp(
+                        ntm_accs[chunk],
+                        _mm512_load_si512(ntm_p.add(offset) as *const _),
+                        _mm512_load_si512(w_ntm.add(offset) as *const _),
+                    );
+                }
             }
 
-            let acc01 = _mm512_add_epi32(acc0, acc1);
-            let acc23 = _mm512_add_epi32(acc2, acc3);
-
-            _mm512_reduce_add_epi32(_mm512_add_epi32(acc01, acc23))
+            _mm512_reduce_add_epi32(_mm512_add_epi32(sum4(stm_accs), sum4(ntm_accs)))
         }
     }
 }
@@ -307,92 +471,59 @@ where
     }
 
     #[inline(always)]
-    pub fn acc_add1_sub1_src(
+    pub fn apply_from<const NA: usize, const NS: usize>(
         &mut self,
         src: &AccumulatorPair<HS, OB>,
-        add: PairFeature,
-        sub: PairFeature,
+        adds: [PairFeature; NA],
+        subs: [PairFeature; NS],
         net: &Network<HS, OB>,
     ) {
-        let white_add_id = feature_safety!(add >> 16);
-        let black_add_id = feature_safety!(add & 0xFFFF);
-        let white_sub_id = feature_safety!(sub >> 16);
-        let black_sub_id = feature_safety!(sub & 0xFFFF);
+        assert!(HS % 128 == 0, "HS must be a multiple of 128 for SIMD apply");
 
-        let white_add = &net.feature_weights[white_add_id].vals;
-        let black_add = &net.feature_weights[black_add_id].vals;
-        let white_sub = &net.feature_weights[white_sub_id].vals;
-        let black_sub = &net.feature_weights[black_sub_id].vals;
+        let w_add_p = adds.map(|pf| net.feature_weights[feature_safety!(pf >> 16)].vals.as_ptr());
+        let b_add_p = adds.map(|pf| {
+            net.feature_weights[feature_safety!(pf & 0xFFFF)]
+                .vals
+                .as_ptr()
+        });
+        let w_sub_p = subs.map(|pf| net.feature_weights[feature_safety!(pf >> 16)].vals.as_ptr());
+        let b_sub_p = subs.map(|pf| {
+            net.feature_weights[feature_safety!(pf & 0xFFFF)]
+                .vals
+                .as_ptr()
+        });
 
-        for i in 0..HS {
-            self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub[i];
-            self.black.vals[i] = src.black.vals[i] + black_add[i] - black_sub[i];
+        let src_w = src.white.vals.as_ptr();
+        let src_b = src.black.vals.as_ptr();
+        let dst_w = self.white.vals.as_mut_ptr();
+        let dst_b = self.black.vals.as_mut_ptr();
+
+        for i in 0..HS / 128 {
+            for chunk in 0..4 {
+                let offset = i * 128 + chunk * 32;
+                unsafe {
+                    _mm512_store_si512(
+                        dst_w.add(offset) as *mut _,
+                        apply_block(src_w, &w_add_p, &w_sub_p, offset),
+                    );
+                    _mm512_store_si512(
+                        dst_b.add(offset) as *mut _,
+                        apply_block(src_b, &b_add_p, &b_sub_p, offset),
+                    );
+                }
+            }
         }
     }
 
-    #[inline(always)]
-    pub fn acc_add1_sub2_src(
+    #[inline(never)]
+    fn apply_from_noinline<const NA: usize, const NS: usize>(
         &mut self,
         src: &AccumulatorPair<HS, OB>,
-        add: PairFeature,
-        sub1: PairFeature,
-        sub2: PairFeature,
+        adds: [PairFeature; NA],
+        subs: [PairFeature; NS],
         net: &Network<HS, OB>,
     ) {
-        let white_add_id = feature_safety!(add >> 16);
-        let black_add_id = feature_safety!(add & 0xFFFF);
-        let white_sub1_id = feature_safety!(sub1 >> 16);
-        let black_sub1_id = feature_safety!(sub1 & 0xFFFF);
-        let white_sub2_id = feature_safety!(sub2 >> 16);
-        let black_sub2_id = feature_safety!(sub2 & 0xFFFF);
-
-        let white_add = &net.feature_weights[white_add_id].vals;
-        let black_add = &net.feature_weights[black_add_id].vals;
-        let white_sub1 = &net.feature_weights[white_sub1_id].vals;
-        let black_sub1 = &net.feature_weights[black_sub1_id].vals;
-        let white_sub2 = &net.feature_weights[white_sub2_id].vals;
-        let black_sub2 = &net.feature_weights[black_sub2_id].vals;
-
-        for i in 0..HS {
-            self.white.vals[i] = src.white.vals[i] + white_add[i] - white_sub1[i] - white_sub2[i];
-            self.black.vals[i] = src.black.vals[i] + black_add[i] - black_sub1[i] - black_sub2[i];
-        }
-    }
-
-    #[inline(always)]
-    pub fn acc_add2_sub2_src(
-        &mut self,
-        src: &AccumulatorPair<HS, OB>,
-        add1: PairFeature,
-        add2: PairFeature,
-        sub1: PairFeature,
-        sub2: PairFeature,
-        net: &Network<HS, OB>,
-    ) {
-        let white_add1 = feature_safety!(add1 >> 16);
-        let black_add1 = feature_safety!(add1 & 0xFFFF);
-        let white_add2 = feature_safety!(add2 >> 16);
-        let black_add2 = feature_safety!(add2 & 0xFFFF);
-        let white_sub1 = feature_safety!(sub1 >> 16);
-        let black_sub1 = feature_safety!(sub1 & 0xFFFF);
-        let white_sub2 = feature_safety!(sub2 >> 16);
-        let black_sub2 = feature_safety!(sub2 & 0xFFFF);
-
-        let white_add1 = &net.feature_weights[white_add1].vals;
-        let black_add1 = &net.feature_weights[black_add1].vals;
-        let white_add2 = &net.feature_weights[white_add2].vals;
-        let black_add2 = &net.feature_weights[black_add2].vals;
-        let white_sub1 = &net.feature_weights[white_sub1].vals;
-        let black_sub1 = &net.feature_weights[black_sub1].vals;
-        let white_sub2 = &net.feature_weights[white_sub2].vals;
-        let black_sub2 = &net.feature_weights[black_sub2].vals;
-
-        for i in 0..HS {
-            self.white.vals[i] =
-                src.white.vals[i] + white_add1[i] + white_add2[i] - white_sub1[i] - white_sub2[i];
-            self.black.vals[i] =
-                src.black.vals[i] + black_add1[i] + black_add2[i] - black_sub1[i] - black_sub2[i];
-        }
+        self.apply_from(src, adds, subs, net)
     }
 
     #[inline(always)]
@@ -534,52 +665,69 @@ where
 
         let ply = self.updates.len().min(self.accumulators.len() - 1);
 
-        for i in start + 1..=ply {
-            let update = &self.updates[i - 1];
+        if ply > start {
+            for i in start + 1..ply {
+                let update = unsafe { self.updates.get_unchecked(i - 1) };
 
-            let (prev, acc) = self.accumulators.split_at_mut(i);
+                let (prev, acc) = unsafe { self.accumulators.split_at_mut_unchecked(i) };
 
-            debug_assert!(
-                !prev.is_empty(),
-                "No previous accumulator for ply {}, cannot apply update",
-                i
-            );
-            debug_assert!(
-                !acc.is_empty(),
-                "No accumulator allocated for ply {}, cannot apply update",
-                i
-            );
+                debug_assert!(
+                    !prev.is_empty(),
+                    "No previous accumulator for ply {}, cannot apply update",
+                    i
+                );
+                debug_assert!(
+                    !acc.is_empty(),
+                    "No accumulator allocated for ply {}, cannot apply update",
+                    i
+                );
 
-            let prev = unsafe { prev.last().unwrap_unchecked() };
+                let prev = unsafe { prev.last().unwrap_unchecked() };
 
-            // assert!(
-            //     acc.first_mut().is_some(),
-            //     "Accumulator not allocated for ply {}",
-            //     i
-            // );
+                // assert!(
+                //     acc.first_mut().is_some(),
+                //     "Accumulator not allocated for ply {}",
+                //     i
+                // );
 
-            let acc = unsafe { acc.first_mut().unwrap_unchecked() };
+                let acc = unsafe { acc.first_mut().unwrap_unchecked() };
 
-            match update {
-                NnueUpdate::NnueUpdateAddSub((add, sub)) => {
-                    acc.acc_add1_sub1_src(prev, *add, *sub, &self.net);
+                match update {
+                    NnueUpdate::NnueUpdateAddSub((add, sub)) => {
+                        acc.apply_from(prev, [*add], [*sub], &self.net);
+                    }
+                    NnueUpdate::NnueUpdateAddSubSub((add, sub1, sub2)) => {
+                        acc.apply_from(prev, [*add], [*sub1, *sub2], &self.net);
+                    }
+                    NnueUpdate::NnueUpdateAddAddSubSub((add1, add2, sub1, sub2)) => {
+                        std::hint::cold_path();
+                        acc.apply_from_noinline(prev, [*add1, *add2], [*sub1, *sub2], &self.net);
+                    }
                 }
-                NnueUpdate::NnueUpdateAddSubSub((add, sub1, sub2)) => {
-                    acc.acc_add1_sub2_src(prev, *add, *sub1, *sub2, &self.net);
-                }
-                NnueUpdate::NnueUpdateAddAddSubSub((add1, add2, sub1, sub2)) => {
-                    acc.acc_add2_sub2_src(prev, *add1, *add2, *sub1, *sub2, &self.net);
-                }
+
+                self.applied_accumulators.push(i);
             }
 
-            self.applied_accumulators.push(i);
+            let update = unsafe { self.updates.get_unchecked(ply - 1) };
+            let (prev, acc) = unsafe { self.accumulators.split_at_mut_unchecked(ply) };
+
+            debug_assert!(!prev.is_empty());
+            debug_assert!(!acc.is_empty());
+
+            // Safety: ply > start >= 0 so both sides of the split are non-empty.
+            let prev = unsafe { prev.last().unwrap_unchecked() };
+            let acc = unsafe { acc.first_mut().unwrap_unchecked() };
+
+            let output = self.net.evaluate_fused(prev, acc, update, b_move, bucket);
+            self.applied_accumulators.push(ply);
+            output
+        } else {
+            let acc = unsafe { self.accumulators.get_unchecked(ply) };
+
+            let stm = [&acc.white, &acc.black][b_move as usize];
+            let ntm = [&acc.black, &acc.white][b_move as usize];
+            self.net.evaluate(stm, ntm, bucket)
         }
-
-        let acc = &self.accumulators[ply];
-
-        let stm = [&acc.white, &acc.black][b_move as usize];
-        let ntm = [&acc.black, &acc.white][b_move as usize];
-        self.net.evaluate(stm, ntm, bucket)
     }
 }
 

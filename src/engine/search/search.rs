@@ -44,13 +44,13 @@ const LMP_MAX_DEPTH: u8 = 8;
 // "../../../nnue/v1-20M-1024-b8.bin"
 macro_rules! net_path {
     () => {
-        "../../../nnue/w2-10M-512-b8.bin"
+        "../../../nnue/v1-40M-pgnext-1024-320.bin"
     };
 }
 
 macro_rules! net_size {
     () => {
-        512
+        1024
     };
 }
 pub const NET_OSIZE: usize = 8;

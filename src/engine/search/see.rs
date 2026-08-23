@@ -777,17 +777,15 @@ mod tests {
                 .collect::<Vec<_>>();
 
             lva_capture_moves.sort_by(|&a, &b| {
-                let score_a = {
-                    let src_sq = (*a & 0x3F) as usize;
-                    PIECE_VALUES_LVA[board.spt()[src_sq] as usize]
-                };
+                let src_a = (*a & 0x3F) as usize;
+                let src_b = (*b & 0x3F) as usize;
+                let score_a = PIECE_VALUES_LVA[board.spt()[src_a] as usize];
+                let score_b = PIECE_VALUES_LVA[board.spt()[src_b] as usize];
 
-                let score_b = {
-                    let src_sq = (*b & 0x3F) as usize;
-                    PIECE_VALUES_LVA[board.spt()[src_sq] as usize]
-                };
-
-                score_a.cmp(&score_b)
+                // Tie-break equal-value attackers by lowest square to match
+                // see_threshold's LVA choice (isolate_lowest_one); the pick
+                // matters when one attacker blocks the other side's x-ray.
+                score_a.cmp(&score_b).then(src_a.cmp(&src_b))
             });
 
             // let board_copy = board.clone();
