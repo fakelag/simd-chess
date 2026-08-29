@@ -30,6 +30,46 @@ mod tests {
         unsafe { std::arch::x86_64::_rdtsc() }
     }
 
+    // Low-depth searches whose value is the debug_assert coverage they trigger
+    // in dev builds (fused NNUE eval vs evaluate_naive, zobrist checks, ...);
+    // release builds just smoke-test the search.
+    #[test]
+    fn search_debug_assert_coverage() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(search_debug_assert_coverage_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn search_debug_assert_coverage_body() {
+        let tables = tables::Tables::new();
+
+        for (test_fen, depth) in [
+            (util::FEN_STARTPOS, 7),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                6,
+            ),
+            ("8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1", 8),
+            ("8/3PPP2/4K3/8/P2qN3/3k4/3N4/1q6 w - - 0 1", 6),
+        ] {
+            let rt = repetition::RepetitionTable::new();
+            let tt = std::cell::SyncUnsafeCell::new(transposition::TranspositionTable::new(16));
+            let tm = std::cell::SyncUnsafeCell::new(timeman::TimeManager::new());
+            let mut search_engine =
+                search::Search::<{ EngineForm::Strategy }>::new(&tables, &tt, &tm, rt);
+
+            search_engine.new_game();
+            search_engine.load_from_fen(test_fen, &tables).unwrap();
+            search_engine.new_search();
+
+            let mv = search_engine.search(Some(depth));
+            assert_ne!(mv, 0);
+        }
+    }
+
     #[test]
     fn search_bench() {
         let tables = tables::Tables::new();
@@ -54,7 +94,7 @@ mod tests {
             (
                 "pawn_endgame",
                 "8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1",
-                20,
+                19,
             ),
             (
                 "queen_endgame",

@@ -296,7 +296,7 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    fn match_entries_replace_avx512(
+    fn match_entries_replace_avx512<const SHALLOW: bool>(
         &self,
         bucket_vec: &__m512i,
         bt_vec: &__m512i,
@@ -311,7 +311,9 @@ impl TranspositionTable {
             let test_vec = _mm512_set1_epi8(BoundType::Exact as u8 as i8);
             let bt_nonexact_mask = _mm512_cmpgt_epi8_mask(*bt_vec, test_vec);
 
-            (bt_nonexact_mask >> 1) & ((bound_type != BoundType::Exact) as u64).wrapping_sub(1)
+            (bt_nonexact_mask >> 1)
+                & ((bound_type != BoundType::Exact) as u64).wrapping_sub(1)
+                & (SHALLOW as u64).wrapping_sub(1)
         };
 
         // 0b0000100000001000000010000000100000001000000010000000100000001000;
@@ -364,7 +366,7 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    pub fn store<F>(
+    pub fn store<const QS: bool, F>(
         &mut self,
         hash: u64,
         score: Eval,
@@ -393,7 +395,7 @@ impl TranspositionTable {
             let key_mask = self.match_entries_key_avx512(&bucket_vec, self.bucket_key(hash));
 
             let replace_mask =
-                self.match_entries_replace_avx512(&bucket_vec, &bt_vec, depth, bound_type);
+                self.match_entries_replace_avx512::<QS>(&bucket_vec, &bt_vec, depth, bound_type);
             let empty_mask = self.match_entries_empty_avx512(&bt_vec);
             let key_mask = key_mask & !empty_mask;
 
@@ -431,7 +433,7 @@ impl TranspositionTable {
         let entry_index = match entry_mask.trailing_zeros() {
             i @ 0..8 => i,
             _ => {
-                if key_mask != 0 {
+                if QS || key_mask != 0 {
                     return;
                 }
 
@@ -578,7 +580,7 @@ mod tests {
 
     fn fill_bucket(tt: &mut TranspositionTable, depths: [u8; 8]) {
         for (i, depth) in depths.into_iter().enumerate() {
-            tt.store(hash_for_key(i as u64 + 1), 0, depth, || 0, BoundType::Exact);
+            tt.store::<false, _>(hash_for_key(i as u64 + 1), 0, depth, || 0, BoundType::Exact);
         }
     }
 
@@ -592,7 +594,7 @@ mod tests {
         let mut tt = fresh_tt();
 
         fill_bucket(&mut tt, DEPTHS);
-        tt.store(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
+        tt.store::<false, _>(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
 
         assert_eq!(probe_depth(&mut tt, 100), Some(5));
         assert_eq!(probe_depth(&mut tt, 4), None);
@@ -608,7 +610,7 @@ mod tests {
         let mut tt = fresh_tt();
         fill_bucket(&mut tt, DEPTHS);
 
-        tt.store(hash_for_key(4), 0, 2, || 0, BoundType::Exact);
+        tt.store::<false, _>(hash_for_key(4), 0, 2, || 0, BoundType::Exact);
 
         assert_eq!(probe_depth(&mut tt, 4), Some(9));
     }
@@ -620,7 +622,7 @@ mod tests {
 
         tt.new_search();
         tt.new_search();
-        tt.store(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
+        tt.store::<false, _>(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
 
         assert_eq!(probe_depth(&mut tt, 100), Some(5));
         assert_eq!(probe_depth(&mut tt, 1), None);

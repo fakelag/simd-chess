@@ -36,6 +36,8 @@ const NMP_EVAL_R_MAX: u8 = 3;
 
 const FLAG_TT_50MV_GUARD: bool = false;
 
+const FLAG_QS_TT: bool = true;
+
 const LMP_MAX_DEPTH: u8 = 8;
 
 //  "../../../nnue/w2-10M-512-b8.bin"
@@ -1153,7 +1155,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
                 if excluded_move == 0 {
                     let store_score = Self::score_to_tt(score, self.ply);
-                    self.tt_mut().store(
+                    self.tt_mut().store::<false, _>(
                         self.chess.zobrist_key(),
                         store_score,
                         depth,
@@ -1191,7 +1193,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         if excluded_move == 0 {
             let store_score = Self::score_to_tt(best_score, self.ply);
-            self.tt_mut().store(
+            self.tt_mut().store::<false, _>(
                 self.chess.zobrist_key(),
                 store_score,
                 depth,
@@ -1215,6 +1217,18 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let alpha_orig = alpha;
 
+        if FLAG_QS_TT
+            && let Some(probe) = self
+                .tt_mut()
+                .probe(self.chess.zobrist_key(), 0, alpha, beta)
+        {
+            if (!FLAG_TT_50MV_GUARD || self.chess.half_moves() < 90)
+                && let Some(score) = probe.score
+            {
+                return Self::score_from_tt(score, self.ply);
+            }
+        }
+
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
 
         let static_eval = if !in_check {
@@ -1224,6 +1238,16 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             // If the current board position is bad enough to cause a
             // cutoff higher up, save the time and return it immediately
             if static_eval >= beta {
+                if FLAG_QS_TT {
+                    self.tt_mut().store::<true, _>(
+                        self.chess.zobrist_key(),
+                        Self::score_to_tt(static_eval, self.ply),
+                        0,
+                        || 0xFF,
+                        BoundType::LowerBound,
+                    );
+                }
+
                 return static_eval;
             }
 
@@ -1335,6 +1359,16 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 best_score = score;
 
                 if score >= beta {
+                    if FLAG_QS_TT {
+                        self.tt_mut().store::<true, _>(
+                            self.chess.zobrist_key(),
+                            Self::score_to_tt(score, self.ply),
+                            0,
+                            || 0xFF,
+                            BoundType::LowerBound,
+                        );
+                    }
+
                     return score;
                 }
 
@@ -1346,6 +1380,28 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         if best_score == -SCORE_INF {
             best_score = self.quiescence_check_evasion(alpha, beta);
+
+            if self.is_stopping {
+                return best_score;
+            }
+        }
+
+        if FLAG_QS_TT {
+            let bound_type = if best_score >= beta {
+                BoundType::LowerBound
+            } else if best_score > alpha_orig {
+                BoundType::Exact
+            } else {
+                BoundType::UpperBound
+            };
+
+            self.tt_mut().store::<true, _>(
+                self.chess.zobrist_key(),
+                Self::score_to_tt(best_score, self.ply),
+                0,
+                || 0xFF,
+                bound_type,
+            );
         }
 
         best_score
