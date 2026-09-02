@@ -1,4 +1,4 @@
-use std::{arch::x86_64::*, num::NonZero};
+﻿use std::{arch::x86_64::*, debug_assert, num::NonZero};
 
 use crate::{
     engine::{
@@ -167,7 +167,7 @@ pub struct MoveBuffer {
 }
 
 #[repr(align(64))]
-pub struct Movegen {
+pub struct PhasedMovegen<const QS: bool> {
     phase: MovegenPhase,
     tt_move: u16,
     cut_moves: [u16; 2],
@@ -181,9 +181,10 @@ pub struct Movegen {
     cut_0: Option<NonZero<u16>>,
     cut_1: Option<NonZero<u16>>,
 
-    depth: u8,
-
     move_count: usize,
+    see_threshold: eval::Eval,
+    bad_cap_count: u8,
+    in_check: bool,
 }
 
 impl Into<u8> for MovegenPhase {
@@ -236,16 +237,15 @@ fn zero_tail<const N: usize>(buf: &mut [u32; N], n: usize) {
     }
 }
 
-impl Movegen {
-    const SORT_GOOD_CAPTURES_BASE: u16 = 32;
-
+impl<const QS: bool> PhasedMovegen<QS> {
     #[inline(always)]
     pub fn new(
-        chess: &chess_v2::ChessGame,
-        tt_index: u8,
         cut_moves: [u16; 2],
-        depth: u8,
+        tt_move_index: u8,
+        chess: &chess_v2::ChessGame,
         buffer: &mut MoveBuffer,
+        in_check: bool,
+        see_threshold: eval::Eval,
     ) -> Self {
         let mut s = Self {
             phase: MovegenPhase::MoveTt,
@@ -255,78 +255,63 @@ impl Movegen {
             quiet_index: 0,
             cap_count: 0,
             cap_index: 0,
+            bad_cap_count: 0,
             cut_0: None,
             cut_1: None,
             move_count: 0,
-            depth,
+            in_check,
+            see_threshold,
         };
 
         buffer.see_info = None;
 
         let move_list_ptr = buffer.move_list.as_mut_ptr();
-
         zero_fill_avx512::<8>(move_list_ptr as *mut u8);
 
-        s.move_count = chess.gen_moves_avx512::<false, _>(unsafe {
-            std::slice::from_raw_parts_mut(move_list_ptr as *mut u16, 256)
-        });
-
-        if tt_index < s.move_count as u8 {
-            s.tt_move = unsafe { *(move_list_ptr as *const u16).add(tt_index as usize) };
-        } else {
-            s.phase = MovegenPhase::MoveCapGen;
+        match (QS, in_check) {
+            (true, true) => {
+                std::hint::cold_path();
+                s.gen_moves_incheck_noinline(tt_move_index, chess, move_list_ptr);
+            }
+            (_, _) => s.gen_moves_internal::<QS>(tt_move_index, chess, move_list_ptr),
         }
 
         s
     }
 
+    #[inline(never)]
+    fn gen_moves_incheck_noinline(
+        &mut self,
+        tt_move_index: u8,
+        chess: &chess_v2::ChessGame,
+        move_list_ptr: *mut u16,
+    ) {
+        self.gen_moves_internal::<false>(tt_move_index, chess, move_list_ptr);
+    }
+
     #[inline(always)]
-    fn score_capture_see(
-        mv: u32,
-        see_info: &Option<See>,
-        tables: &tables::Tables,
-        board: &chess_v2::ChessGame,
-    ) -> u32 {
-        macro_rules! score {
-            ($score:expr) => {
-                (mv as u32) | (($score as u32) << 16)
-            };
-        }
+    fn gen_moves_internal<const CAPTURE_ONLY: bool>(
+        &mut self,
+        tt_move_index: u8,
+        chess: &chess_v2::ChessGame,
+        move_list_ptr: *mut u16,
+    ) {
+        self.move_count = chess.gen_moves_avx512::<CAPTURE_ONLY, _>(unsafe {
+            std::slice::from_raw_parts_mut(move_list_ptr, 256)
+        });
 
-        let src_sq = mv & 0x3F;
-        let dst_sq = (mv >> 6) & 0x3F;
+        if tt_move_index < self.move_count as u8 {
+            self.tt_move = unsafe { *(move_list_ptr as *const u16).add(tt_move_index as usize) };
 
-        let mvvlva_score = unsafe {
-            let spt = board.spt();
-            let dst_piece = *spt.get_unchecked(dst_sq as usize);
-            let src_piece = *spt.get_unchecked(src_sq as usize);
-
-            *MVV_LVA_SCORES_U8
-                .get_unchecked(dst_piece as usize)
-                .get_unchecked(src_piece as usize) as u16
-        };
-
-        let offset = if let Some(see_info) = see_info {
-            let cap_see_threshold = see::see_threshold(
-                &eval::WEIGHT_TABLE_ABS,
-                tables,
-                board,
-                mv as u16,
-                0,
-                see_info.black_board,
-                see_info.white_board,
-                see_info.pieces_board,
-                Some(&see_info.pins),
-            );
-
-            cap_see_threshold as u16 * Self::SORT_GOOD_CAPTURES_BASE
+            if CAPTURE_ONLY
+                && (self.tt_move & (chess_v2::MV_FLAG_CAP | chess_v2::MV_FLAG_PROMOTION)) == 0
+            {
+                // tt move is not a capture, skip to captures
+                self.phase = MovegenPhase::MoveCapGen;
+            }
         } else {
-            Self::SORT_GOOD_CAPTURES_BASE
-        };
-
-        let final_score = mvvlva_score + offset;
-
-        score!(final_score)
+            self.phase = MovegenPhase::MoveCapGen;
+        }
     }
 
     #[inline(always)]
@@ -338,7 +323,7 @@ impl Movegen {
     ) -> u32 {
         macro_rules! score {
             ($score:expr) => {
-                (mv as u32) | (($score as u32) << 16)
+                (mv as u32 & 0xFFFF) | (($score as u32) << 16)
             };
         }
 
@@ -384,7 +369,7 @@ impl Movegen {
     }
 
     #[inline(always)]
-    fn calc_see_info(&mut self, board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
+    fn calc_see_info(board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
         let bitboards = board.bitboards();
 
         let (black_board, white_board, pieces_board) = unsafe {
@@ -431,7 +416,9 @@ impl Movegen {
                     let cut_0 = self.cut_moves[0] as i16;
                     let cut_1 = self.cut_moves[1] as i16;
 
-                    self.calc_see_info(board, buffer);
+                    let spt_x64 = _mm512_loadu_epi8(board.spt().as_ptr() as *const i8);
+
+                    Self::calc_see_info(board, buffer);
 
                     for i in 0..=self.move_count / 32 {
                         let moves_x32 = _mm512_loadu_epi16(
@@ -450,29 +437,93 @@ impl Movegen {
                             moves_x32,
                             _mm512_set1_epi16(chess_v2::MV_FLAG_CAP as i16),
                         ) & !skip_mask;
-                        let cut_mask_0 = nonzero_mask
-                            & !skip_mask
-                            & _mm512_cmpeq_epi16_mask(moves_x32, _mm512_set1_epi16(cut_0));
-                        let cut_mask_1 = nonzero_mask
-                            & !skip_mask
-                            & _mm512_cmpeq_epi16_mask(moves_x32, _mm512_set1_epi16(cut_1));
 
-                        let moves_x16_0 = _mm512_cvtepu16_epi32(_mm512_castsi512_si256(moves_x32));
-                        let moves_x16_1 =
+                        let (cut_mask_0, cut_mask_1) = if QS {
+                            (0, 0)
+                        } else {
+                            let cut_mask_0 = nonzero_mask
+                                & !skip_mask
+                                & _mm512_cmpeq_epi16_mask(moves_x32, _mm512_set1_epi16(cut_0));
+                            let cut_mask_1 = nonzero_mask
+                                & !skip_mask
+                                & _mm512_cmpeq_epi16_mask(moves_x32, _mm512_set1_epi16(cut_1));
+
+                            if cut_mask_0 != 0 {
+                                self.cut_0 = Some(NonZero::new_unchecked(cut_0 as u16));
+                            }
+
+                            if cut_mask_1 != 0 {
+                                self.cut_1 = Some(NonZero::new_unchecked(cut_1 as u16));
+                            }
+
+                            debug_assert!(
+                                cap_emit_mask & (cut_mask_0 | cut_mask_1) == 0,
+                                "Cut moves in capture mask"
+                            );
+
+                            (cut_mask_0, cut_mask_1)
+                        };
+
+                        let mut moves_x16_0 =
+                            _mm512_cvtepu16_epi32(_mm512_castsi512_si256(moves_x32));
+                        let mut moves_x16_1 =
                             _mm512_cvtepu16_epi32(_mm512_extracti32x8_epi32(moves_x32, 1));
 
-                        if cut_mask_0 != 0 {
-                            self.cut_0 = Some(NonZero::new_unchecked(cut_0 as u16));
-                        }
+                        // Use MVV-LVA scoring
+                        {
+                            // @todo - Less permutes, process once for moves_x32
 
-                        if cut_mask_1 != 0 {
-                            self.cut_1 = Some(NonZero::new_unchecked(cut_1 as u16));
-                        }
+                            let (src_piece_x64_0, src_piece_x64_1) = (
+                                _mm512_maskz_permutexvar_epi8(
+                                    0x1111111111111111u64,
+                                    moves_x16_0,
+                                    spt_x64,
+                                ),
+                                _mm512_maskz_permutexvar_epi8(
+                                    0x1111111111111111u64,
+                                    moves_x16_1,
+                                    spt_x64,
+                                ),
+                            );
 
-                        debug_assert!(
-                            cap_emit_mask & (cut_mask_0 | cut_mask_1) == 0,
-                            "Cut moves in capture mask"
-                        );
+                            let (dst_piece_x64_0, dst_piece_x64_1) = (
+                                _mm512_permutexvar_epi8(_mm512_slli_epi16(moves_x16_0, 2), spt_x64),
+                                _mm512_permutexvar_epi8(_mm512_slli_epi16(moves_x16_1, 2), spt_x64),
+                            );
+
+                            let dst_piece_offset_x64 =
+                                _mm512_set1_epi8(chess_v2::PieceIndex::PieceIndexMax as i8);
+
+                            let (dst_piece_inv_x64_0, dst_piece_inv_x64_1) = (
+                                _mm512_maskz_sub_epi8(
+                                    0x2222222222222222u64,
+                                    dst_piece_offset_x64,
+                                    dst_piece_x64_0,
+                                ),
+                                _mm512_maskz_sub_epi8(
+                                    0x2222222222222222u64,
+                                    dst_piece_offset_x64,
+                                    dst_piece_x64_1,
+                                ),
+                            );
+
+                            (moves_x16_0, moves_x16_1) = (
+                                _mm512_or_si512(
+                                    _mm512_slli_epi32(
+                                        _mm512_or_si512(src_piece_x64_0, dst_piece_inv_x64_0),
+                                        16,
+                                    ),
+                                    moves_x16_0,
+                                ),
+                                _mm512_or_si512(
+                                    _mm512_slli_epi32(
+                                        _mm512_or_si512(src_piece_x64_1, dst_piece_inv_x64_1),
+                                        16,
+                                    ),
+                                    moves_x16_1,
+                                ),
+                            );
+                        }
 
                         let c0_mask = (cap_emit_mask & 0xFFFF) as u16;
                         let c1_mask = (cap_emit_mask >> 16) as u16;
@@ -510,11 +561,6 @@ impl Movegen {
                         self.quiet_count += quiet_emit_mask.count_ones() as u8;
                     }
 
-                    for i in 0..self.cap_count {
-                        let mv = buffer.move_list_caps.get_unchecked_mut(i as usize);
-                        *mv = Self::score_capture_see(*mv, &buffer.see_info, tables, board);
-                    }
-
                     zero_tail(&mut buffer.move_list_caps, self.cap_count as usize);
 
                     sorting::u32::sort_u32_desc_avx512(
@@ -526,24 +572,50 @@ impl Movegen {
                     continue;
                 },
                 MovegenPhase::MoveGoodCap => unsafe {
-                    if self.cap_index == self.cap_count {
-                        self.phase = MovegenPhase::MoveCut;
-                        continue;
+                    debug_assert!(buffer.see_info.is_some());
+
+                    let see_info = buffer.see_info.as_ref().unwrap_unchecked();
+
+                    while self.cap_index < self.cap_count {
+                        let mv = *buffer.move_list_caps.get_unchecked(self.cap_index as usize);
+                        self.cap_index += 1;
+
+                        let cap_see_threshold = see::see_threshold(
+                            &eval::WEIGHT_TABLE_ABS,
+                            tables,
+                            board,
+                            mv as u16,
+                            self.see_threshold,
+                            see_info.black_board,
+                            see_info.white_board,
+                            see_info.pieces_board,
+                            Some(&see_info.pins),
+                        );
+
+                        if !cap_see_threshold {
+                            // Push the bad cap to the start of the list (retain mvv-lva order)
+                            *buffer
+                                .move_list_caps
+                                .get_unchecked_mut(self.bad_cap_count as usize) = mv;
+                            self.bad_cap_count += 1;
+                            continue;
+                        }
+
+                        return Some((mv as u16, phase));
                     }
 
-                    let mv_cap = buffer.move_list_caps.get_unchecked(self.cap_index as usize);
+                    self.cap_index = 0;
 
-                    let is_bad_cap = (*mv_cap >> 16) < (Self::SORT_GOOD_CAPTURES_BASE as u32);
-
-                    if is_bad_cap {
-                        self.phase = MovegenPhase::MoveCut;
-                        continue;
-                    }
-
-                    self.cap_index += 1;
-                    return Some((*mv_cap as u16, phase));
+                    self.phase = match (QS, self.in_check) {
+                        (true, false) => MovegenPhase::MoveQuietPromoOnly,
+                        (true, true) => MovegenPhase::MoveQuietGen,
+                        (false, _) => MovegenPhase::MoveCut,
+                    };
+                    continue;
                 },
                 MovegenPhase::MoveCut => {
+                    debug_assert!(QS == false);
+
                     if let Some(cut_0) = self.cut_0 {
                         self.cut_0 = None;
                         return Some((cut_0.get(), phase));
@@ -558,6 +630,8 @@ impl Movegen {
                     continue;
                 }
                 MovegenPhase::MoveQuietGen => unsafe {
+                    debug_assert!(!QS || self.in_check);
+
                     for i in 0..self.quiet_count {
                         let mv = buffer.move_list_quiets.get_unchecked_mut(i as usize);
                         *mv = Self::score_quiet(*mv, board.spt(), history_moves, cont_hist);
@@ -600,14 +674,14 @@ impl Movegen {
                     continue;
                 },
                 MovegenPhase::MoveBadCap => unsafe {
-                    if self.cap_count == self.cap_index {
-                        return None;
+                    while self.cap_index < self.bad_cap_count {
+                        let mv =
+                            *buffer.move_list_caps.get_unchecked(self.cap_index as usize) as u16;
+                        self.cap_index += 1;
+                        return Some((mv, phase));
                     }
 
-                    let mv_cap = buffer.move_list_caps.get_unchecked(self.cap_index as usize);
-
-                    self.cap_index += 1;
-                    return Some((*mv_cap as u16, phase));
+                    return None;
                 },
             }
         }
@@ -681,7 +755,7 @@ mod tests {
             let mut move_list = [0xAAAAu16; 256];
             move_list[i] = 0xBBBB;
 
-            let result = Movegen::move_index_avx512(0xBBBB, &move_list);
+            let result = PhasedMovegen::<false>::move_index_avx512(0xBBBB, &move_list);
             assert_eq!(result, i as u8, "failed at index {i}");
         }
     }

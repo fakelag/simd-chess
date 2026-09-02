@@ -29,6 +29,8 @@ mod tools;
 mod uci;
 mod util;
 
+const TT_SIZE_MB: usize = 16;
+
 fn get_opening_book(
     uci_context: &uci::context::UciContext<uci::uci::UciOptions>,
     tables: &tables::Tables,
@@ -55,7 +57,8 @@ fn search_thread(
     tm: &SyncUnsafeCell<search::timeman::TimeManager>,
     tables: &tables::Tables,
 ) {
-    let tt = std::cell::SyncUnsafeCell::new(search::transposition::TranspositionTable::new(8));
+    let tt =
+        std::cell::SyncUnsafeCell::new(search::transposition::TranspositionTable::new(TT_SIZE_MB));
     let mut search_engine = search::search::Search::<{ EngineForm::Strategy }>::new(
         tables,
         &tt,
@@ -469,8 +472,13 @@ fn main() {
                 boards.len(),
                 depth
             );
-            let cuts =
-                tools::tuner::tune_thresholds(boards.into_iter(), 16, depth, &tables, &quantiles);
+            let cuts = tools::tuner::tune_thresholds(
+                boards.into_iter(),
+                TT_SIZE_MB,
+                depth,
+                &tables,
+                &quantiles,
+            );
             for (q, cut) in quantiles.iter().zip(cuts.iter()) {
                 println!("q{:.4} -> raw instability {:.6}", q, cut);
             }
@@ -727,6 +735,14 @@ fn main() {
             }
             let path_refs = binpacks.iter().map(|s| s.as_str()).collect::<Vec<_>>();
             tools::labelstudy::run_label_study(&path_refs, &out_csv, params)
+        }
+        "bench" => {
+            let _ = std::thread::spawn(|| {
+                tools::benchmark::benchmark(TT_SIZE_MB, false);
+            })
+            .join();
+
+            Ok(())
         }
         _ => panic!("Unknown mode: {}", mode),
     };

@@ -1,3 +1,4 @@
+pub mod benchmark;
 pub mod genopenings;
 pub mod labelstudy;
 pub mod metrics;

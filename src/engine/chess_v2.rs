@@ -381,9 +381,17 @@ impl ChessGame {
                 );
 
                 if CAPTURE_ONLY {
-                    // Mask out moves that don't capture opponent pieces
+                    // Mask out moves that don't capture opponent pieces. The ep target
+                    // square is empty, so it is added back on the pawn lanes only.
+                    let capture_dst_x8 = _mm512_mask_or_epi64(
+                        opponent_board_x8,
+                        PAWN_LANES,
+                        opponent_board_x8,
+                        opponent_ep_x8,
+                    );
+
                     slider_moves_x8 = _mm512_and_si512(slider_moves_x8, opponent_board_x8);
-                    non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, opponent_board_x8);
+                    non_slider_moves_x8 = _mm512_and_si512(non_slider_moves_x8, capture_dst_x8);
                 } else {
                     slider_moves_x8 = _mm512_and_si512(slider_moves_x8, friendly_board_inv_x8);
                     non_slider_moves_x8 =
@@ -391,54 +399,57 @@ impl ChessGame {
                 }
 
                 // Pawn push moves
-                if !CAPTURE_ONLY {
-                    let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
-                        pawn_mask,
-                        _mm512_rolv_epi64(
-                            one_of_each_non_slider_sq_mask_x8,
-                            pawn_push_rank_rolv_offset_x8,
-                        ),
-                        full_board_inv_x8,
-                    );
-                    let promotion_mask =
-                        _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
-                    has_promotions |= promotion_mask;
+                let pawn_push_single_bit_x8 = _mm512_maskz_and_epi64(
+                    pawn_mask,
+                    _mm512_rolv_epi64(
+                        one_of_each_non_slider_sq_mask_x8,
+                        pawn_push_rank_rolv_offset_x8,
+                    ),
+                    full_board_inv_x8,
+                );
+                let promotion_mask =
+                    _mm512_test_epi64_mask(pawn_push_single_bit_x8, pawn_promotion_rank_x8);
+                has_promotions |= promotion_mask;
+                let pawn_push_single_dst_sq_x8 = _mm512_slli_epi64(
+                    _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_single_bit_x8)),
+                    6,
+                );
+                let mut pawn_push_single_mask =
+                    pawn_mask & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
 
+                let mut pawn_push_single_move_x8 =
+                    _mm512_or_epi64(pawn_push_single_dst_sq_x8, one_of_each_non_slider_index_x8);
+
+                pawn_push_single_move_x8 = _mm512_mask_or_epi64(
+                    pawn_push_single_move_x8,
+                    promotion_mask,
+                    pawn_push_single_move_x8,
+                    const_promotion_flag_x8,
+                );
+
+                if CAPTURE_ONLY {
+                    pawn_push_single_mask &= promotion_mask;
+                }
+
+                push_moves!(pawn_push_single_mask, pawn_push_single_move_x8);
+
+                if !CAPTURE_ONLY {
                     let pawn_push_double_bit_x8 = _mm512_and_epi64(
                         _mm512_rolv_epi64(pawn_push_single_bit_x8, pawn_push_rank_rolv_offset_x8),
                         _mm512_and_epi64(full_board_inv_x8, pawn_double_push_rank_x8),
-                    );
-                    let pawn_push_single_dst_sq_x8 = _mm512_slli_epi64(
-                        _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_single_bit_x8)),
-                        6,
                     );
                     let pawn_push_double_dst_sq_x8 = _mm512_slli_epi64(
                         _mm512_sub_epi64(const_63_x8, _mm512_lzcnt_epi64(pawn_push_double_bit_x8)),
                         6,
                     );
-                    let pawn_push_single_mask = pawn_mask
-                        & _mm512_cmpneq_epi64_mask(pawn_push_single_bit_x8, const_zero_x8);
                     let pawn_push_double_mask = pawn_mask
                         & _mm512_cmpneq_epi64_mask(pawn_push_double_bit_x8, const_zero_x8);
-
-                    let mut pawn_push_single_move_x8 = _mm512_or_epi64(
-                        pawn_push_single_dst_sq_x8,
-                        one_of_each_non_slider_index_x8,
-                    );
-
-                    pawn_push_single_move_x8 = _mm512_mask_or_epi64(
-                        pawn_push_single_move_x8,
-                        promotion_mask,
-                        pawn_push_single_move_x8,
-                        const_promotion_flag_x8,
-                    );
 
                     let pawn_push_double_move_x8 = _mm512_or_epi64(
                         pawn_push_double_dst_sq_x8,
                         _mm512_or_epi64(one_of_each_non_slider_index_x8, const_dpp_flag_x8),
                     );
 
-                    push_moves!(pawn_push_single_mask, pawn_push_single_move_x8);
                     push_moves!(pawn_push_double_mask, pawn_push_double_move_x8);
                 }
 
