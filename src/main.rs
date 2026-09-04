@@ -1,4 +1,4 @@
-#![feature(sync_unsafe_cell)]
+﻿#![feature(sync_unsafe_cell)]
 #![feature(iter_array_chunks)]
 #![feature(likely_unlikely)]
 #![feature(cold_path)]
@@ -738,7 +738,7 @@ fn main() {
         }
         "bench" => {
             let _ = std::thread::spawn(|| {
-                tools::benchmark::benchmark(TT_SIZE_MB, false);
+                tools::benchmark::benchmark(TT_SIZE_MB);
             })
             .join();
 

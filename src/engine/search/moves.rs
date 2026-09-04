@@ -29,108 +29,6 @@ const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
     /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 ];
 
-pub struct CaptureOrdering {}
-
-impl CaptureOrdering {
-    #[inline(always)]
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    #[inline(always)]
-    pub fn gen_moves(&mut self, board: &chess_v2::ChessGame, move_list: &mut [u32; 256]) -> usize {
-        let move_count = board.gen_moves_avx512::<true, _>(move_list);
-
-        std::hint::likely(move_count < 16);
-
-        unsafe {
-            // Safety: maximum number of legal moves in any position is 218.
-            // Generated move count is guaranteed to be within bounds of 248 assuming
-            // few possible pseudolegal moves like castling or moving into a check
-            debug_assert!(move_count < 248);
-            std::hint::assert_unchecked(move_count < 248);
-        }
-
-        // unsafe {
-        //     let mut promotion_mask = 0u16;
-
-        //     let spt_x64 = _mm512_loadu_epi8(board.spt().as_ptr() as *const i8);
-
-        //     for i in 0..=move_count / 16 {
-        //         let mv_x16 = _mm512_loadu_epi32(move_list.as_ptr().add(i * 16) as *const i32);
-
-        //         let move_mask =
-        //             _mm512_test_epi32_mask(mv_x16, _mm512_set1_epi32(0xFFFFFFFFu32 as i32));
-
-        //         let src_piece_x64 =
-        //             _mm512_maskz_permutexvar_epi8(0x1111111111111111u64, mv_x16, spt_x64);
-        //         let dst_piece_x64 = _mm512_permutexvar_epi8(_mm512_slli_epi16(mv_x16, 2), spt_x64);
-
-        //         let dst_piece_offset_x64 =
-        //             _mm512_set1_epi8(chess_v2::PieceIndex::PieceIndexMax as i8);
-
-        //         let dst_piece_inv_x64 = _mm512_maskz_sub_epi8(
-        //             0x2222222222222222u64,
-        //             dst_piece_offset_x64,
-        //             dst_piece_x64,
-        //         );
-
-        //         let final_x16 = _mm512_or_si512(
-        //             _mm512_slli_epi32(_mm512_or_si512(src_piece_x64, dst_piece_inv_x64), 16),
-        //             mv_x16,
-        //         );
-
-        //         promotion_mask |= _mm512_cmpeq_epi32_mask(
-        //             _mm512_and_si512(mv_x16, _mm512_set1_epi32(chess_v2::MV_FLAGS_PR_MASK as i32)),
-        //             _mm512_set1_epi32(chess_v2::MV_FLAGS_PR_QUEEN as i32),
-        //         );
-
-        //         _mm512_mask_storeu_epi32(
-        //             move_list.as_mut_ptr().add(i * 16) as *mut i32,
-        //             move_mask,
-        //             final_x16,
-        //         );
-        //     }
-        // }
-
-        // sorting::u32::sort_256u32_desc_avx512(move_list, move_count);
-
-        for i in 0..move_count {
-            let mv = move_list[i] as u16;
-            move_list[i] = Self::score_move(mv, board.spt());
-        }
-
-        sorting::u32::sort_u32_desc_avx512(move_list, move_count);
-
-        move_count
-    }
-
-    #[inline(always)]
-    fn score_move(mv: u16, spt: &[u8; 64]) -> u32 {
-        macro_rules! score {
-            ($score:expr) => {
-                (mv as u32) | (($score as u32) << 16)
-            };
-        }
-
-        let src_sq = mv & 0x3F;
-        let dst_sq = (mv >> 6) & 0x3F;
-
-        let mvvlva_score = unsafe {
-            let src_piece_id = *spt.get_unchecked(src_sq as usize) as u32;
-            let dst_piece_id = *spt.get_unchecked(dst_sq as usize) as u32;
-
-            // let promotion_bonus = ((mv & chess_v2::MV_FLAG_PROMOTION != 0) as u32) << 4;
-            let promotion_bonus = 0;
-
-            ((chess_v2::PieceIndex::PieceIndexMax as u32 - dst_piece_id + promotion_bonus) << 8)
-                | src_piece_id
-        };
-
-        score!(mvvlva_score)
-    }
-}
-
 pub struct ContHistRef<'a> {
     pub ply1: Option<&'a [i16; 768]>,
     pub ply2: Option<&'a [i16; 768]>,
@@ -186,6 +84,9 @@ pub struct PhasedMovegen<const QS: bool> {
     bad_cap_count: u8,
     in_check: bool,
 }
+
+const _: () = assert!(std::mem::size_of::<PhasedMovegen<true>>() == 64);
+const _: () = assert!(std::mem::size_of::<PhasedMovegen<false>>() == 64);
 
 impl Into<u8> for MovegenPhase {
     fn into(self) -> u8 {
@@ -266,6 +167,7 @@ impl<const QS: bool> PhasedMovegen<QS> {
         buffer.see_info = None;
 
         let move_list_ptr = buffer.move_list.as_mut_ptr();
+
         zero_fill_avx512::<8>(move_list_ptr as *mut u8);
 
         match (QS, in_check) {
@@ -303,12 +205,10 @@ impl<const QS: bool> PhasedMovegen<QS> {
         if tt_move_index < self.move_count as u8 {
             self.tt_move = unsafe { *(move_list_ptr as *const u16).add(tt_move_index as usize) };
 
-            if CAPTURE_ONLY
-                && (self.tt_move & (chess_v2::MV_FLAG_CAP | chess_v2::MV_FLAG_PROMOTION)) == 0
-            {
-                // tt move is not a capture, skip to captures
-                self.phase = MovegenPhase::MoveCapGen;
-            }
+            debug_assert!(
+                !CAPTURE_ONLY
+                    || (self.tt_move & (chess_v2::MV_FLAG_CAP | chess_v2::MV_FLAG_PROMOTION) != 0)
+            );
         } else {
             self.phase = MovegenPhase::MoveCapGen;
         }
@@ -418,7 +318,21 @@ impl<const QS: bool> PhasedMovegen<QS> {
 
                     let spt_x64 = _mm512_loadu_epi8(board.spt().as_ptr() as *const i8);
 
-                    Self::calc_see_info(board, buffer);
+                    // Interleave indices for building the sort keys: each output dword takes its
+                    // low u16 from the move vector (index 0..31) and its high u16 from the score
+                    // vector (index 32..63), so one permute per half replaces widen+shift+or.
+                    // let idx_lo_x32 = _mm512_set_epi16(
+                    //     47, 15, 46, 14, 45, 13, 44, 12, 43, 11, 42, 10, 41, 9, 40, 8, 39, 7, 38, 6,
+                    //     37, 5, 36, 4, 35, 3, 34, 2, 33, 1, 32, 0,
+                    // );
+                    // let idx_hi_x32 = _mm512_set_epi16(
+                    //     63, 31, 62, 30, 61, 29, 60, 28, 59, 27, 58, 26, 57, 25, 56, 24, 55, 23, 54,
+                    //     22, 53, 21, 52, 20, 51, 19, 50, 18, 49, 17, 48, 16,
+                    // );
+
+                    if std::hint::unlikely(!self.in_check) {
+                        Self::calc_see_info(board, buffer);
+                    }
 
                     for i in 0..=self.move_count / 32 {
                         let moves_x32 = _mm512_loadu_epi16(
@@ -471,8 +385,37 @@ impl<const QS: bool> PhasedMovegen<QS> {
 
                         // Use MVV-LVA scoring
                         {
-                            // @todo - Less permutes, process once for moves_x32
+                            // Single lane MVV-LVA
+                            // let src_piece_x64 = _mm512_maskz_permutexvar_epi8(
+                            //     0x5555555555555555,
+                            //     moves_x32,
+                            //     spt_x64,
+                            // );
 
+                            // let dst_piece_x64 = _mm512_permutexvar_epi8(
+                            //     // 0xAAAAAAAAAAAAAAAA,
+                            //     _mm512_slli_epi16(moves_x32, 2),
+                            //     spt_x64,
+                            // );
+
+                            // let dst_piece_offset_x64 =
+                            //     _mm512_set1_epi8(chess_v2::PieceIndex::PieceIndexMax as i8);
+
+                            // let dst_piece_inv_x64 = _mm512_maskz_sub_epi8(
+                            //     0xAAAAAAAAAAAAAAAA,
+                            //     dst_piece_offset_x64,
+                            //     dst_piece_x64,
+                            // );
+
+                            // let final_scores_x32 =
+                            //     _mm512_or_si512(src_piece_x64, dst_piece_inv_x64);
+
+                            // moves_x16_0 =
+                            //     _mm512_permutex2var_epi16(moves_x32, idx_lo_x32, final_scores_x32);
+                            // moves_x16_1 =
+                            //     _mm512_permutex2var_epi16(moves_x32, idx_hi_x32, final_scores_x32);
+
+                            // Dual lane MVV-LVA scoring:
                             let (src_piece_x64_0, src_piece_x64_1) = (
                                 _mm512_maskz_permutexvar_epi8(
                                     0x1111111111111111u64,
@@ -572,6 +515,23 @@ impl<const QS: bool> PhasedMovegen<QS> {
                     continue;
                 },
                 MovegenPhase::MoveGoodCap => unsafe {
+                    if std::hint::unlikely(self.in_check) {
+                        while self.cap_index < self.cap_count {
+                            let mv = *buffer.move_list_caps.get_unchecked(self.cap_index as usize);
+                            self.cap_index += 1;
+                            return Some((mv as u16, phase));
+                        }
+
+                        self.cap_index = 0;
+
+                        self.phase = match QS {
+                            true => MovegenPhase::MoveQuietGen,
+                            false => MovegenPhase::MoveCut,
+                        };
+
+                        continue;
+                    }
+
                     debug_assert!(buffer.see_info.is_some());
 
                     let see_info = buffer.see_info.as_ref().unwrap_unchecked();
@@ -580,17 +540,18 @@ impl<const QS: bool> PhasedMovegen<QS> {
                         let mv = *buffer.move_list_caps.get_unchecked(self.cap_index as usize);
                         self.cap_index += 1;
 
-                        let cap_see_threshold = see::see_threshold(
-                            &eval::WEIGHT_TABLE_ABS,
-                            tables,
-                            board,
-                            mv as u16,
-                            self.see_threshold,
-                            see_info.black_board,
-                            see_info.white_board,
-                            see_info.pieces_board,
-                            Some(&see_info.pins),
-                        );
+                        let cap_see_threshold = std::hint::unlikely(self.in_check)
+                            || see::see_threshold(
+                                &eval::WEIGHT_TABLE_ABS,
+                                tables,
+                                board,
+                                mv as u16,
+                                self.see_threshold,
+                                see_info.black_board,
+                                see_info.white_board,
+                                see_info.pieces_board,
+                                Some(&see_info.pins),
+                            );
 
                         if !cap_see_threshold {
                             // Push the bad cap to the start of the list (retain mvv-lva order)

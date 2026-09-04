@@ -9,6 +9,8 @@ pub const QA: i16 = 255;
 pub const QB: i16 = 64;
 pub const QS: i32 = 400;
 
+const LAZY_NNUE_MAX_PLY: usize = 1024;
+
 type PairFeature = u32;
 
 macro_rules! feature_safety {
@@ -553,7 +555,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum NnueUpdate {
     NnueUpdateAddSub((u32, u32)),
     NnueUpdateAddSubSub((u32, u32, u32)),
@@ -612,8 +614,11 @@ where
 {
     net: Network<HS, OB>,
     accumulators: Vec<AccumulatorPair<HS, OB>>,
-    updates: Vec<NnueUpdate>,
-    applied_accumulators: Vec<usize>,
+
+    updates: [NnueUpdate; LAZY_NNUE_MAX_PLY],
+    updates_len: usize,
+    applied_accumulators: [usize; LAZY_NNUE_MAX_PLY],
+    applied_len: usize,
 }
 
 impl<const HS: usize, const OB: usize> LazyNnue<HS, OB>
@@ -633,37 +638,45 @@ where
 
             (&raw mut (*ptr).net).write(*net);
             (&raw mut (*ptr).accumulators).write(accumulators);
-            (&raw mut (*ptr).updates).write(Vec::with_capacity(1024));
-            (&raw mut (*ptr).applied_accumulators).write(Vec::new());
+            (&raw mut (*ptr).updates)
+                .write([NnueUpdate::NnueUpdateAddSub((0, 0)); LAZY_NNUE_MAX_PLY]);
+            (&raw mut (*ptr).updates_len).write(0);
+            (&raw mut (*ptr).applied_accumulators).write([0; LAZY_NNUE_MAX_PLY]);
+            (&raw mut (*ptr).applied_len).write(0);
 
             Box::from_raw(ptr)
         }
     }
 
     pub fn load(&mut self, board: &chess_v2::ChessGame) {
-        debug_assert!(self.updates.is_empty());
+        debug_assert!(self.updates_len == 0);
 
-        self.applied_accumulators.clear();
-        self.applied_accumulators.push(0);
+        self.applied_accumulators[0] = 0;
+        self.applied_len = 1;
 
         self.accumulators[0].load(board, &self.net);
-        self.updates.clear();
+        self.updates_len = 0;
     }
 
     #[inline(always)]
     pub fn evaluate(&mut self, b_move: bool, bucket: u8) -> i16 {
-        debug_assert!(self.applied_accumulators.last().is_some());
+        debug_assert!(self.applied_len > 0 && self.applied_len <= LAZY_NNUE_MAX_PLY);
 
-        let start = unsafe { self.applied_accumulators.last().copied().unwrap_unchecked() };
+        // Safety: load() seeds one entry and rollback never pops below it.
+        let start = unsafe {
+            *self
+                .applied_accumulators
+                .get_unchecked(self.applied_len - 1)
+        };
 
-        debug_assert!(start <= self.updates.len());
-        debug_assert!(start < self.accumulators.len());
-        debug_assert!(self.updates.len() < self.accumulators.len());
-        debug_assert!(self.accumulators.len() > 0);
+        debug_assert!(start <= self.updates_len);
+        debug_assert!(start < LAZY_NNUE_MAX_PLY);
+        debug_assert!(self.updates_len < LAZY_NNUE_MAX_PLY);
+        debug_assert!(self.accumulators.len() == LAZY_NNUE_MAX_PLY);
 
-        unsafe { std::hint::assert_unchecked(self.accumulators.len() > 0) };
+        unsafe { std::hint::assert_unchecked(self.accumulators.len() == LAZY_NNUE_MAX_PLY) };
 
-        let ply = self.updates.len().min(self.accumulators.len() - 1);
+        let ply = self.updates_len.min(LAZY_NNUE_MAX_PLY - 1);
 
         if ply > start {
             for i in start + 1..ply {
@@ -705,7 +718,13 @@ where
                     }
                 }
 
-                self.applied_accumulators.push(i);
+                debug_assert!(self.applied_len < LAZY_NNUE_MAX_PLY);
+                unsafe {
+                    *self
+                        .applied_accumulators
+                        .get_unchecked_mut(self.applied_len) = i
+                };
+                self.applied_len += 1;
             }
 
             let update = unsafe { self.updates.get_unchecked(ply - 1) };
@@ -719,7 +738,13 @@ where
             let acc = unsafe { acc.first_mut().unwrap_unchecked() };
 
             let output = self.net.evaluate_fused(prev, acc, update, b_move, bucket);
-            self.applied_accumulators.push(ply);
+            debug_assert!(self.applied_len < LAZY_NNUE_MAX_PLY);
+            unsafe {
+                *self
+                    .applied_accumulators
+                    .get_unchecked_mut(self.applied_len) = ply
+            };
+            self.applied_len += 1;
             output
         } else {
             let acc = unsafe { self.accumulators.get_unchecked(ply) };
@@ -737,18 +762,31 @@ where
 {
     #[inline(always)]
     fn make_move(&mut self, mv: NnueUpdate) {
-        self.updates.push(mv);
+        debug_assert!(self.updates_len < LAZY_NNUE_MAX_PLY);
+
+        // Safety: search depth is bounded far below LAZY_NNUE_MAX_PLY by
+        // PV_DEPTH and the quiescence move-stack guard.
+        unsafe { *self.updates.get_unchecked_mut(self.updates_len) = mv };
+        self.updates_len += 1;
     }
 
     #[inline(always)]
     fn rollback_move(&mut self) {
-        let ply = self.updates.len();
+        let ply = self.updates_len;
 
         debug_assert!(ply > 0, "Cannot rollback move, no moves to rollback");
 
-        self.updates.pop().unwrap();
+        self.updates_len = ply - 1;
 
-        self.applied_accumulators.pop_if(|x| *x == ply);
+        if self.applied_len > 0
+            && unsafe {
+                *self
+                    .applied_accumulators
+                    .get_unchecked(self.applied_len - 1)
+            } == ply
+        {
+            self.applied_len -= 1;
+        }
     }
 }
 

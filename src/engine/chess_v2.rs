@@ -21,6 +21,18 @@ pub const MV_FLAGS_PR_ROOK: u16 = 0b1010 << 12;
 pub const MV_FLAGS_PR_QUEEN: u16 = 0b1011 << 12;
 pub const MV_FLAGS_PR_MASK: u16 = 0b1011 << 12;
 
+/// Promoted piece as a white-local PieceIndex (2..=5)
+#[inline(always)]
+pub fn mv_promotion_piece_from_flags(mv: u16) -> u8 {
+    (((((mv & MV_FLAGS_PR_MASK) >> 12) - 8) ^ 3) + 2) as u8
+}
+
+// #[inline(always)]
+// pub fn mv_is_underpromotion(mv: u16) -> bool {
+//     debug_assert!(mv & MV_FLAG_PROMOTION != 0);
+//     ((mv >> 12) & 3).wrapping_sub(1) < 2
+// }
+
 pub const MV_FLAGS_CASTLE_KING: u16 = 0b0010 << 12;
 pub const MV_FLAGS_CASTLE_QUEEN: u16 = 0b0011 << 12;
 

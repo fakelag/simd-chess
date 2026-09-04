@@ -36,8 +36,6 @@ const NMP_EVAL_R_MAX: u8 = 3;
 
 const FLAG_TT_50MV_GUARD: bool = false;
 
-const FLAG_QS_TT: bool = true;
-
 const LMP_MAX_DEPTH: u8 = 8;
 
 //  "../../../nnue/w2-10M-512-b8.bin"
@@ -759,9 +757,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             None
         };
 
-        let move_buffer = unsafe {
-            &mut *self.movegen_stack[self.get_move_buffer_index::<false>(excluded_move)].get()
-        };
+        let move_buffer_index = self.get_move_buffer_index::<false>(excluded_move);
+        debug_assert!(move_buffer_index < MOVE_STACK_SIZE);
+
+        let move_buffer =
+            unsafe { &mut *self.movegen_stack.get_unchecked(move_buffer_index).get() };
 
         let mut moves = PhasedMovegen::<false>::new(
             self.cut_moves[ply],
@@ -883,7 +883,12 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 && !in_check
                 && depth <= SEE_QUIET_PRUNE_MAX_DEPTH.max(SEE_CAPTURE_PRUNE_MAX_DEPTH)
             {
-                if let Some(see_info) = &move_buffer.see_info {
+                // Safety: num_legal_moves > 0 -> at least one move past MoveTt has
+                // been searched. MoveCapGen populates see_info before emitting any
+                // caps when not in check.
+                debug_assert!(move_buffer.see_info.is_some());
+                let see_info = unsafe { move_buffer.see_info.as_ref().unwrap_unchecked() };
+
                     let is_capture = (mv & MV_FLAG_CAP) != 0;
 
                     // Capture SEE pruning: depth-scaled linear threshold.
@@ -930,7 +935,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                             Some(&see_info.pins),
                         ) {
                             continue;
-                        }
                     }
                 }
             }
@@ -1228,8 +1232,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut tt_move_index = 0xFF;
         let mut tt_depth = 0;
 
-        if FLAG_QS_TT
-            && let Some(probe) = self
+        if let Some(probe) = self
                 .tt_mut()
                 .probe(self.chess.zobrist_key(), 0, alpha, beta)
         {
@@ -1256,7 +1259,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             // If the current board position is bad enough to cause a
             // cutoff higher up, save the time and return it immediately
             if static_eval >= beta {
-                if FLAG_QS_TT {
                     self.tt_mut().store::<true, _>(
                         self.chess.zobrist_key(),
                         Self::score_to_tt(static_eval, self.ply),
@@ -1264,7 +1266,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                         || tt_move_index,
                         BoundType::LowerBound,
                     );
-                }
 
                 return static_eval;
             }
@@ -1296,7 +1297,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let move_buffer_index = self.get_move_buffer_index::<true>(0);
 
         if std::hint::unlikely(move_buffer_index >= MOVE_STACK_SIZE) {
-            return static_eval;
+            debug_assert!(false, "Move buffer index exceeded MOVE_STACK_SIZE");
+            return alpha;
         }
 
         let move_buffer =
@@ -1364,7 +1366,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 best_move = mv;
 
                 if score >= beta {
-                    if FLAG_QS_TT {
                         self.tt_mut().store::<true, _>(
                             self.chess.zobrist_key(),
                             Self::score_to_tt(score, self.ply),
@@ -1372,7 +1373,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                             || moves.find_move_index_avx512(best_move, move_buffer),
                             BoundType::LowerBound,
                         );
-                    }
 
                     return score;
                 }
@@ -1387,11 +1387,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             best_score = -SCORE_INF + self.ply as Eval
         }
 
-        if FLAG_QS_TT {
+        // QS could store BoundType::Exact if best_score < beta && best_score > alpha_orig
             let bound_type = if best_score >= beta {
                 BoundType::LowerBound
-            } else if best_score > alpha_orig {
-                BoundType::Exact
             } else {
                 BoundType::UpperBound
             };
@@ -1409,7 +1407,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 },
                 bound_type,
             );
-        }
 
         best_score
     }
@@ -1424,7 +1421,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         } else {
             self.ply as usize * 2 + (excluded_move != 0) as usize
         };
-        debug_assert!(index < MOVE_STACK_SIZE);
 
         index
     }

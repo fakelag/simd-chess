@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn search_bench() {
-        tools::benchmark::benchmark(16, true);
+        tools::benchmark::benchmark(16);
     }
 
     #[test]

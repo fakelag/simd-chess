@@ -1,8 +1,11 @@
-use std::arch::x86_64::*;
+use std::{arch::x86_64::*, debug_assert};
 
 use crate::{
     engine::{
-        chess_v2::{ChessGame, MV_FLAG_EPCAP, MV_FLAG_PROMOTION, MV_FLAGS, PieceIndex},
+        chess_v2::{
+            ChessGame, MV_FLAG_EPCAP, MV_FLAG_PROMOTION, MV_FLAGS, PieceIndex,
+            mv_promotion_piece_from_flags,
+        },
         tables::{self},
     },
     util,
@@ -384,26 +387,31 @@ pub fn see_threshold(
         ]
     };
 
+    let mut b_move = board.b_move();
+
     let from_piece = board.spt()[from_sq] & 7;
 
     let mut last_moved_piece = if mv & MV_FLAG_PROMOTION != 0 {
-        PieceIndex::WhiteQueen as u8
+        mv_promotion_piece_from_flags(mv)
     } else {
         from_piece
     };
 
     let (remove_piece_mask, to_piece) = if mv & MV_FLAGS == MV_FLAG_EPCAP {
-        let ep_sq = if board.b_move() { to_sq + 8 } else { to_sq - 8 };
+        let ep_sq = if b_move { to_sq + 8 } else { to_sq - 8 };
         (1 << ep_sq, PieceIndex::WhitePawn as u8)
     } else {
         (to_sq_mask, board.spt()[to_sq])
     };
 
     unsafe {
+        debug_assert!(to_piece < 16);
+        debug_assert!(from_piece < 8);
+        debug_assert!(last_moved_piece < 8);
         std::hint::assert_unchecked(to_piece < 16);
+        std::hint::assert_unchecked(from_piece < 8);
+        std::hint::assert_unchecked(last_moved_piece < 8);
     }
-
-    let mut b_move = board.b_move();
 
     // 1. First capture:
     // `exchange` tracks the current capture sequence value offset to the
@@ -411,7 +419,9 @@ pub fn see_threshold(
     // piece (if any) minus the threshold. This means that the exchange will
     // track the net gain/loss of the capture sequence with respect to the
     // threshold value
-    let mut exchange = score_table[to_piece as usize] - threshold;
+    let mut exchange = (score_table[last_moved_piece as usize] - score_table[from_piece as usize])
+        + score_table[to_piece as usize]
+        - threshold;
 
     if exchange < 0 {
         // Captured piece is not valuable enough to reach the threshold

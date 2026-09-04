@@ -10,7 +10,7 @@ fn rdtsc() -> u64 {
     unsafe { std::arch::x86_64::_rdtsc() }
 }
 
-pub fn benchmark(tt_size_mb: usize, warmup: bool) {
+pub fn benchmark(tt_size_mb: usize) {
     let tables = tables::Tables::new();
 
     core_affinity::set_for_current(core_affinity::CoreId { id: 2 });
@@ -79,9 +79,7 @@ pub fn benchmark(tt_size_mb: usize, warmup: bool) {
 
         println!("Benchmarking {} at depth {}", name, depth);
 
-        if warmup {
-            let _ = bench();
-        }
+        let _ = bench();
 
         for _ in 0..ITERATIONS {
             let result = bench();
@@ -108,12 +106,13 @@ pub fn benchmark(tt_size_mb: usize, warmup: bool) {
             .for_each(|(name, depth, min_cycles, avg_cycles, nodes, pv)| {
                 std::hint::black_box(pv);
                 println!(
-                    "[{:<13}] {:>2} iterations {:>6} avg Mcycles, {:>6} min Mcycles, {:>10} nodes, {:>2} depth",
+                    "[{:<13}] {:>2} iterations {:>6} avg Mcycles, {:>6} min Mcycles, {:>10} nodes, {:>4} cycles/node, {:>2} depth",
                     name,
                     ITERATIONS,
                     avg_cycles / 1_000_000,
                     min_cycles / 1_000_000,
                     nodes,
+                    min_cycles / nodes,
                     depth
                 );
             });
