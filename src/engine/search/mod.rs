@@ -90,7 +90,7 @@ mod tests {
         const NUM_THREADS: usize = 16;
         const BENCH_DEPTH: u8 = 9;
         const TT_SIZE_MB: usize = 16;
-        const POSITIONS_PATH: &str = r".\data\positions\10m.txt";
+        const POSITIONS_PATH: &str = r"..\..\data\positions\20m-sharp.txt";
 
         fn total_material(bbs: &[u64; 16]) -> i32 {
             let mut total = 0i32;

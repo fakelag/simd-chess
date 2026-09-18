@@ -1,0 +1,43 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "cppvsdbg",
+            "request": "launch",
+            "name": "Release simd-chess (selfplay)",
+            "program": "${workspaceFolder}/target/release/simd-chess.exe",
+            "args": [
+                "selfplay",
+                "--count",
+                "1000000",
+                "--threads",
+                "1",
+                "--positions",
+                ".\\data\\positions\\10m.txt"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "symbolSearchPath": ".\\target\\release",
+            "preLaunchTask": "cargo build release"
+        },
+        {
+            "type": "cppvsdbg",
+            "request": "launch",
+            "name": "Debug simd-chess (selfplay)",
+            "program": "${workspaceFolder}/target/debug/simd-chess.exe",
+            "args": [
+                "selfplay",
+                "--count",
+                "1000000",
+                "--threads",
+                "1",
+                "--positions",
+                ".\\data\\positions\\10m.txt"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "symbolSearchPath": ".\\target\\debug",
+            "preLaunchTask": "cargo build debug"
+        }
+    ]
+}

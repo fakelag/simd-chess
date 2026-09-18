@@ -1,14 +1,9 @@
+.claude/settings.local.json
 /target
 /bin
-/data
-/openings
-/matchcfg*
-/analysis
 /scratch
-*.bat
+/CLAUDE.local.md
 *.txt
 *.zip
-*.bin
 *.binpack
 *.csv
-todo-*.md

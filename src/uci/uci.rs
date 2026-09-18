@@ -30,7 +30,7 @@ pub fn create_context() -> UciContext<UciOptions> {
         UciOptions::OwnBookPath,
         Box::new(UciOptionType::<FilePathString>::new(
             "OwnBookPath",
-            "openings/8moves_v3.pgn".to_string(),
+            "../../data/openings/8moves_v3.pgn".to_string(),
         )),
     );
 

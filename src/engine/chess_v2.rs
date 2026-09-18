@@ -2884,7 +2884,7 @@ mod tests {
         depth: u8,
         fen: &'static str,
         moves: Vec<String>,
-        nnue: Box<nnue::LazyNnue<128, 1>>,
+        nnue: Box<nnue::LazyNnue<1024, 8>>,
     }
 
     impl PerftTestContext {
@@ -2894,7 +2894,7 @@ mod tests {
 
             assert!(board.load_fen(fen, &tables).is_ok());
 
-            let mut nnue = nnue_load!("../../nnue/x2.bin", 128);
+            let mut nnue = nnue_load!("../../nnue/v1-40M-pgnext-1024-320.bin", 1024, 8);
             nnue.load(&board);
 
             Self {

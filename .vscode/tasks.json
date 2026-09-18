@@ -1,0 +1,34 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cargo build release",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "-r",
+                "--bin=simd-chess",
+                "--package=simd-chess"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "build"
+        },
+        {
+            "label": "cargo build debug",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--bin=simd-chess",
+                "--package=simd-chess"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "build"
+        }
+    ]
+}
