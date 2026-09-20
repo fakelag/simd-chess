@@ -21,6 +21,17 @@ pub enum BoundType {
 
 const DEBUG: bool = false;
 
+pub const TT_EVAL_NONE: Eval = Eval::MIN;
+
+const TAG_KEY_MASK: u32 = 0x1FFFF;
+const TAG_EVL_MASK: u32 = 0x3FFE_0000;
+const TAG_GEN_MASK: u32 = 0xC000_0000;
+
+const EVAL_MAX: Eval = EVAL_BIAS as Eval - 1;
+const EVAL_MIN: Eval = -(EVAL_BIAS as Eval) + 1;
+
+const EVAL_BIAS: i32 = 1 << (TAG_EVL_MASK.count_ones() - 1);
+
 // fn print_m512(label: &str, a: &__m512i) {
 //     let mut arr = [0u8; 64];
 //     unsafe {
@@ -34,6 +45,7 @@ pub struct TtProbe {
     pub score: Option<Eval>,
     pub mv_index: u8,
     pub tt_score: Eval,
+    pub tt_eval: Option<Eval>,
     pub tt_depth: u8,
     pub bound_type: BoundType,
 }
@@ -41,7 +53,7 @@ pub struct TtProbe {
 #[derive(Debug, Clone, Copy)]
 #[repr(packed, C)]
 struct TtEntry {
-    keygen: u32,
+    tag: u32,
     depthtype: u8,
     // eval: Eval,
     score: Eval,
@@ -51,7 +63,7 @@ struct TtEntry {
 impl TtEntry {
     pub fn new() -> Self {
         TtEntry {
-            keygen: 0,
+            tag: 0,
             // eval: 0,
             score: 0,
             depthtype: 0,
@@ -61,22 +73,37 @@ impl TtEntry {
 
     #[inline(always)]
     pub fn generation(&self) -> u8 {
-        (self.keygen >> 30) as u8
+        (self.tag >> TAG_GEN_MASK.trailing_zeros()) as u8
     }
 
     #[inline(always)]
     pub fn set_generation(&mut self, generation: u8) {
-        self.keygen = TranspositionTable::key_from_entry(self.keygen) | ((generation as u32) << 30);
-    }
-
-    #[inline(always)]
-    pub fn set_key(&mut self, key: u32) {
-        self.keygen = (self.keygen & 0xC000_0000) | key;
+        self.tag =
+            (self.tag & !TAG_GEN_MASK) | ((generation as u32) << TAG_GEN_MASK.trailing_zeros());
     }
 
     #[inline(always)]
     pub fn key(&self) -> u32 {
-        TranspositionTable::key_from_entry(self.keygen)
+        self.tag & TAG_KEY_MASK
+    }
+
+    #[inline(always)]
+    pub fn eval(&self) -> Option<Eval> {
+        let raw = (self.tag & TAG_EVL_MASK) >> TAG_KEY_MASK.count_ones();
+
+        match raw {
+            0 => None,
+            _ => Some((raw as i32 - EVAL_BIAS) as Eval),
+        }
+    }
+
+    #[inline(always)]
+    fn encode_eval(eval: Eval) -> u32 {
+        if eval < EVAL_MIN || eval > EVAL_MAX {
+            return 0;
+        }
+
+        ((eval as i32 + EVAL_BIAS) as u32) << TAG_KEY_MASK.count_ones()
     }
 
     #[inline(always)]
@@ -196,12 +223,7 @@ impl TranspositionTable {
 
     #[inline(always)]
     fn bucket_key(&self, hash: u64) -> u32 {
-        ((hash >> self.index_bits) & 0x3FFF_FFFF) as u32
-    }
-
-    #[inline(always)]
-    fn key_from_entry(keygen: u32) -> u32 {
-        (keygen as u32) & 0x3FFF_FFFF
+        (hash >> self.index_bits) as u32 & TAG_KEY_MASK
     }
 
     #[inline(always)]
@@ -252,6 +274,7 @@ impl TranspositionTable {
             score: if usable { Some(entry.score) } else { None },
             mv_index: entry.mv_index,
             tt_score: entry.score,
+            tt_eval: entry.eval(),
             tt_depth: entry.depth(),
             bound_type: entry.bound_type(),
         });
@@ -360,7 +383,8 @@ impl TranspositionTable {
     #[inline(always)]
     fn match_entries_key_avx512(&self, bucket_vec: &__m512i, key: u32) -> __mmask8 {
         unsafe {
-            let masked = _mm512_and_si512(*bucket_vec, _mm512_set1_epi64(0x3FFF_FFFF));
+            let masked =
+                _mm512_and_si512(*bucket_vec, _mm512_set1_epi64(TAG_KEY_MASK as u64 as i64));
             _mm512_cmpeq_epi64_mask(masked, _mm512_set1_epi64(key as i64))
         }
     }
@@ -370,6 +394,7 @@ impl TranspositionTable {
         &mut self,
         hash: u64,
         score: Eval,
+        eval: Eval,
         depth: u8,
         mv_index: F,
         bound_type: BoundType,
@@ -450,12 +475,12 @@ impl TranspositionTable {
         //         .or_insert(hash);
         // }
 
-        // entry.eval = eval;
         entry.score = score;
         entry.mv_index = mv_index();
-        entry.set_generation(generation);
         entry.set_depth_and_type(depth, bound_type);
-        entry.set_key(bucket_key);
+        entry.tag = bucket_key
+            | TtEntry::encode_eval(eval)
+            | ((generation as u32) << TAG_GEN_MASK.trailing_zeros());
     }
 
     fn find_store_index_debug(
@@ -563,6 +588,7 @@ impl TranspositionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::search::eval::SCORE_INF;
 
     const INDEX_BITS: u32 = 14;
     const DEPTHS: [u8; 8] = [20, 18, 25, 9, 30, 22, 27, 21];
@@ -580,7 +606,14 @@ mod tests {
 
     fn fill_bucket(tt: &mut TranspositionTable, depths: [u8; 8]) {
         for (i, depth) in depths.into_iter().enumerate() {
-            tt.store::<false, _>(hash_for_key(i as u64 + 1), 0, depth, || 0, BoundType::Exact);
+            tt.store::<false, _>(
+                hash_for_key(i as u64 + 1),
+                0,
+                0,
+                depth,
+                || 0,
+                BoundType::Exact,
+            );
         }
     }
 
@@ -589,12 +622,17 @@ mod tests {
             .map(|probe| probe.tt_depth)
     }
 
+    fn probe_eval(tt: &mut TranspositionTable, key: u64) -> Option<Eval> {
+        tt.probe(hash_for_key(key), 0, -30_000, 30_000)
+            .and_then(|probe| probe.tt_eval)
+    }
+
     #[test]
     fn tt_store_replaces_shallowest_when_no_candidate() {
         let mut tt = fresh_tt();
 
         fill_bucket(&mut tt, DEPTHS);
-        tt.store::<false, _>(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
+        tt.store::<false, _>(hash_for_key(100), 0, 0, 5, || 0, BoundType::Exact);
 
         assert_eq!(probe_depth(&mut tt, 100), Some(5));
         assert_eq!(probe_depth(&mut tt, 4), None);
@@ -610,7 +648,7 @@ mod tests {
         let mut tt = fresh_tt();
         fill_bucket(&mut tt, DEPTHS);
 
-        tt.store::<false, _>(hash_for_key(4), 0, 2, || 0, BoundType::Exact);
+        tt.store::<false, _>(hash_for_key(4), 0, 0, 2, || 0, BoundType::Exact);
 
         assert_eq!(probe_depth(&mut tt, 4), Some(9));
     }
@@ -622,10 +660,78 @@ mod tests {
 
         tt.new_search();
         tt.new_search();
-        tt.store::<false, _>(hash_for_key(100), 0, 5, || 0, BoundType::Exact);
+        tt.store::<false, _>(hash_for_key(100), 0, 0, 5, || 0, BoundType::Exact);
 
         assert_eq!(probe_depth(&mut tt, 100), Some(5));
         assert_eq!(probe_depth(&mut tt, 1), None);
         assert_eq!(probe_depth(&mut tt, 4), Some(9));
+    }
+
+    #[test]
+    fn tt_eval_roundtrip() {
+        let mut tt = fresh_tt();
+
+        for (i, eval) in [0, 137, -137, EVAL_MAX, EVAL_MIN].into_iter().enumerate() {
+            let key = i as u64 + 1;
+            tt.store::<false, _>(hash_for_key(key), 0, eval, 5, || 0, BoundType::Exact);
+
+            assert_eq!(probe_eval(&mut tt, key), Some(eval));
+        }
+    }
+
+    #[test]
+    fn tt_eval_out_of_range_stores_none() {
+        let mut tt = fresh_tt();
+
+        for (i, eval) in [
+            EVAL_MAX + 1,
+            EVAL_MIN - 1,
+            6000,
+            -6000,
+            SCORE_INF,
+            -SCORE_INF,
+            TT_EVAL_NONE,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = i as u64 + 1;
+            tt.store::<false, _>(hash_for_key(key), 0, eval, 5, || 0, BoundType::Exact);
+
+            assert_eq!(probe_eval(&mut tt, key), None);
+            assert_eq!(probe_depth(&mut tt, key), Some(5));
+        }
+    }
+
+    /// The eval field shares the tag word with the key and the generation, both
+    /// of which the AVX-512 bucket masks read positionally.
+    #[test]
+    fn tt_eval_leaves_key_and_generation_intact() {
+        let mut tt = fresh_tt();
+
+        for eval in [EVAL_MIN, -1, 0, 1, EVAL_MAX] {
+            tt.store::<false, _>(hash_for_key(1), 0, eval, 5, || 7, BoundType::Exact);
+
+            let entry = tt.entries[0].0[0];
+            assert_eq!(entry.key(), 1);
+            assert_eq!(entry.generation(), tt.generation);
+            assert_eq!(entry.depth(), 5);
+            assert_eq!(entry.bound_type(), BoundType::Exact);
+            assert_eq!(entry.mv_index, 7);
+            assert_eq!(entry.eval(), Some(eval));
+        }
+    }
+
+    #[test]
+    fn tt_eval_generation_refresh() {
+        let mut tt = fresh_tt();
+
+        tt.store::<false, _>(hash_for_key(1), 0, 137, 5, || 0, BoundType::Exact);
+        tt.new_search();
+
+        let usable = tt.probe(hash_for_key(1), 5, -30_000, 30_000).unwrap();
+        assert!(usable.score.is_some());
+
+        assert_eq!(probe_eval(&mut tt, 1), Some(137));
     }
 }

@@ -1,13 +1,21 @@
 use std::arch::x86_64::*;
 
 use crate::{
-    engine::chess_v2::{self, PieceIndex},
+    engine::{
+        chess_v2::{self, PieceIndex},
+        search::{
+            eval::{Eval, SCORE_INF},
+            search::PV_DEPTH,
+        },
+    },
     pop_ls1b,
 };
 
 pub const QA: i16 = 255;
 pub const QB: i16 = 64;
 pub const QS: i32 = 400;
+
+const EVAL_ABS_MAX: i32 = (SCORE_INF - PV_DEPTH as Eval) as i32;
 
 const LAZY_NNUE_MAX_PLY: usize = 1024;
 
@@ -146,13 +154,7 @@ where
         output *= QS;
         output /= i32::from(QA) * i32::from(QB);
 
-        debug_assert!(
-            output >= i32::from(i16::MIN) && output <= i32::from(i16::MAX),
-            "NNUE output overflow: {}",
-            output,
-        );
-
-        output as i16
+        output.clamp(-EVAL_ABS_MAX, EVAL_ABS_MAX) as i16
     }
 
     #[inline(always)]
@@ -166,13 +168,21 @@ where
         output *= QS;
         output /= i32::from(QA) * i32::from(QB);
 
-        debug_assert!(
-            output >= i32::from(i16::MIN) && output <= i32::from(i16::MAX),
-            "NNUE output overflow: {}",
-            output,
-        );
+        output.clamp(-EVAL_ABS_MAX, EVAL_ABS_MAX) as i16
+    }
 
-        output as i16
+    pub fn assert_output_weights_fit(&self) {
+        const MAX_ABS: i32 = i16::MAX as i32 / QA as i32;
+
+        for (bucket, weights) in self.output_weights.iter().enumerate() {
+            for (i, &w) in weights.iter().enumerate() {
+                assert!(
+                    i32::from(w).abs() <= MAX_ABS,
+                    "output weight {i} of bucket {bucket} is {w}, |w| must be <= {MAX_ABS} \
+                     to keep screlu_dp's i16 product exact",
+                );
+            }
+        }
     }
 
     #[inline(always)]
@@ -626,6 +636,8 @@ where
     [(); 2 * HS]:,
 {
     pub fn heap_alloc(net: &Network<HS, OB>) -> Box<Self> {
+        net.assert_output_weights_fit();
+
         unsafe {
             let layout = std::alloc::Layout::new::<Self>();
             let ptr = std::alloc::alloc(layout) as *mut Self;

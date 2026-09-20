@@ -38,10 +38,6 @@ const FLAG_TT_50MV_GUARD: bool = false;
 
 const LMP_MAX_DEPTH: u8 = 8;
 
-//  "../../../nnue/w2-10M-512-b8.bin"
-// "../../../nnue/v1-10M-512-b8.bin"
-// "../../../nnue/v1-20M-512-b8.bin"
-// "../../../nnue/v1-20M-1024-b8.bin"
 macro_rules! net_path {
     () => {
         "../../../nnue/v1-40M-pgnext-1024-320.bin"
@@ -611,6 +607,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut tt_score = 0;
         let mut tt_depth = 0u8;
         let mut tt_bound = BoundType::UpperBound;
+        let mut tt_eval = None;
 
         if let Some(ref probe) = tt_probe {
             if prune_node && (!FLAG_TT_50MV_GUARD || self.chess.half_moves() < 90) {
@@ -629,6 +626,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             tt_score = Self::score_from_tt(probe.tt_score, self.ply);
             tt_depth = probe.tt_depth;
             tt_bound = probe.bound_type;
+            tt_eval = probe.tt_eval;
         }
 
         // IIR
@@ -651,7 +649,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             return self.quiescence(alpha, beta);
         }
 
-        let static_eval = self.evaluate();
+        let static_eval = tt_eval.unwrap_or_else(|| self.evaluate());
         let corrected_eval = self.eval_with_correction(static_eval);
         self.eval_stack[ply] = corrected_eval;
 
@@ -889,52 +887,52 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 debug_assert!(move_buffer.see_info.is_some());
                 let see_info = unsafe { move_buffer.see_info.as_ref().unwrap_unchecked() };
 
-                    let is_capture = (mv & MV_FLAG_CAP) != 0;
+                let is_capture = (mv & MV_FLAG_CAP) != 0;
 
-                    // Capture SEE pruning: depth-scaled linear threshold.
-                    // Fast path: good captures (SEE >= 0 from ordering) always pass
-                    // any negative threshold, so skip the see_threshold call entirely.
-                    if is_capture && depth <= SEE_CAPTURE_PRUNE_MAX_DEPTH {
-                        if phase == MovegenPhase::MoveBadCap {
-                            let threshold = -(SEE_CAPTURE_MARGIN * depth as Eval);
-                            if !see::see_threshold(
-                                &WEIGHT_TABLE_ABS,
-                                self.tables,
-                                &board_copy,
-                                mv,
-                                threshold,
-                                see_info.black_board,
-                                see_info.white_board,
-                                see_info.pieces_board,
-                                Some(&see_info.pins),
-                            ) {
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Quiet SEE pruning: quadratic threshold with history adjustment.
-                    // Quadratic scaling prunes less at shallow depths (safer) and more
-                    // at deep depths (bigger savings). History shifts the threshold:
-                    // bad history -> threshold closer to 0 -> more pruning.
-                    if !is_capture && depth <= SEE_QUIET_PRUNE_MAX_DEPTH {
-                        let history = self.history_moves[src_piece][dst_sq];
-
-                        let threshold = -(SEE_QUIET_MARGIN * depth as Eval * depth as Eval)
-                            - (history as Eval / SEE_HISTORY_DIVISOR);
-
+                // Capture SEE pruning: depth-scaled linear threshold.
+                // Fast path: good captures (SEE >= 0 from ordering) always pass
+                // any negative threshold, so skip the see_threshold call entirely.
+                if is_capture && depth <= SEE_CAPTURE_PRUNE_MAX_DEPTH {
+                    if phase == MovegenPhase::MoveBadCap {
+                        let threshold = -(SEE_CAPTURE_MARGIN * depth as Eval);
                         if !see::see_threshold(
                             &WEIGHT_TABLE_ABS,
                             self.tables,
                             &board_copy,
                             mv,
-                            threshold.min(0),
+                            threshold,
                             see_info.black_board,
                             see_info.white_board,
                             see_info.pieces_board,
                             Some(&see_info.pins),
                         ) {
                             continue;
+                        }
+                    }
+                }
+
+                // Quiet SEE pruning: quadratic threshold with history adjustment.
+                // Quadratic scaling prunes less at shallow depths (safer) and more
+                // at deep depths (bigger savings). History shifts the threshold:
+                // bad history -> threshold closer to 0 -> more pruning.
+                if !is_capture && depth <= SEE_QUIET_PRUNE_MAX_DEPTH {
+                    let history = self.history_moves[src_piece][dst_sq];
+
+                    let threshold = -(SEE_QUIET_MARGIN * depth as Eval * depth as Eval)
+                        - (history as Eval / SEE_HISTORY_DIVISOR);
+
+                    if !see::see_threshold(
+                        &WEIGHT_TABLE_ABS,
+                        self.tables,
+                        &board_copy,
+                        mv,
+                        threshold.min(0),
+                        see_info.black_board,
+                        see_info.white_board,
+                        see_info.pieces_board,
+                        Some(&see_info.pins),
+                    ) {
+                        continue;
                     }
                 }
             }
@@ -1170,6 +1168,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     self.tt_mut().store::<false, _>(
                         self.chess.zobrist_key(),
                         store_score,
+                        static_eval,
                         depth,
                         || moves.find_move_index_avx512(best_move, move_buffer),
                         BoundType::LowerBound,
@@ -1208,6 +1207,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             self.tt_mut().store::<false, _>(
                 self.chess.zobrist_key(),
                 store_score,
+                static_eval,
                 depth,
                 || moves.find_move_index_avx512(best_move, move_buffer),
                 bound_type,
@@ -1231,10 +1231,11 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let mut tt_move_index = 0xFF;
         let mut tt_depth = 0;
+        let mut tt_eval = None;
 
         if let Some(probe) = self
-                .tt_mut()
-                .probe(self.chess.zobrist_key(), 0, alpha, beta)
+            .tt_mut()
+            .probe(self.chess.zobrist_key(), 0, alpha, beta)
         {
             if (!FLAG_TT_50MV_GUARD || self.chess.half_moves() < 90)
                 && let Some(score) = probe.score
@@ -1244,6 +1245,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
             tt_depth = probe.tt_depth;
             tt_move_index = probe.mv_index;
+            tt_eval = probe.tt_eval;
         }
 
         let in_check = self.chess.in_check(self.tables, self.chess.b_move());
@@ -1252,34 +1254,35 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             tt_move_index = 0xFF;
         }
 
-        let static_eval = if !in_check {
-            let raw_eval = self.evaluate();
-            let static_eval = self.eval_with_correction(raw_eval);
+        let (store_eval, corr_eval) = if !in_check {
+            let raw_eval = tt_eval.unwrap_or_else(|| self.evaluate());
+            let corr_eval = self.eval_with_correction(raw_eval);
 
             // If the current board position is bad enough to cause a
             // cutoff higher up, save the time and return it immediately
-            if static_eval >= beta {
-                    self.tt_mut().store::<true, _>(
-                        self.chess.zobrist_key(),
-                        Self::score_to_tt(static_eval, self.ply),
-                        0,
-                        || tt_move_index,
-                        BoundType::LowerBound,
-                    );
+            if corr_eval >= beta {
+                self.tt_mut().store::<true, _>(
+                    self.chess.zobrist_key(),
+                    Self::score_to_tt(corr_eval, self.ply),
+                    raw_eval,
+                    0,
+                    || tt_move_index,
+                    BoundType::LowerBound,
+                );
 
-                return static_eval;
+                return corr_eval;
             }
 
             // If it is better than alpha, update alpha bound to it to cause more cuts, assuming
             // that making any move in this position will either be the same or better for the
             // playing side
-            if static_eval > alpha {
-                alpha = static_eval;
+            if corr_eval > alpha {
+                alpha = corr_eval;
             }
 
-            static_eval
+            (raw_eval, corr_eval)
         } else {
-            -SCORE_INF
+            (tt_eval.unwrap_or(TT_EVAL_NONE), -SCORE_INF)
         };
 
         let flag_enable_qs_see_prune = match F {
@@ -1288,7 +1291,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             _ => true,
         };
 
-        let mut best_score: Eval = static_eval;
+        let mut best_score: Eval = corr_eval;
         let mut best_move: u16 = 0;
         let mut num_legal_moves = 0;
 
@@ -1315,14 +1318,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         while let Some((mv, phase)) = moves.next(
             &self.chess,
-                    self.tables,
+            self.tables,
             &ContHistRef {
                 ply1: None,
                 ply2: None,
             },
             &self.history_moves,
             move_buffer,
-                ) {
+        ) {
             if flag_enable_qs_see_prune && !in_check && phase == MovegenPhase::MoveBadCap {
                 // No more good captures
                 break;
@@ -1366,13 +1369,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 best_move = mv;
 
                 if score >= beta {
-                        self.tt_mut().store::<true, _>(
-                            self.chess.zobrist_key(),
-                            Self::score_to_tt(score, self.ply),
-                            0,
-                            || moves.find_move_index_avx512(best_move, move_buffer),
-                            BoundType::LowerBound,
-                        );
+                    self.tt_mut().store::<true, _>(
+                        self.chess.zobrist_key(),
+                        Self::score_to_tt(score, self.ply),
+                        store_eval,
+                        0,
+                        || moves.find_move_index_avx512(best_move, move_buffer),
+                        BoundType::LowerBound,
+                    );
 
                     return score;
                 }
@@ -1388,25 +1392,26 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         }
 
         // QS could store BoundType::Exact if best_score < beta && best_score > alpha_orig
-            let bound_type = if best_score >= beta {
-                BoundType::LowerBound
-            } else {
-                BoundType::UpperBound
-            };
+        let bound_type = if best_score >= beta {
+            BoundType::LowerBound
+        } else {
+            BoundType::UpperBound
+        };
 
-            self.tt_mut().store::<true, _>(
-                self.chess.zobrist_key(),
-                Self::score_to_tt(best_score, self.ply),
-                0,
-                || {
-                    if best_move == 0 {
-                        tt_move_index
-                    } else {
-                        moves.find_move_index_avx512(best_move, move_buffer)
-                    }
-                },
-                bound_type,
-            );
+        self.tt_mut().store::<true, _>(
+            self.chess.zobrist_key(),
+            Self::score_to_tt(best_score, self.ply),
+            store_eval,
+            0,
+            || {
+                if best_move == 0 {
+                    tt_move_index
+                } else {
+                    moves.find_move_index_avx512(best_move, move_buffer)
+                }
+            },
+            bound_type,
+        );
 
         best_score
     }
