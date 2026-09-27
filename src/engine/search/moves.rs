@@ -330,7 +330,7 @@ impl<const QS: bool> PhasedMovegen<QS> {
                     //     22, 53, 21, 52, 20, 51, 19, 50, 18, 49, 17, 48, 16,
                     // );
 
-                    if std::hint::unlikely(!self.in_check) {
+                    if std::hint::likely(!self.in_check) {
                         Self::calc_see_info(board, buffer);
                     }
 

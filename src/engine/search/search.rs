@@ -1462,7 +1462,6 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         *entry = current_value as Eval;
     }
 
-    #[inline(always)]
     fn update_correction_heuristics(&mut self, score: Eval, static_eval: Eval, depth: i16) {
         let depth = depth as i32;
         let stm = self.chess.b_move() as usize;

@@ -482,7 +482,7 @@ where
         }
     }
 
-    #[inline(always)]
+    #[inline(never)]
     pub fn apply_from<const NA: usize, const NS: usize>(
         &mut self,
         src: &AccumulatorPair<HS, OB>,
