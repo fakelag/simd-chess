@@ -121,6 +121,8 @@ fn search_thread(
                     used_book = get_opening_book(&uci_context, tables);
                     println!("info string reloaded opening book");
                 }
+                #[cfg(feature = "spsa")]
+                uci::uci::UciOptions::Tunable(_) => search_engine.on_tunables_changed(),
             },
             Ok(UciCommand::NewGame) => {
                 search_engine.new_game();

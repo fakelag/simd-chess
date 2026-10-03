@@ -20,6 +20,7 @@ pub mod see;
 pub mod stability;
 pub mod timeman;
 pub mod transposition;
+pub mod tunables;
 
 #[cfg(test)]
 mod tests {

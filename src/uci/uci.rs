@@ -16,6 +16,8 @@ use crate::{
 pub enum UciOptions {
     OwnBook,
     OwnBookPath,
+    #[cfg(feature = "spsa")]
+    Tunable(usize),
 }
 
 pub fn create_context() -> UciContext<UciOptions> {
@@ -33,6 +35,11 @@ pub fn create_context() -> UciContext<UciOptions> {
             "../../data/openings/8moves_v3.pgn".to_string(),
         )),
     );
+
+    #[cfg(feature = "spsa")]
+    for (i, tunable) in search::tunables::ALL.iter().enumerate() {
+        uci_context.lock_add(UciOptions::Tunable(i), Box::new(TunableOption(tunable)));
+    }
 
     uci_context
 }
@@ -213,6 +220,21 @@ pub fn chess_uci(
                 drop(lock);
 
                 tx_search.send(UciCommand::OptionChange(oid))?;
+            }
+            // OpenBench SPSA input format, read by sprt/spsa.py
+            #[cfg(feature = "spsa")]
+            Some("spsa") => {
+                for t in search::tunables::ALL {
+                    println!(
+                        "{}, int, {}, {}, {}, {}, {}",
+                        t.name,
+                        t.value(),
+                        t.min,
+                        t.max,
+                        t.c_end,
+                        search::tunables::SPSA_R_END
+                    );
+                }
             }
             Some("quit") => {
                 sync_stop();

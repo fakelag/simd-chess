@@ -19,6 +19,9 @@ bullet = { git = "https://github.com/jw1912/bullet", rev = "cebc78a", package = 
 zstd = "0.13.3"
 llvm-mca = "0.1.0"
 
+[features]
+spsa = []
+
 [profile.release]
 debug = true
 lto = "fat"

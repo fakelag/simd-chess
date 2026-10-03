@@ -14,6 +14,7 @@ use crate::{
             see,
             timeman::{IterationReport, TimeManager},
             transposition::*,
+            tunables::*,
         },
         tables::{self},
     },
@@ -27,9 +28,6 @@ const EVAL_CACHE: bool = false;
 const CHECK_EXT_DEPTH_MULT: u16 = 2;
 
 const FLAG_NMP_MATE_CLAMP: bool = false;
-
-const NMP_EVAL_R_DIV: Eval = 192;
-const NMP_EVAL_R_MAX: u8 = 3;
 
 // const FLAG_LMR_CUTNODE: bool = false;
 // const LMR_CUTNODE_R: i16 = 2;
@@ -54,15 +52,9 @@ pub const NET_OSIZE: usize = 8;
 const QS_MOVE_STACK_SIZE: usize = 128;
 const MOVE_STACK_SIZE: usize = PV_DEPTH * 2 + QS_MOVE_STACK_SIZE;
 
-const CORR_WEIGHT_SCALE: Eval = 128;
 const CORR_MAX_ERROR: Eval = 1024;
-const CORR_GRAIN: Eval = 8;
 
 const CORR_SUM_SCALE: Eval = 1024;
-
-const CORR_W_PAWN: Eval = 128;
-const CORR_W_NP_STM: Eval = 48;
-const CORR_W_NP_NTM: Eval = 24;
 
 pub const PV_DEPTH: usize = 64;
 
@@ -70,11 +62,7 @@ pub const HISTORY_MAX: i16 = SCORE_INF;
 pub const HISTORY_MIN: i16 = -SCORE_INF;
 
 const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
-const SEE_CAPTURE_MARGIN: Eval = 100;
 const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 8;
-const SEE_QUIET_MARGIN: Eval = 12;
-const SEE_HISTORY_DIVISOR: Eval = 128;
-const SEE_QS_THRESHOLD: Eval = -20;
 
 #[derive(Debug)]
 pub struct PvTable {
@@ -151,8 +139,6 @@ pub struct Search<'a, const F: EngineForm> {
 
 impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
     fn search(&mut self, depth: Option<u8>) -> u16 {
-        const INITIAL_BOUND_MARGIN: Eval = 17;
-
         assert!(
             self.rt.top() != Some(self.chess.zobrist_key()),
             "repetition table already contains the root position"
@@ -189,14 +175,14 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
         }
 
         'outer: for depth in 1..=target_depth {
-            let mut margin = INITIAL_BOUND_MARGIN;
+            let mut margin = param!(ASP_WINDOW);
 
             self.search_depth = depth;
 
             let (mut alpha, mut beta) = if depth >= 4 {
                 (
-                    self.score.saturating_sub(INITIAL_BOUND_MARGIN),
-                    self.score.saturating_add(INITIAL_BOUND_MARGIN),
+                    self.score.saturating_sub(param!(ASP_WINDOW)),
+                    self.score.saturating_add(param!(ASP_WINDOW)),
                 )
             } else {
                 (-Eval::MAX, Eval::MAX)
@@ -333,19 +319,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 Box::from_raw(ptr)
             },
             eval_stack: [0; PV_DEPTH],
-            lmr_table: {
-                let mut table = [[0u8; 64]; 64];
-                let mut d = 1;
-                while d < 64 {
-                    let mut m = 1;
-                    while m < 64 {
-                        table[d][m] = (0.75 + (d as f64).ln() * (m as f64).ln() / 2.2) as u8;
-                        m += 1;
-                    }
-                    d += 1;
-                }
-                table
-            },
+            lmr_table: Self::build_lmr_table(),
             et: EvalTable::new(1024),
             rt,
             tt,
@@ -369,6 +343,24 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         s.nnue.load(&s.chess);
 
         s
+    }
+
+    fn build_lmr_table() -> [[u8; 64]; 64] {
+        let base = param!(LMR_BASE) as f64 / 100.0;
+        let div = param!(LMR_DIV) as f64 / 100.0;
+
+        let mut table = [[0u8; 64]; 64];
+        for d in 1..64 {
+            for m in 1..64 {
+                table[d][m] = (base + (d as f64).ln() * (m as f64).ln() / div) as u8;
+            }
+        }
+        table
+    }
+
+    #[cfg(feature = "spsa")]
+    pub fn on_tunables_changed(&mut self) {
+        self.lmr_table = Self::build_lmr_table();
     }
 
     /// A soft reset. Clears all counters but does not zero the transposition
@@ -671,8 +663,13 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 _ => true,
             };
 
-            if flag_enable_rfp && non_pv_node && !is_mate(alpha) && !is_mate(beta) && depth < 8 {
-                let eval_margin = 180 * depth as Eval / (1 + improving as Eval);
+            if flag_enable_rfp
+                && non_pv_node
+                && !is_mate(alpha)
+                && !is_mate(beta)
+                && depth < param!(RFP_MAX_DEPTH)
+            {
+                let eval_margin = param!(RFP_MARGIN) * depth as Eval / (1 + improving as Eval);
 
                 if corrected_eval - eval_margin >= beta {
                     return corrected_eval - eval_margin;
@@ -680,7 +677,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             }
 
             if flag_enable_nmp
-                && depth >= 3
+                && depth >= param!(NMP_MIN_DEPTH)
                 && corrected_eval >= beta
                 && self.chess.has_non_pawn_mat(self.chess.b_move() as usize)
             {
@@ -693,9 +690,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 };
 
                 let new_depth = if nmp_r_enabled {
-                    let r_eval = ((corrected_eval as i32 - beta as i32) / NMP_EVAL_R_DIV as i32)
-                        .clamp(0, NMP_EVAL_R_MAX as i32) as u8;
-                    let r = 2 + depth / 3 + r_eval;
+                    let r_eval =
+                        ((corrected_eval as i32 - beta as i32) / param!(NMP_EVAL_R_DIV) as i32)
+                            .clamp(0, param!(NMP_EVAL_R_MAX) as i32) as u8;
+                    let r = param!(NMP_BASE_R) + depth / param!(NMP_DEPTH_DIV) + r_eval;
                     depth.saturating_sub(r)
                 } else {
                     let r = 2 + depth / 3;
@@ -829,7 +827,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 self.excluded_move = mv;
 
                 self.rt.pop_position();
-                let singular_beta = tt_score - 3 * depth as Eval;
+                let singular_beta = tt_score - param!(SE_BETA_MARGIN) * depth as Eval / 16;
                 let s_score = self.go(singular_beta - 1, singular_beta, depth / 2);
 
                 self.excluded_move = saved_excluded;
@@ -840,8 +838,10 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 }
 
                 if s_score < singular_beta {
-                    extension =
-                        1 + (non_pv_node && s_score < singular_beta - 20 && can_extend) as u8;
+                    extension = 1
+                        + (non_pv_node
+                            && s_score < singular_beta - param!(SE_DOUBLE_MARGIN)
+                            && can_extend) as u8;
                 } else if singular_beta >= beta {
                     // Multi-cut: even without the TT move, score >= beta
                     return singular_beta;
@@ -894,7 +894,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 // any negative threshold, so skip the see_threshold call entirely.
                 if is_capture && depth <= SEE_CAPTURE_PRUNE_MAX_DEPTH {
                     if phase == MovegenPhase::MoveBadCap {
-                        let threshold = -(SEE_CAPTURE_MARGIN * depth as Eval);
+                        let threshold = -(param!(SEE_CAPTURE_MARGIN) * depth as Eval);
                         if !see::see_threshold(
                             &WEIGHT_TABLE_ABS,
                             self.tables,
@@ -918,8 +918,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 if !is_capture && depth <= SEE_QUIET_PRUNE_MAX_DEPTH {
                     let history = self.history_moves[src_piece][dst_sq];
 
-                    let threshold = -(SEE_QUIET_MARGIN * depth as Eval * depth as Eval)
-                        - (history as Eval / SEE_HISTORY_DIVISOR);
+                    let threshold = -(param!(SEE_QUIET_MARGIN) * depth as Eval * depth as Eval)
+                        - (history as Eval / param!(SEE_HISTORY_DIVISOR));
 
                     if !see::see_threshold(
                         &WEIGHT_TABLE_ABS,
@@ -969,8 +969,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             };
 
             let late_move_reduction = flag_enable_lmr
-                && num_legal_moves > 3
-                && depth >= 3
+                && num_legal_moves > param!(LMR_MIN_MOVES)
+                && depth >= param!(LMR_MIN_DEPTH)
                 && !in_check
                 && is_non_capture_or_promotion;
 
@@ -1014,7 +1014,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     };
 
                     let combined = history + cont_bonus;
-                    let hist_adj = (combined / 8192).clamp(-2, 2) as i16;
+                    let hist_adj = (combined / param!(LMR_HIST_DIV))
+                        .clamp(-param!(LMR_HIST_MAX), param!(LMR_HIST_MAX))
+                        as i16;
 
                     let mut r = base_r - hist_adj;
 
@@ -1313,7 +1315,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             &self.chess,
             move_buffer,
             in_check,
-            SEE_QS_THRESHOLD,
+            param!(SEE_QS_THRESHOLD),
         );
 
         while let Some((mv, phase)) = moves.next(
@@ -1445,15 +1447,16 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let diff = (score as i32) - (static_eval as i32);
 
-        let diff_scaled = (diff * (CORR_GRAIN as i32))
+        let diff_scaled = (diff * (param!(CORR_GRAIN) as i32))
             .max((-CORR_MAX_ERROR) as i32)
             .min(CORR_MAX_ERROR as i32);
 
-        let depth_weight = (depth * depth + 2 * depth + 1).min(CORR_WEIGHT_SCALE as i32) as i32;
+        let weight_scale = param!(CORR_WEIGHT_SCALE) as i32;
+        let depth_weight = (depth * depth + 2 * depth + 1).min(weight_scale);
 
-        current_value = (current_value * (CORR_WEIGHT_SCALE as i32 - depth_weight)
+        current_value = (current_value * (weight_scale - depth_weight)
             + diff_scaled * depth_weight)
-            / (CORR_WEIGHT_SCALE as i32);
+            / weight_scale;
 
         current_value = current_value
             .max((-CORR_MAX_ERROR) as i32)
@@ -1499,12 +1502,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         let mut acc: i32 = 0;
 
         let pawn_key = self.chess.pawn_key() as usize;
-        acc += self.corr_hist.pawn[stm][pawn_key] as i32 * CORR_W_PAWN as i32;
+        acc += self.corr_hist.pawn[stm][pawn_key] as i32 * param!(CORR_W_PAWN) as i32;
 
         let nonpawn_key_stm = self.chess.non_pawn_key(stm) as usize;
         let nonpawn_key_ntm = self.chess.non_pawn_key(ntm) as usize;
-        acc += self.corr_hist.non_pawn[stm][stm][nonpawn_key_stm] as i32 * CORR_W_NP_STM as i32;
-        acc += self.corr_hist.non_pawn[ntm][stm][nonpawn_key_ntm] as i32 * CORR_W_NP_NTM as i32;
+        acc += self.corr_hist.non_pawn[stm][stm][nonpawn_key_stm] as i32
+            * param!(CORR_W_NP_STM) as i32;
+        acc += self.corr_hist.non_pawn[ntm][stm][nonpawn_key_ntm] as i32
+            * param!(CORR_W_NP_NTM) as i32;
 
         let correction = acc / CORR_SUM_SCALE as i32;
 

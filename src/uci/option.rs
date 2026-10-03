@@ -126,3 +126,48 @@ impl UciOption for UciOptionType<FilePathString> {
         &self.value
     }
 }
+
+#[cfg(feature = "spsa")]
+pub struct TunableOption(pub &'static crate::engine::search::tunables::TunableMeta);
+
+#[cfg(feature = "spsa")]
+impl UciOption for TunableOption {
+    fn name(&self) -> &str {
+        self.0.name
+    }
+
+    fn type_name(&self) -> &'static str {
+        "spin"
+    }
+
+    fn set_value_from_str(&mut self, value: &str) -> anyhow::Result<()> {
+        let value = value.parse::<i32>().map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid value for option {}: {} ({})",
+                self.0.name,
+                value,
+                e
+            )
+        })?;
+        self.0.set(value)
+    }
+
+    fn print(&self) {
+        println!(
+            "option name {} type {} default {} min {} max {}",
+            self.0.name,
+            self.type_name(),
+            self.0.default,
+            self.0.min,
+            self.0.max,
+        );
+    }
+
+    fn val_bool(&self) -> bool {
+        panic!("Called val_bool on a non-bool (tunable) UCI option");
+    }
+
+    fn val_string(&self) -> &str {
+        panic!("Called val_string on a non-string (tunable) UCI option");
+    }
+}
