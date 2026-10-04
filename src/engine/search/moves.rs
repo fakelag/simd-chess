@@ -3,35 +3,70 @@
 use crate::{
     engine::{
         chess_v2,
-        search::{eval, see},
+        search::{eval, search, see, tunables::*},
         sorting, tables,
     },
     util,
 };
 
-#[cfg_attr(any(), rustfmt::skip)]
-const MVV_LVA_SCORES_U8: [[u8; 16]; 16] = [
-    /* Ep Cap */      [0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 5, 0],
-    /* WhiteKing */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* WhiteQueen */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 24, 25, 26, 27, 28, 29, 0],
-    /* WhiteRook */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 18, 19, 20, 21, 22, 23, 0],
-    /* WhiteBishop */ [0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 13, 14, 15, 16, 17, 0],
-    /* WhiteKnight */ [0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 7, 8, 9, 10, 11, 0],
-    /* WhitePawn */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 0],
-    /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* Black Null */  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackKing */   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackQueen */  [0, 24, 25, 26, 27, 28, 29, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackRook */   [0, 18, 19, 20, 21, 22, 23, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackBishop */ [0, 12, 13, 14, 15, 16, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackKnight */ [0, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* BlackPawn */   [0, 0, 1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    /* Pad */         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+const CAPTURE_VICTIM_VALUE: [i32; 8] = [
+    eval::WEIGHT_PAWN as i32, // ep
+    0,
+    eval::WEIGHT_QUEEN as i32,
+    eval::WEIGHT_ROOK as i32,
+    eval::WEIGHT_BISHOP as i32,
+    eval::WEIGHT_KNIGHT as i32,
+    eval::WEIGHT_PAWN as i32,
+    0,
 ];
 
 pub struct ContHistRef<'a> {
     pub ply1: Option<&'a [i16; 768]>,
     pub ply2: Option<&'a [i16; 768]>,
+}
+
+#[repr(C, align(64))]
+pub struct CaptureHistory([[[i16; 64]; 8]; 16]);
+
+impl CaptureHistory {
+    pub fn new() -> Self {
+        Self([[[0; 64]; 8]; 16])
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    #[inline(always)]
+    fn index(spt: &[u8; 64], mv: u16) -> (usize, usize, usize) {
+        let dst_sq = ((mv >> 6) & 0x3F) as usize;
+        let src_piece = spt[(mv & 0x3F) as usize] as usize;
+        let dst_piece = (spt[dst_sq] & 7) as usize;
+
+        debug_assert!(src_piece < 16 && (1..=6).contains(&(src_piece & 7)));
+        // Safety: spt only holds PieceIndex values, which are < 16
+        unsafe { std::hint::assert_unchecked(src_piece < 16) };
+
+        (src_piece, dst_piece, dst_sq)
+    }
+
+    #[inline(always)]
+    pub fn get(&self, spt: &[u8; 64], mv: u16) -> i16 {
+        let (src_piece, dst_piece, dst_sq) = Self::index(spt, mv);
+        self.0[src_piece][dst_piece][dst_sq]
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, spt: &[u8; 64], mv: u16, delta: i32) {
+        let (src_piece, dst_piece, dst_sq) = Self::index(spt, mv);
+        let entry = &mut self.0[src_piece][dst_piece][dst_sq];
+
+        let delta = delta.clamp(-search::CAP_HIST_MAX, search::CAP_HIST_MAX);
+        let value = *entry as i32;
+        *entry = (value + delta - value * delta.abs() / search::CAP_HIST_MAX) as i16;
+
+        debug_assert!((*entry as i32).abs() <= search::CAP_HIST_MAX);
+    }
 }
 
 #[repr(u8)]
@@ -269,6 +304,26 @@ impl<const QS: bool> PhasedMovegen<QS> {
     }
 
     #[inline(always)]
+    fn score_capture(mv: u16, spt: &[u8; 64], cap_history: &CaptureHistory) -> u32 {
+        let src_piece = spt[(mv & 0x3F) as usize];
+        let dst_piece = spt[((mv >> 6) & 0x3F) as usize] & 7;
+        let hist_val = cap_history.get(spt, mv) as i32;
+
+        // Soft MVV: a saturated entry moves the victim value by +-CAP_HIST_ORDER_WEIGHT, which
+        // is also the bias that keeps the value non-negative
+        let weight = param!(CAP_HIST_ORDER_WEIGHT);
+        let value = CAPTURE_VICTIM_VALUE[dst_piece as usize]
+            + weight
+            + (hist_val * weight >> search::CAP_HIST_BITS);
+
+        debug_assert!((0..=(u16::MAX >> 3) as i32).contains(&value));
+
+        // Least valuable attacker first among equal values
+        let key = (value as u32) << 3 | (src_piece & 7) as u32;
+        mv as u32 | key << 16
+    }
+
+    #[inline(always)]
     fn calc_see_info(board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
         let bitboards = board.bitboards();
 
@@ -303,6 +358,7 @@ impl<const QS: bool> PhasedMovegen<QS> {
         tables: &tables::Tables,
         cont_hist: &ContHistRef,
         history_moves: &[[i16; 64]; 16],
+        cap_history: &CaptureHistory,
         buffer: &mut MoveBuffer,
     ) -> Option<(u16, MovegenPhase)> {
         loop {
@@ -316,7 +372,13 @@ impl<const QS: bool> PhasedMovegen<QS> {
                     let cut_0 = self.cut_moves[0] as i16;
                     let cut_1 = self.cut_moves[1] as i16;
 
-                    let spt_x64 = _mm512_loadu_epi8(board.spt().as_ptr() as *const i8);
+                    // Score EP (empty) as a pawn
+                    // let spt_x64 = _mm512_mask_set1_epi8(
+                    //     _mm512_loadu_epi8(board.spt().as_ptr() as *const i8),
+                    //     1u64 << board.ep_square() & !1,
+                    //     (chess_v2::PieceIndex::WhitePawn as u8 + ((!board.b_move() as u8) << 3))
+                    //         as i8,
+                    // );
 
                     // Interleave indices for building the sort keys: each output dword takes its
                     // low u16 from the move vector (index 0..31) and its high u16 from the score
@@ -384,89 +446,56 @@ impl<const QS: bool> PhasedMovegen<QS> {
                             _mm512_cvtepu16_epi32(_mm512_extracti32x8_epi32(moves_x32, 1));
 
                         // Use MVV-LVA scoring
-                        {
-                            // Single lane MVV-LVA
-                            // let src_piece_x64 = _mm512_maskz_permutexvar_epi8(
-                            //     0x5555555555555555,
-                            //     moves_x32,
-                            //     spt_x64,
-                            // );
+                        // let (src_piece_x64_0, src_piece_x64_1) = (
+                        //     _mm512_maskz_permutexvar_epi8(
+                        //         0x1111111111111111u64,
+                        //         moves_x16_0,
+                        //         spt_x64,
+                        //     ),
+                        //     _mm512_maskz_permutexvar_epi8(
+                        //         0x1111111111111111u64,
+                        //         moves_x16_1,
+                        //         spt_x64,
+                        //     ),
+                        // );
 
-                            // let dst_piece_x64 = _mm512_permutexvar_epi8(
-                            //     // 0xAAAAAAAAAAAAAAAA,
-                            //     _mm512_slli_epi16(moves_x32, 2),
-                            //     spt_x64,
-                            // );
+                        // let (dst_piece_x64_0, dst_piece_x64_1) = (
+                        //     _mm512_permutexvar_epi8(_mm512_slli_epi16(moves_x16_0, 2), spt_x64),
+                        //     _mm512_permutexvar_epi8(_mm512_slli_epi16(moves_x16_1, 2), spt_x64),
+                        // );
 
-                            // let dst_piece_offset_x64 =
-                            //     _mm512_set1_epi8(chess_v2::PieceIndex::PieceIndexMax as i8);
+                        // let dst_piece_offset_x64 =
+                        //     _mm512_set1_epi8(chess_v2::PieceIndex::PieceIndexMax as i8);
 
-                            // let dst_piece_inv_x64 = _mm512_maskz_sub_epi8(
-                            //     0xAAAAAAAAAAAAAAAA,
-                            //     dst_piece_offset_x64,
-                            //     dst_piece_x64,
-                            // );
+                        // let (dst_piece_inv_x64_0, dst_piece_inv_x64_1) = (
+                        //     _mm512_maskz_sub_epi8(
+                        //         0x2222222222222222u64,
+                        //         dst_piece_offset_x64,
+                        //         dst_piece_x64_0,
+                        //     ),
+                        //     _mm512_maskz_sub_epi8(
+                        //         0x2222222222222222u64,
+                        //         dst_piece_offset_x64,
+                        //         dst_piece_x64_1,
+                        //     ),
+                        // );
 
-                            // let final_scores_x32 =
-                            //     _mm512_or_si512(src_piece_x64, dst_piece_inv_x64);
-
-                            // moves_x16_0 =
-                            //     _mm512_permutex2var_epi16(moves_x32, idx_lo_x32, final_scores_x32);
-                            // moves_x16_1 =
-                            //     _mm512_permutex2var_epi16(moves_x32, idx_hi_x32, final_scores_x32);
-
-                            // Dual lane MVV-LVA scoring:
-                            let (src_piece_x64_0, src_piece_x64_1) = (
-                                _mm512_maskz_permutexvar_epi8(
-                                    0x1111111111111111u64,
-                                    moves_x16_0,
-                                    spt_x64,
-                                ),
-                                _mm512_maskz_permutexvar_epi8(
-                                    0x1111111111111111u64,
-                                    moves_x16_1,
-                                    spt_x64,
-                                ),
-                            );
-
-                            let (dst_piece_x64_0, dst_piece_x64_1) = (
-                                _mm512_permutexvar_epi8(_mm512_slli_epi16(moves_x16_0, 2), spt_x64),
-                                _mm512_permutexvar_epi8(_mm512_slli_epi16(moves_x16_1, 2), spt_x64),
-                            );
-
-                            let dst_piece_offset_x64 =
-                                _mm512_set1_epi8(chess_v2::PieceIndex::PieceIndexMax as i8);
-
-                            let (dst_piece_inv_x64_0, dst_piece_inv_x64_1) = (
-                                _mm512_maskz_sub_epi8(
-                                    0x2222222222222222u64,
-                                    dst_piece_offset_x64,
-                                    dst_piece_x64_0,
-                                ),
-                                _mm512_maskz_sub_epi8(
-                                    0x2222222222222222u64,
-                                    dst_piece_offset_x64,
-                                    dst_piece_x64_1,
-                                ),
-                            );
-
-                            (moves_x16_0, moves_x16_1) = (
-                                _mm512_or_si512(
-                                    _mm512_slli_epi32(
-                                        _mm512_or_si512(src_piece_x64_0, dst_piece_inv_x64_0),
-                                        16,
-                                    ),
-                                    moves_x16_0,
-                                ),
-                                _mm512_or_si512(
-                                    _mm512_slli_epi32(
-                                        _mm512_or_si512(src_piece_x64_1, dst_piece_inv_x64_1),
-                                        16,
-                                    ),
-                                    moves_x16_1,
-                                ),
-                            );
-                        }
+                        // (moves_x16_0, moves_x16_1) = (
+                        //     _mm512_or_si512(
+                        //         _mm512_slli_epi32(
+                        //             _mm512_or_si512(src_piece_x64_0, dst_piece_inv_x64_0),
+                        //             16,
+                        //         ),
+                        //         moves_x16_0,
+                        //     ),
+                        //     _mm512_or_si512(
+                        //         _mm512_slli_epi32(
+                        //             _mm512_or_si512(src_piece_x64_1, dst_piece_inv_x64_1),
+                        //             16,
+                        //         ),
+                        //         moves_x16_1,
+                        //     ),
+                        // );
 
                         let c0_mask = (cap_emit_mask & 0xFFFF) as u16;
                         let c1_mask = (cap_emit_mask >> 16) as u16;
@@ -502,6 +531,14 @@ impl<const QS: bool> PhasedMovegen<QS> {
                             moves_x16_1,
                         );
                         self.quiet_count += quiet_emit_mask.count_ones() as u8;
+                    }
+
+                    debug_assert!(self.cap_count as usize <= buffer.move_list_caps.len());
+
+                    for i in 0..self.cap_count as usize {
+                        // Safety: i < cap_count <= move_list_caps.len()
+                        let mv = buffer.move_list_caps.get_unchecked_mut(i);
+                        *mv = Self::score_capture(*mv as u16, board.spt(), cap_history);
                     }
 
                     zero_tail(&mut buffer.move_list_caps, self.cap_count as usize);
@@ -719,5 +756,63 @@ mod tests {
             let result = PhasedMovegen::<false>::move_index_avx512(0xBBBB, &move_list);
             assert_eq!(result, i as u8, "failed at index {i}");
         }
+    }
+
+    fn good_captures(fen: &str, cap_history: &CaptureHistory) -> Vec<String> {
+        let tables = tables::Tables::new();
+        let mut board = chess_v2::ChessGame::new();
+        board.load_fen(fen, &tables).unwrap();
+
+        let mut buffer = MoveBuffer {
+            move_list: [0; 256],
+            move_list_quiets: [0; 256],
+            move_list_caps: [0; 128],
+            see_info: None,
+        };
+        let mut moves = PhasedMovegen::<false>::new([0; 2], 0xFF, &board, &mut buffer, false, 0);
+        let cont_hist = ContHistRef {
+            ply1: None,
+            ply2: None,
+        };
+
+        let mut captures = Vec::new();
+        while let Some((mv, phase)) = moves.next(
+            &board,
+            &tables,
+            &cont_hist,
+            &[[0; 64]; 16],
+            cap_history,
+            &mut buffer,
+        ) {
+            if phase == MovegenPhase::MoveGoodCap {
+                captures.push(util::move_string(mv));
+            }
+        }
+        captures
+    }
+
+    #[test]
+    fn en_passant_orders_as_pawn_capture() {
+        // Rxc5 takes a queen, fxe6 takes a pawn en passant
+        let fen = "4k3/8/8/2q1pP2/8/8/8/2R1K3 w - e6 0 2";
+        assert_eq!(good_captures(fen, &CaptureHistory::new()), ["c1c5", "f5e6"]);
+    }
+
+    #[test]
+    fn capture_history_overrides_victim_value() {
+        // dxc5 takes a knight, dxe5 a pawn
+        let fen = "4k3/8/8/2n1p3/3P4/8/8/4K3 w - - 0 1";
+        let tables = tables::Tables::new();
+        let mut board = chess_v2::ChessGame::new();
+        board.load_fen(fen, &tables).unwrap();
+
+        let mut cap_history = CaptureHistory::new();
+        assert_eq!(good_captures(fen, &cap_history), ["d4c5", "d4e5"]);
+
+        let takes_pawn = board.fix_move(util::create_move("d4e5"));
+        let takes_knight = board.fix_move(util::create_move("d4c5"));
+        cap_history.update(board.spt(), takes_pawn, search::CAP_HIST_MAX);
+        cap_history.update(board.spt(), takes_knight, -search::CAP_HIST_MAX);
+        assert_eq!(good_captures(fen, &cap_history), ["d4e5", "d4c5"]);
     }
 }

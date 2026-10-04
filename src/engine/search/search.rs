@@ -61,6 +61,9 @@ pub const PV_DEPTH: usize = 64;
 pub const HISTORY_MAX: i16 = SCORE_INF;
 pub const HISTORY_MIN: i16 = -SCORE_INF;
 
+pub const CAP_HIST_BITS: u32 = 14;
+pub const CAP_HIST_MAX: i32 = 1 << CAP_HIST_BITS;
+
 const SEE_CAPTURE_PRUNE_MAX_DEPTH: u8 = 5;
 const SEE_QUIET_PRUNE_MAX_DEPTH: u8 = 8;
 
@@ -124,6 +127,7 @@ pub struct Search<'a, const F: EngineForm> {
     move_stack: [(u8, u8); PV_DEPTH],
     excluded_move: u16,
     cont_history: Box<[[[i16; 768]; 768]; 2]>,
+    cap_history: Box<CaptureHistory>,
 
     movegen_stack: Box<[UnsafeCell<MoveBuffer>; MOVE_STACK_SIZE]>,
 
@@ -318,6 +322,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 let ptr = std::alloc::alloc_zeroed(layout) as *mut [[[i16; 768]; 768]; 2];
                 Box::from_raw(ptr)
             },
+            cap_history: Box::new(CaptureHistory::new()),
             eval_stack: [0; PV_DEPTH],
             lmr_table: Self::build_lmr_table(),
             et: EvalTable::new(1024),
@@ -398,6 +403,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 self.history_moves[piece][square] = 0;
             }
         }
+
+        self.cap_history.clear();
 
         self.tt_mut().new_search();
 
@@ -795,6 +802,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let mut tried_quiet_moves = MaybeUninit::<[u16; 218]>::uninit();
         let mut tried_quiet_count = 0;
+        let mut tried_cap_moves = MaybeUninit::<[u16; 128]>::uninit();
+        let mut tried_cap_count = 0;
 
         let lmp_threshold = if non_pv_node && !in_check && depth <= LMP_MAX_DEPTH {
             let d = depth as usize;
@@ -811,6 +820,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 ply2: cont_idx_ply2.map(|idx| &self.cont_history[1][idx]),
             },
             &self.history_moves,
+            &self.cap_history,
             move_buffer,
         ) {
             if mv == excluded_move {
@@ -988,6 +998,14 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                         .write(mv);
                     tried_quiet_count += 1;
                 }
+            } else {
+                unsafe {
+                    debug_assert!(tried_cap_count < 128);
+                    (tried_cap_moves.as_mut_ptr() as *mut u16)
+                        .add(tried_cap_count)
+                        .write(mv);
+                    tried_cap_count += 1;
+                }
             }
 
             let new_depth = depth - 1 + extension;
@@ -1159,6 +1177,22 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                     }
                 }
 
+                if excluded_move == 0 {
+                    debug_assert!(is_non_capture || tried_cap_count > 0);
+                    let failed_count = tried_cap_count - !is_non_capture as usize;
+                    let tried_caps_ptr = tried_cap_moves.as_ptr() as *const u16;
+
+                    // Safety: the first tried_cap_count entries are written, and a capture
+                    // cutoff move is the last of them
+                    let failed_caps =
+                        unsafe { std::slice::from_raw_parts(tried_caps_ptr, failed_count) };
+                    debug_assert!(
+                        is_non_capture || unsafe { tried_caps_ptr.add(failed_count).read() } == mv
+                    );
+
+                    self.update_cap_history(mv, !is_non_capture, failed_caps, depth);
+                }
+
                 if excluded_move == 0 && !in_check && best_move & MV_FLAG_CAP == 0 {
                     if score >= static_eval {
                         self.update_correction_heuristics(score, static_eval, depth as Eval);
@@ -1326,6 +1360,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
                 ply2: None,
             },
             &self.history_moves,
+            &self.cap_history,
             move_buffer,
         ) {
             if flag_enable_qs_see_prune && !in_check && phase == MovegenPhase::MoveBadCap {
@@ -1850,6 +1885,26 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             let entry = &mut self.cont_history[1][idx][cur_piece_comp * 64 + cur_dst];
             let ratio = ((*entry as i64) * bonus.abs() as i64 / HISTORY_MAX as i64) as i16;
             *entry = (*entry + (bonus - ratio)).clamp(-HISTORY_MAX, HISTORY_MAX);
+        }
+    }
+
+    #[inline(always)]
+    fn update_cap_history(
+        &mut self,
+        cut_move: u16,
+        cut_is_capture: bool,
+        failed_caps: &[u16],
+        depth: u8,
+    ) {
+        let bonus = (param!(CAP_HIST_BONUS_DEPTH) * depth as i32).min(param!(CAP_HIST_BONUS_MAX));
+        let penalty = bonus * param!(CAP_HIST_PENALTY_SCALE) / 16;
+
+        if cut_is_capture {
+            self.cap_history.update(self.chess.spt(), cut_move, bonus);
+        }
+
+        for &mv in failed_caps {
+            self.cap_history.update(self.chess.spt(), mv, -penalty);
         }
     }
 

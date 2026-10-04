@@ -32,6 +32,11 @@ tunables! {
     SE_BETA_MARGIN:   Eval = 48, 16..=128, 6.0;
     SE_DOUBLE_MARGIN: Eval = 20, 0..=60, 3.0;
     ASP_WINDOW:       Eval = 17, 6..=60, 3.0;
+
+    CAP_HIST_BONUS_DEPTH:   i32 = 256,  64..=1024,  32.0;
+    CAP_HIST_BONUS_MAX:     i32 = 2560, 512..=8192, 320.0;
+    CAP_HIST_PENALTY_SCALE: i32 = 32,   8..=96,     4.0;
+    CAP_HIST_ORDER_WEIGHT:  i32 = 512,  64..=2048,  64.0;
 }
 
 #[cfg(not(feature = "spsa"))]
