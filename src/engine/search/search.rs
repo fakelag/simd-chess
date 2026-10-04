@@ -183,9 +183,12 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
 
             self.search_depth = depth;
 
+            // alpha is clamped to -Eval::MAX: i16::MIN would wrap when go() negates it
             let (mut alpha, mut beta) = if depth >= 4 {
                 (
-                    self.score.saturating_sub(param!(ASP_WINDOW)),
+                    self.score
+                        .saturating_sub(param!(ASP_WINDOW))
+                        .max(-Eval::MAX),
                     self.score.saturating_add(param!(ASP_WINDOW)),
                 )
             } else {
@@ -219,7 +222,7 @@ impl<'a, const F: EngineForm> SearchStrategy<'a> for Search<'a, F> {
                 }
 
                 if score <= alpha {
-                    alpha = score.saturating_sub(margin);
+                    alpha = score.saturating_sub(margin).max(-Eval::MAX);
                     margin += margin / 3;
                     continue;
                 }
