@@ -324,6 +324,23 @@ impl<const QS: bool> PhasedMovegen<QS> {
     }
 
     #[inline(always)]
+    fn cap_split_threshold(
+        mv: u16,
+        spt: &[u8; 64],
+        cap_history: &CaptureHistory,
+        see_threshold: eval::Eval,
+    ) -> eval::Eval {
+        let hist = cap_history.get(spt, mv) as i32;
+        let dst_piece_value = CAPTURE_VICTIM_VALUE[(spt[((mv >> 6) & 0x3F) as usize] & 7) as usize];
+
+        debug_assert!(dst_piece_value > 0);
+
+        (see_threshold as i32
+            - hist * param!(CAP_HIST_SPLIT_WEIGHT) / search::CAP_HIST_MAX
+            - (dst_piece_value * param!(CAP_HIST_SPLIT_VICTIM) >> 6)) as eval::Eval
+    }
+
+    #[inline(always)]
     fn calc_see_info(board: &chess_v2::ChessGame, out: &mut MoveBuffer) {
         let bitboards = board.bitboards();
 
@@ -577,13 +594,24 @@ impl<const QS: bool> PhasedMovegen<QS> {
                         let mv = *buffer.move_list_caps.get_unchecked(self.cap_index as usize);
                         self.cap_index += 1;
 
+                        let threshold = if !QS {
+                            Self::cap_split_threshold(
+                                mv as u16,
+                                board.spt(),
+                                cap_history,
+                                self.see_threshold,
+                            )
+                        } else {
+                            self.see_threshold
+                        };
+
                         let cap_see_threshold = std::hint::unlikely(self.in_check)
                             || see::see_threshold(
                                 &eval::WEIGHT_TABLE_ABS,
                                 tables,
                                 board,
                                 mv as u16,
-                                self.see_threshold,
+                                threshold,
                                 see_info.black_board,
                                 see_info.white_board,
                                 see_info.pieces_board,
@@ -814,5 +842,33 @@ mod tests {
         cap_history.update(board.spt(), takes_pawn, search::CAP_HIST_MAX);
         cap_history.update(board.spt(), takes_knight, -search::CAP_HIST_MAX);
         assert_eq!(good_captures(fen, &cap_history), ["d4e5", "d4c5"]);
+    }
+
+    #[test]
+    fn capture_history_moves_good_bad_split() {
+        // Nxd5 cxd5 is an even trade, Rxd5 cxd5 loses the exchange
+        let even = "4k3/8/2p5/3n4/8/4N3/8/4K3 w - - 0 1";
+        let losing = "4k3/8/2p5/3n4/8/8/8/3RK3 w - - 0 1";
+
+        for (fen, mv, hist, good) in [
+            (even, "e3d5", 0, true),
+            (even, "e3d5", -search::CAP_HIST_MAX, false),
+            (losing, "d1d5", 0, false),
+            (losing, "d1d5", search::CAP_HIST_MAX, true),
+        ] {
+            let tables = tables::Tables::new();
+            let mut board = chess_v2::ChessGame::new();
+            board.load_fen(fen, &tables).unwrap();
+
+            let mut cap_history = CaptureHistory::new();
+            cap_history.update(board.spt(), board.fix_move(util::create_move(mv)), hist);
+
+            let expected = if good { vec![mv] } else { vec![] };
+            assert_eq!(
+                good_captures(fen, &cap_history),
+                expected,
+                "{mv} with history {hist}"
+            );
+        }
     }
 }

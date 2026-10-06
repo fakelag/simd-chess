@@ -37,6 +37,8 @@ tunables! {
     CAP_HIST_BONUS_MAX:     i32 = 2560, 512..=8192, 320.0;
     CAP_HIST_PENALTY_SCALE: i32 = 32,   8..=96,     4.0;
     CAP_HIST_ORDER_WEIGHT:  i32 = 512,  64..=2048,  64.0;
+    CAP_HIST_SPLIT_WEIGHT:  i32 = 200,  0..=600,    25.0;
+    CAP_HIST_SPLIT_VICTIM:  i32 = 25,   0..=48,     3.0;
 }
 
 #[cfg(not(feature = "spsa"))]

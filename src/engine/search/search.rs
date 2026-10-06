@@ -902,9 +902,9 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
                 let is_capture = (mv & MV_FLAG_CAP) != 0;
 
-                // Capture SEE pruning: depth-scaled linear threshold.
-                // Fast path: good captures (SEE >= 0 from ordering) always pass
-                // any negative threshold, so skip the see_threshold call entirely.
+                // Capture SEE pruning: depth-scaled linear threshold. Good captures skip it: they
+                // passed the move picker's SEE split, where capture history and the captured pieces
+                // value can vouch for a capture that loses material.
                 if is_capture && depth <= SEE_CAPTURE_PRUNE_MAX_DEPTH {
                     if phase == MovegenPhase::MoveBadCap {
                         let threshold = -(param!(SEE_CAPTURE_MARGIN) * depth as Eval);
