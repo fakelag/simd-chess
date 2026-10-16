@@ -21,7 +21,6 @@ struct CountingFileReader {
     pass: f64,
     active: bool,
     lines: u64,
-    lines_read: u64,
 }
 
 impl CountingFileReader {
@@ -56,7 +55,6 @@ impl CountingFileReader {
             pass: 0.0,
             active: lines > 0,
             lines,
-            lines_read: 0,
         }
     }
 
@@ -108,9 +106,7 @@ impl CountingFileReader {
         if self.chunk.is_empty() {
             self.read_chunk();
         }
-        let line = self.chunk.pop()?;
-        self.lines_read += 1;
-        Some(line)
+        self.chunk.pop()
     }
 }
 
@@ -309,6 +305,22 @@ impl MixedFenFeeder {
         }
     }
 
+    /// Reads past the seeds below `cursor`, or to the end of the input, without logging skipped
+    /// positions. False when `check_interrupt` fired first.
+    fn skip_to(&mut self, cursor: u64, check_interrupt: impl Fn() -> bool) -> bool {
+        self.log_skips = false;
+        while self.served_total < cursor {
+            if self.served_total & 0xFFFF == 0 && check_interrupt() {
+                return false;
+            }
+            if self.next_unique().is_none() {
+                break;
+            }
+        }
+        self.log_skips = true;
+        true
+    }
+
     fn log_position_skipped(&mut self, file: usize, line: &str, reason: &str) {
         const LOGGED_SKIPS: u64 = 100;
 
@@ -330,6 +342,14 @@ impl MixedFenFeeder {
             println!("Further unusable positions are only counted.");
         }
     }
+}
+
+/// The seeds the inputs hold and their lines.
+pub fn count_seeds(paths: &[String]) -> (u64, u64) {
+    let mut feeder = MixedFenFeeder::new(paths);
+    feeder.skip_to(u64::MAX, || false);
+    let lines = feeder.files.iter().map(|file| file.lines).sum();
+    (feeder.served_total, lines)
 }
 
 pub struct StatefulFenQueue {
@@ -354,21 +374,15 @@ impl StatefulFenQueue {
         check_interrupt: impl Fn() -> bool,
     ) -> anyhow::Result<Option<Self>> {
         let mut feeder = MixedFenFeeder::new(paths);
-
-        feeder.log_skips = false;
-        while feeder.served_total < cursor {
-            if feeder.served_total & 0xFFFF == 0 && check_interrupt() {
-                return Ok(None);
-            }
-            if feeder.next_unique().is_none() {
-                anyhow::bail!(
-                    "the positions input ends after {} seeds, before the cursor {}",
-                    feeder.served_total,
-                    cursor
-                );
-            }
+        if !feeder.skip_to(cursor, check_interrupt) {
+            return Ok(None);
         }
-        feeder.log_skips = true;
+        anyhow::ensure!(
+            feeder.served_total == cursor,
+            "the positions input ends after {} seeds, before the cursor {}",
+            feeder.served_total,
+            cursor
+        );
 
         if expected_hash.is_some_and(|hash| hash != feeder.served_hash) {
             anyhow::bail!(
@@ -443,27 +457,12 @@ impl StatefulFenQueue {
         self.feeder.served_hash
     }
 
-    /// Estimated seeds still to play: the pending ones plus those not handed out yet, of which the
-    /// rest of the input is expected to yield as many per line as it has so far.
-    pub fn seeds_left(&self) -> Option<f64> {
-        let (read, total) = self
-            .feeder
-            .files
-            .iter()
-            .fold((0, 0), |(read, total), file| {
-                (read + file.lines_read, total + file.lines)
-            });
-        let cursor = self.feeder.served_total;
-
-        let counted = (self.end != u64::MAX).then(|| self.end.saturating_sub(cursor) as f64);
-        let in_input =
-            (read > 0).then(|| total.saturating_sub(read) as f64 * cursor as f64 / read as f64);
-
-        [counted, in_input]
-            .into_iter()
-            .flatten()
-            .reduce(f64::min)
-            .map(|left| left + (self.in_flight.len() + self.replay.len()) as f64)
+    /// Seeds still to play of the `input_seeds` the input holds: the pending ones and those not
+    /// handed out yet.
+    pub fn seeds_left(&self, input_seeds: u64) -> u64 {
+        let pending = (self.in_flight.len() + self.replay.len()) as u64;
+        let end = self.end.min(input_seeds);
+        end.saturating_sub(self.feeder.served_total) + pending
     }
 
     /// Seeds handed out without a written game plus replays not handed out yet, in seed order.
@@ -743,9 +742,9 @@ mod tests {
     }
 
     #[test]
-    fn test_seeds_left_scales_the_rest_of_the_input_by_its_yield() {
-        let dir = TestDir::new("seed_queue_left");
-        let unique = write_large_input(&dir, 50);
+    fn test_count_seeds_matches_what_a_queue_serves() {
+        let dir = TestDir::new("seed_queue_count");
+        let paths = write_inputs(&dir);
         let take = |queue: &mut StatefulFenQueue, count: usize| {
             for _ in 0..count {
                 let (seed, _) = queue.next().unwrap();
@@ -753,55 +752,27 @@ mod tests {
             }
         };
 
-        let mut queue =
-            StatefulFenQueue::new(&[unique.clone()], 0, vec![], u64::MAX, None, || false)
-                .unwrap()
-                .unwrap();
-        assert_eq!(queue.seeds_left(), None, "nothing read yet");
-        queue.next().unwrap();
-        take(&mut queue, 9);
-        assert_eq!(
-            queue.seeds_left(),
-            Some(40.0 + 1.0),
-            "the one in flight counts"
-        );
+        // 14 lines, one unparseable and one duplicate of a position in the other file.
+        assert_eq!(count_seeds(&paths), (12, 14));
 
-        let mut counted = StatefulFenQueue::new(&[unique.clone()], 0, vec![], 15, None, || false)
+        let mut queue = StatefulFenQueue::new(&paths, 0, vec![], u64::MAX, None, || false)
             .unwrap()
             .unwrap();
-        take(&mut counted, 10);
-        assert_eq!(counted.seeds_left(), Some(5.0), "--count ends it first");
+        assert_eq!(queue.seeds_left(12), 12);
+        let (in_flight, _) = queue.next().unwrap();
+        take(&mut queue, 4);
+        assert_eq!(queue.seeds_left(12), 7 + 1, "the one in flight counts");
 
-        // Every line twice: 10 seeds take 19 lines, as each but the last one's copy was read too.
-        let fens = std::fs::read_to_string(&unique).unwrap();
-        let doubled = dir.path().join("doubled.epd");
-        let text: String = fens.lines().map(|fen| format!("{fen}\n{fen}\n")).collect();
-        std::fs::write(&doubled, text).unwrap();
-        let mut queue = StatefulFenQueue::new(
-            &[doubled.to_string_lossy().into_owned()],
-            0,
-            vec![],
-            u64::MAX,
-            None,
-            || false,
-        )
-        .unwrap()
-        .unwrap();
-        take(&mut queue, 10);
-        assert_eq!(queue.seeds_left(), Some(81.0 * 10.0 / 19.0));
+        queue.complete(in_flight);
+        take(&mut queue, 7);
+        assert_eq!(queue.next(), None);
+        assert!(queue.exhausted() && queue.seeds_left(12) == 0);
 
-        let mut queue =
-            StatefulFenQueue::new(&write_inputs(&dir), 0, vec![], u64::MAX, None, || false)
-                .unwrap()
-                .unwrap();
-        for (seed, _) in drain(&mut queue) {
-            queue.complete(seed);
-        }
-        assert_eq!(
-            queue.seeds_left(),
-            Some(0.0),
-            "the unparseable line and the duplicate were read"
-        );
+        let mut counted = StatefulFenQueue::new(&paths, 0, vec![], 8, None, || false)
+            .unwrap()
+            .unwrap();
+        take(&mut counted, 5);
+        assert_eq!(counted.seeds_left(12), 3, "--count ends it first");
     }
 
     #[test]

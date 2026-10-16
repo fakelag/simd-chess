@@ -4,7 +4,7 @@ use std::str::FromStr;
 use super::run::{self, InputFile, Outcome, Params, RunConfig, RunDir};
 use super::session::{self, Hooks, Run};
 use super::shard;
-use crate::selfplay::fen_feeder::StatefulFenQueue;
+use crate::selfplay::fen_feeder::{self, StatefulFenQueue};
 use crate::selfplay::selfplay::ANNOTATION_DEPTH;
 use crate::selfplay::{Failure, refused};
 use crate::util::{interrupt, prompt};
@@ -230,6 +230,16 @@ fn runs_base(args: &Args) -> Result<PathBuf, Failure> {
     Ok(base)
 }
 
+fn count_seeds(positions: &[String]) -> u64 {
+    println!(
+        "Counting unique positions in {} input file(s)...",
+        positions.len()
+    );
+    let (seeds, lines) = fen_feeder::count_seeds(positions);
+    println!("{} unique positions in {} lines", seeds, lines);
+    seeds
+}
+
 /// `None` when Ctrl+C stopped the skip to the cursor, which reads every seed below it.
 fn make_queue(
     inputs: &[String],
@@ -273,11 +283,12 @@ fn dry_run(args: &Args, hooks: &Hooks) -> Result<Outcome, Failure> {
         return refused(format!("--positions {} not found", missing));
     }
 
+    let input_seeds = count_seeds(&args.positions);
     let params = args.params();
     let Some(queue) = make_queue_from(&args.positions, &params)? else {
         return Ok(Outcome::Interrupted);
     };
-    session::play(None, &params, queue, hooks)
+    session::play(None, &params, input_seeds, queue, hooks)
 }
 
 /// Everything is checked before the run directory appears.
@@ -297,6 +308,7 @@ fn new_run(name: &str, args: &Args, hooks: &Hooks) -> Result<Outcome, Failure> {
         });
     }
 
+    let input_seeds = count_seeds(&args.positions);
     let params = args.params();
     let Some(queue) = make_queue_from(&args.positions, &params)? else {
         return Ok(Outcome::Interrupted);
@@ -306,6 +318,7 @@ fn new_run(name: &str, args: &Args, hooks: &Hooks) -> Result<Outcome, Failure> {
         name,
         params.clone(),
         inputs,
+        input_seeds,
         run::current_engine_config(),
         queue.seed_hash(),
     );
@@ -316,7 +329,7 @@ fn new_run(name: &str, args: &Args, hooks: &Hooks) -> Result<Outcome, Failure> {
         dir: &dir,
         config: &mut config,
     };
-    session::play(Some(run), &params, queue, hooks)
+    session::play(Some(run), &params, input_seeds, queue, hooks)
 }
 
 fn resume_run(
@@ -423,12 +436,12 @@ fn resume_run(
     }
     dir.save(&config)?;
 
-    let params = config.params.clone();
+    let (params, input_seeds) = (config.params.clone(), config.input_seeds);
     let run = Run {
         dir: &dir,
         config: &mut config,
     };
-    session::play(Some(run), &params, queue, hooks)
+    session::play(Some(run), &params, input_seeds, queue, hooks)
 }
 
 fn print_engine_diff(diff: &[[String; 3]]) {

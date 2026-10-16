@@ -28,6 +28,8 @@ pub struct RunConfig {
     pub version: u32,
     pub name: String,
     pub created: u64,
+    /// Unique usable positions across the inputs: the seeds the run can hand out.
+    pub input_seeds: u64,
     pub params: Params,
     pub progress: Progress,
     pub totals: Stats,
@@ -151,6 +153,7 @@ impl RunConfig {
         name: &str,
         params: Params,
         inputs: Vec<InputFile>,
+        input_seeds: u64,
         engine_config: Engine,
         seed_hash: u64,
     ) -> Self {
@@ -158,6 +161,7 @@ impl RunConfig {
             version: CONFIG_FILE_VERSION,
             name: name.to_string(),
             created: unix_now(),
+            input_seeds,
             progress: Progress {
                 cursor: params.from,
                 exhausted: false,
@@ -475,6 +479,7 @@ mod tests {
             version: CONFIG_FILE_VERSION,
             name: "unit".to_string(),
             created: 1_700_000_000,
+            input_seeds: 239_000,
             params: Params {
                 from: 5,
                 count: Some(1000),

@@ -40,10 +40,11 @@ enum Halt {
     WriteFailed(anyhow::Error),
 }
 
-/// For a run, `params` are its config's.
+/// For a run, `params` and `input_seeds` are its config's.
 pub fn play(
     run: Option<Run>,
     params: &Params,
+    input_seeds: u64,
     queue: StatefulFenQueue,
     hooks: &Hooks,
 ) -> Result<Outcome, Failure> {
@@ -53,6 +54,7 @@ pub fn play(
     let mut session = SessionState {
         params,
         hooks,
+        input_seeds,
         positions_before: run.as_ref().map_or(0, |run| run.config.totals.positions),
         ledger: run.map(Ledger::begin).transpose()?,
         stats: Stats::default(),
@@ -63,7 +65,7 @@ pub fn play(
     };
 
     println!(
-        "Starting selfplay{}: {} threads, depth {}, seed cursor {} (+{} pending){}{}",
+        "Starting selfplay{}: {} threads, depth {}, seed cursor {} of {} (+{} pending){}{}",
         session
             .ledger
             .as_ref()
@@ -74,6 +76,7 @@ pub fn play(
         params.threads,
         params.depth,
         cursor,
+        input_seeds,
         pending,
         if end == u64::MAX {
             String::new()
@@ -168,6 +171,7 @@ struct SessionState<'r, 'p> {
     params: &'p Params,
     hooks: &'p Hooks,
     ledger: Option<Ledger<'r>>,
+    input_seeds: u64,
     positions_before: u64,
     /// Games of this session only.
     stats: Stats,
@@ -232,7 +236,7 @@ impl SessionState<'_, '_> {
 
         let (seeds_left, skipped) = {
             let queue = queue.lock().unwrap();
-            (queue.seeds_left(), queue.skipped())
+            (queue.seeds_left(self.input_seeds), queue.skipped())
         };
         let positions_left = self
             .params
@@ -240,7 +244,7 @@ impl SessionState<'_, '_> {
             .map(|max| max.saturating_sub(self.positions_before + self.stats.positions));
         let positions_per_minute = self.stats.positions as f64 / total_minutes;
         let eta_minutes = [
-            seeds_left.map(|left| left / average_per_minute),
+            Some(seeds_left as f64 / average_per_minute),
             positions_left.map(|left| left as f64 / positions_per_minute),
         ]
         .into_iter()
@@ -523,6 +527,7 @@ mod tests {
             "run",
             params,
             Vec::new(),
+            1,
             current_engine_config(),
             queue.seed_hash(),
         );

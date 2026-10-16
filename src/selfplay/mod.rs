@@ -331,6 +331,7 @@ mod tests {
         );
         let entries = fixture.entries("reference");
         let config = fixture.config("reference");
+        assert_eq!(config.input_seeds, SEEDS as u64);
         assert_eq!(config.totals.games + config.totals.terminated, SEEDS as u64);
         assert!(
             config.shards.len() > 1,
