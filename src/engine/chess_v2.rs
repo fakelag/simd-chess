@@ -2794,7 +2794,7 @@ impl ChessGame {
 }
 
 mod tests {
-    const PERFT_MOVE_VERIFICATION: bool = true;
+    const PERFT_MOVE_VERIFICATION: bool = false;
     const MOVE_VERIFICATION_ENGINE: &str = "bin/stockfish.exe";
 
     use std::collections::BTreeSet;

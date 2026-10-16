@@ -12,12 +12,14 @@ rand = "0.9.1"
 anyhow = "1.0.98"
 crossbeam = "0.8.4"
 core_affinity = "0.8.3"
-sfbinpack = { version = "0.4.3", features = ["bmi2"] }
+sfbinpack = { version = "0.6.5", features = ["bmi2"] }
 bullet = { git = "https://github.com/jw1912/bullet", rev = "cebc78a", package = "bullet_lib", features = [
     "cuda",
 ] }
 zstd = "0.13.3"
 llvm-mca = "0.1.0"
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "0.8.23"
 
 [features]
 spsa = []

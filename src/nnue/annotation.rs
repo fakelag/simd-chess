@@ -23,7 +23,7 @@ impl Annotator {
                         for entry in entries {
                             println!(
                                 "Fen {} move {} score {} result {}",
-                                entry.pos.fen(),
+                                entry.pos.fen().expect("binpack position has a FEN"),
                                 entry.mv.as_uci(),
                                 entry.score,
                                 entry.result
@@ -47,8 +47,10 @@ impl Annotator {
 
         let tx_send = self.tx_send.take().unwrap();
 
-        let mut reader =
-            sfbinpack::CompressedTrainingDataEntryReader::new(&self.binpack_path).unwrap();
+        let file_size = std::fs::metadata(&self.binpack_path)?.len().max(1);
+        let mut reader = sfbinpack::CompressedTrainingDataEntryReader::new(std::fs::File::open(
+            &self.binpack_path,
+        )?)?;
 
         let mut prev_entry: Option<sfbinpack::TrainingDataEntry> = None;
         let mut counter = 1usize;
@@ -71,7 +73,7 @@ impl Annotator {
                 println!(
                     "Read {} bytes: {:.02}% done",
                     reader.read_bytes(),
-                    reader.read_bytes() as f64 / reader.file_size() as f64 * 100.0
+                    reader.read_bytes() as f64 / file_size as f64 * 100.0
                 );
             }
 

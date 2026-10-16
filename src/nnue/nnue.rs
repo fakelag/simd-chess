@@ -805,6 +805,11 @@ where
 #[macro_export]
 macro_rules! nnue_load {
     ($path:expr, $hs:expr,$ob:expr) => {{
+        const _: () = assert!(
+            std::mem::size_of::<nnue::Network<$hs, $ob>>() == include_bytes!($path).len(),
+            concat!("NNUE file size does not match HS/OB: ", $path)
+        );
+
         let net: &nnue::Network<$hs, $ob> = unsafe { std::mem::transmute(include_bytes!($path)) };
 
         nnue::LazyNnue::heap_alloc(net)

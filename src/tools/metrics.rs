@@ -367,7 +367,13 @@ pub fn run_binpack_metrics(
         let mut prev: Option<TrainingDataEntry> = None;
 
         for binpack_path in binpack_paths {
-            let mut reader = match sfbinpack::CompressedTrainingDataEntryReader::new(binpack_path) {
+            let opened = std::fs::File::open(binpack_path)
+                .map_err(anyhow::Error::from)
+                .and_then(|f| {
+                    let size = f.metadata()?.len().max(1);
+                    Ok((sfbinpack::CompressedTrainingDataEntryReader::new(f)?, size))
+                });
+            let (mut reader, file_size) = match opened {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("failed to open binpack {binpack_path}: {e}");
@@ -402,11 +408,10 @@ pub fn run_binpack_metrics(
                 prev = Some(entry);
 
                 if last_report_time.elapsed().as_secs() >= 5 {
-                    let fs = reader.file_size().max(1);
                     println!(
                         "read {} entries (file {:.1}%)",
                         counter,
-                        reader.read_bytes() as f64 / fs as f64 * 100.0
+                        reader.read_bytes() as f64 / file_size as f64 * 100.0
                     );
                     last_report_time = std::time::Instant::now();
                 }
@@ -647,7 +652,7 @@ mod tests {
 
         let mut lf = ChessGame::new();
         for fen in fens {
-            let sf = Position::from_fen(fen);
+            let sf = Position::from_fen(fen).unwrap();
             let direct = board_from_sf(&sf, &tables);
             lf.load_fen(fen, &tables).unwrap();
 

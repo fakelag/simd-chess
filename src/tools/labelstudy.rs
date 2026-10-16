@@ -73,7 +73,9 @@ fn sample_positions(
     let mut game_window: VecDeque<String> = VecDeque::new();
 
     'outer: for binpack in binpacks {
-        let mut reader = sfbinpack::CompressedTrainingDataEntryReader::new(binpack)
+        let mut reader = File::open(binpack)
+            .map_err(anyhow::Error::from)
+            .and_then(|f| Ok(sfbinpack::CompressedTrainingDataEntryReader::new(f)?))
             .map_err(|e| anyhow::anyhow!("failed to open binpack {}: {}", binpack, e))?;
 
         // A game never spans part files, so each part starts a fresh game.
@@ -104,7 +106,7 @@ fn sample_positions(
 
             // The FEN is needed for the in-check filter, and under warm_tt for the window too.
             if passes_entry_filters || p.warm_tt {
-                let fen = entry.pos.fen();
+                let fen = entry.pos.fen().expect("binpack position has a FEN");
 
                 let eligible = passes_entry_filters
                     && board.load_fen(&fen, tables).is_ok()

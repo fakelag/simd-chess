@@ -120,7 +120,7 @@ dependencies = [
  "bullet-trainer",
  "bulletformat",
  "montyformat",
- "sfbinpack 0.6.5",
+ "sfbinpack",
  "viriformat",
 ]
 
@@ -1144,15 +1144,6 @@ dependencies = [
 
 [[package]]
 name = "sfbinpack"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18e0b111af2b3556c830c80066d4e9c6962a692bb9a02c48a4c540bc68e0fdc2"
-dependencies = [
- "thiserror 2.0.12",
-]
-
-[[package]]
-name = "sfbinpack"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4db427bcbaeb4745893f6cd842c50f30f21ba28d18bb9bbee48061a2fcaa7e35"
@@ -1189,7 +1180,9 @@ dependencies = [
  "llvm-mca",
  "pollster",
  "rand 0.9.1",
- "sfbinpack 0.4.3",
+ "serde",
+ "sfbinpack",
+ "toml",
  "wgpu",
  "zstd",
 ]

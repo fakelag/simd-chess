@@ -22,32 +22,34 @@ use crate::{
     nnue_load, util,
 };
 
-const EVAL_NNUE: bool = true;
+pub const EVAL_NNUE: bool = true;
 const EVAL_CACHE: bool = false;
 
 const CHECK_EXT_DEPTH_MULT: u16 = 2;
 
-const FLAG_NMP_MATE_CLAMP: bool = false;
+pub const FLAG_NMP_MATE_CLAMP: bool = false;
+pub const FLAG_TT_50MV_GUARD: bool = false;
 
 // const FLAG_LMR_CUTNODE: bool = false;
 // const LMR_CUTNODE_R: i16 = 2;
-
-const FLAG_TT_50MV_GUARD: bool = false;
 
 const LMP_MAX_DEPTH: u8 = 8;
 
 macro_rules! net_path {
     () => {
-        "../../../nnue/v1-40M-pgnext-1024-320.bin"
+        "../../../nnue/v1-40M-1536-320-wdl75.bin"
     };
 }
 
 macro_rules! net_size {
     () => {
-        1024
+        1536
     };
 }
 pub const NET_OSIZE: usize = 8;
+pub const NET_PATH: &str = net_path!();
+pub const NET_HIDDEN: usize = net_size!();
+pub static NET_BYTES: &[u8] = include_bytes!(net_path!());
 
 const QS_MOVE_STACK_SIZE: usize = 128;
 const MOVE_STACK_SIZE: usize = PV_DEPTH * 2 + QS_MOVE_STACK_SIZE;

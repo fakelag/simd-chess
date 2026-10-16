@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs::File;
 
 use sfbinpack::{
     CompressedTrainingDataEntryReader, CompressedTrainingDataEntryWriter, TrainingDataEntry,
@@ -6,6 +7,7 @@ use sfbinpack::{
 
 use crate::engine::tables::Tables;
 use crate::tools::metrics::board_from_sf;
+use crate::util::file_sink::FileSink;
 
 const DUP_SENTINEL_SCORE: i16 = i16::MAX;
 
@@ -17,8 +19,13 @@ struct FileStats {
     error: Option<String>,
 }
 
+fn open_reader(path: &str) -> Result<CompressedTrainingDataEntryReader<File>, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    CompressedTrainingDataEntryReader::new(file).map_err(|e| e.to_string())
+}
+
 fn count_file(idx: usize, path: &str) -> FileStats {
-    let mut reader = match CompressedTrainingDataEntryReader::new(path) {
+    let mut reader = match open_reader(path) {
         Ok(r) => r,
         Err(e) => {
             return FileStats {
@@ -26,7 +33,7 @@ fn count_file(idx: usize, path: &str) -> FileStats {
                 path: path.to_string(),
                 games: 0,
                 positions: 0,
-                error: Some(e.to_string()),
+                error: Some(e),
             };
         }
     };
@@ -58,7 +65,7 @@ fn count_file(idx: usize, path: &str) -> FileStats {
 }
 
 struct GameSource {
-    reader: CompressedTrainingDataEntryReader,
+    reader: CompressedTrainingDataEntryReader<File>,
     lookahead: Option<TrainingDataEntry>,
     stride: f64,
     pass: f64,
@@ -67,7 +74,7 @@ struct GameSource {
 
 impl GameSource {
     fn open(path: &str, games: u64) -> Option<Self> {
-        let reader = match CompressedTrainingDataEntryReader::new(path) {
+        let reader = match open_reader(path) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("shuffle: failed to reopen {path}: {e} (skipping)");
@@ -190,7 +197,10 @@ pub fn run_shuffle(
         .filter_map(|s| GameSource::open(&s.path, s.games))
         .collect();
 
-    let mut writer = CompressedTrainingDataEntryWriter::new(out_path, false)
+    let out_file = File::create(out_path)
+        .map_err(|e| anyhow::anyhow!("shuffle: failed to open output {out_path}: {e}"))?;
+    let (sink, sink_status) = FileSink::new(out_file);
+    let mut writer = CompressedTrainingDataEntryWriter::new(sink)
         .map_err(|e| anyhow::anyhow!("shuffle: failed to open output {out_path}: {e}"))?;
 
     let tables = Tables::new();
@@ -247,9 +257,10 @@ pub fn run_shuffle(
         }
     }
 
-    writer
-        .flush()
-        .map_err(|e| anyhow::anyhow!("shuffle: final flush failed: {e}"))?;
+    drop(writer);
+    if let Some(e) = sink_status.borrow_mut().error.take() {
+        return Err(anyhow::anyhow!("shuffle: final flush failed: {e}"));
+    }
 
     println!("--- shuffle done ---");
     println!("  output: {out_path}");

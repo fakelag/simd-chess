@@ -165,6 +165,17 @@ macro_rules! tunables {
 
         #[cfg(feature = "spsa")]
         pub static ALL: &[&TunableMeta] = &[$(&$name.meta),+];
+
+        #[cfg(not(feature = "spsa"))]
+        static VALUES: &[(&str, i32)] = &[$((stringify!($name), $default)),+];
     };
 }
 use tunables;
+
+pub fn values() -> Vec<(&'static str, i32)> {
+    #[cfg(not(feature = "spsa"))]
+    let values = VALUES.to_vec();
+    #[cfg(feature = "spsa")]
+    let values = ALL.iter().map(|t| (t.name, t.value())).collect();
+    values
+}

@@ -2,6 +2,14 @@ use std::arch::x86_64::*;
 
 use crate::engine::{chess_v2, search, tables};
 
+pub mod file_sink;
+pub mod fnv1a;
+pub mod interrupt;
+pub mod prompt;
+
+#[cfg(test)]
+pub mod test_dir;
+
 pub const FEN_STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 #[repr(align(64))]

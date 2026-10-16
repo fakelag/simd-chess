@@ -84,8 +84,7 @@ mod tests {
     fn search_accuracy() {
         use crate::engine::search::eval::WEIGHT_TABLE_ABS;
         use crate::engine::search::search::DepthStat;
-        use crate::matchmaking::fen_feeder::SharedFenFeeder;
-        use crate::matchmaking::matchmaking::PositionFeeder;
+        use crate::selfplay::fen_feeder::StatefulFenQueue;
 
         const NUM_POSITIONS: usize = 5_000;
         const NUM_THREADS: usize = 16;
@@ -102,8 +101,19 @@ mod tests {
         }
 
         let tables = tables::Tables::new();
-        let feeder = SharedFenFeeder::new_multi(&[POSITIONS_PATH.to_string()]);
-        feeder.set_max_positions(NUM_POSITIONS);
+        let positions = [POSITIONS_PATH.to_string()];
+        let queue = std::sync::Mutex::new(
+            StatefulFenQueue::new(
+                &positions,
+                0,
+                Vec::new(),
+                NUM_POSITIONS as u64,
+                None,
+                || false,
+            )
+            .unwrap()
+            .unwrap(),
+        );
         let start = std::time::Instant::now();
 
         let (tx, rx) =
@@ -116,7 +126,7 @@ mod tests {
         std::thread::scope(|s| {
             for i in 0..NUM_THREADS {
                 let tables = &tables;
-                let mut feeder = feeder.clone();
+                let queue = &queue;
                 let tx = tx.clone();
 
                 s.spawn(move || {
@@ -144,7 +154,12 @@ mod tests {
                         repetition::RepetitionTable::new(),
                     );
 
-                    while let Some(fen) = feeder.next_position() {
+                    loop {
+                        let next = queue.lock().unwrap().next();
+                        let Some((_, fen)) = next else {
+                            break;
+                        };
+
                         engine_a.new_game();
                         engine_a.load_from_fen(&fen, tables).unwrap();
                         engine_a.new_search();

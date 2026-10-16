@@ -22,9 +22,9 @@ use crate::engine::{
 use crate::uci::uci::{UciCommand, chess_uci};
 
 mod engine;
-mod matchmaking;
 mod nnue;
 mod pgn;
+mod selfplay;
 mod tools;
 mod uci;
 mod util;
@@ -170,57 +170,7 @@ fn main() {
 
             annotation.annotate()
         }
-        "selfplay" => {
-            let mut arg_it = std::env::args().skip(2);
-            let mut from = None;
-            let mut games = None;
-            let mut threads = None;
-            let mut out_path = None;
-            let mut max_positions = None;
-            let mut positions_paths: Vec<String> = Vec::new();
-            let mut win_adj = false;
-            let mut draw_adj = false;
-            let mut adj_shadow_log = None;
-
-            loop {
-                let arg = match arg_it.next() {
-                    Some(a) => a,
-                    None => break,
-                };
-
-                match arg.as_str() {
-                    "--from" => from = Some(arg_it.next().unwrap().parse().unwrap()),
-                    "--count" => games = Some(arg_it.next().unwrap().parse().unwrap()),
-                    "--max-positions" => {
-                        max_positions = Some(arg_it.next().unwrap().parse().unwrap())
-                    }
-                    "--threads" => threads = Some(arg_it.next().unwrap().parse().unwrap()),
-                    "--positions" => positions_paths.push(arg_it.next().unwrap()),
-                    "--out" => out_path = Some(arg_it.next().unwrap()),
-                    "--win-adj" => win_adj = true,
-                    "--draw-adj" => draw_adj = true,
-                    "--adj-shadow-log" => adj_shadow_log = Some(arg_it.next().unwrap()),
-                    _ => panic!("Unknown argument: {}", arg),
-                }
-            }
-
-            let mut selfplay = matchmaking::selfplay::SelfplayTrainer::new(out_path.as_deref());
-
-            assert!(
-                !positions_paths.is_empty(),
-                "Expected at least one --positions path"
-            );
-            selfplay.play_annotated(
-                threads.unwrap_or(1),
-                &positions_paths,
-                from,
-                games,
-                max_positions,
-                win_adj,
-                draw_adj,
-                adj_shadow_log.as_deref(),
-            )
-        }
+        "selfplay" => std::process::exit(selfplay::cli::main(std::env::args().skip(2))),
         "train" => {
             let mut arg_it = std::env::args().skip(2);
             let name = arg_it.next().expect("Expected training name");

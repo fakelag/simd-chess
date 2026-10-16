@@ -27,7 +27,7 @@ pub fn benchmark(tt_size_mb: usize) {
         (
             "pawn_endgame",
             "8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1",
-            19,
+            18,
         ),
         (
             "queen_endgame",
