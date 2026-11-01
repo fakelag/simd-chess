@@ -32,6 +32,8 @@ pub struct RunConfig {
     pub input_seeds: u64,
     pub params: Params,
     pub progress: Progress,
+    #[serde(default)]
+    pub seeds: SeedStats,
     pub totals: Stats,
     pub inputs: Vec<InputFile>,
     pub engine_config: Engine,
@@ -68,6 +70,12 @@ pub struct Progress {
     #[serde(with = "hex")]
     pub seed_hash: u64,
     pub pending: Vec<PendingSeed>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SeedStats {
+    pub unique: u64,
+    pub duplicates: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -169,6 +177,7 @@ impl RunConfig {
                 pending: Vec::new(),
             },
             params,
+            seeds: SeedStats::default(),
             totals: Stats::default(),
             inputs,
             engine_config,
@@ -505,6 +514,10 @@ mod tests {
                     },
                 ],
             },
+            seeds: SeedStats {
+                unique: 407,
+                duplicates: 12,
+            },
             totals: Stats::default(),
             inputs: vec![InputFile {
                 path: r"..\..\openings\UHO_4060_v4.epd".to_string(),
@@ -559,6 +572,11 @@ mod tests {
             text
         );
         assert!(text.contains("hash = \"fedcba9876543210\""), "{}", text);
+
+        let mut without_seeds: toml::Table = toml::from_str(&text).unwrap();
+        without_seeds.remove("seeds").unwrap();
+        let parsed: RunConfig = toml::from_str(&toml::to_string(&without_seeds).unwrap()).unwrap();
+        assert_eq!(parsed.seeds, SeedStats::default());
     }
 
     #[test]

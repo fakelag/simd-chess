@@ -60,7 +60,7 @@ mod tests {
     use super::Failure;
     use super::cli::execute;
     use super::run::{
-        CONFIG_FILE_NAME, Outcome, PendingSeed, RunConfig, Stats, current_engine_config,
+        CONFIG_FILE_NAME, Outcome, PendingSeed, RunConfig, SeedStats, Stats, current_engine_config,
     };
     use super::session::Hooks;
     use super::shard;
@@ -69,6 +69,11 @@ mod tests {
     use crate::util::{self, test_dir::TestDir};
 
     const SEEDS: usize = 16;
+    const DUPLICATES: u64 = 4;
+    const ALL_SEEDS: SeedStats = SeedStats {
+        unique: SEEDS as u64,
+        duplicates: DUPLICATES,
+    };
     const DEPTH: &str = "2";
     const SHARD_SIZE: &str = "300";
 
@@ -84,7 +89,8 @@ mod tests {
             .collect()
     }
 
-    /// Unique, playable positions a few random plies from the start.
+    /// Playable positions a few random plies from the start: `count` unique ones and
+    /// `DUPLICATES` copies.
     fn write_seeds(dir: &Path, count: usize) -> String {
         let tables = Tables::new();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -111,8 +117,17 @@ mod tests {
             }
         }
 
+        let mut lines = Vec::new();
+        for (i, fen) in fens.iter().enumerate() {
+            lines.push(fen.as_str());
+            if i % 4 == 2 {
+                lines.push(&fens[i - 1]);
+            }
+        }
+        assert_eq!(lines.len(), count + DUPLICATES as usize);
+
         let path = dir.join("positions.epd");
-        std::fs::write(&path, fens.join("\n") + "\n").unwrap();
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         path.to_string_lossy().into_owned()
     }
 
@@ -181,6 +196,20 @@ mod tests {
             let text =
                 std::fs::read_to_string(self.dir.path().join(name).join(CONFIG_FILE_NAME)).unwrap();
             toml::from_str(&text).unwrap()
+        }
+
+        fn duplicates_below(&self, cursor: u64) -> u64 {
+            StatefulFenQueue::new(
+                &[self.positions.clone()],
+                cursor,
+                Vec::new(),
+                u64::MAX,
+                None,
+                || false,
+            )
+            .unwrap()
+            .unwrap()
+            .duplicates()
         }
 
         /// Every entry of the run, rendered and sorted, after checking each shard against the config.
@@ -313,6 +342,7 @@ mod tests {
             name
         );
         assert_eq!(config.progress.cursor, SEEDS as u64, "{}", name);
+        assert_eq!(config.seeds, ALL_SEEDS, "{}", name);
         assert!(
             config
                 .sessions
@@ -332,6 +362,7 @@ mod tests {
         let entries = fixture.entries("reference");
         let config = fixture.config("reference");
         assert_eq!(config.input_seeds, SEEDS as u64);
+        assert_eq!(config.seeds, ALL_SEEDS);
         assert_eq!(config.totals.games + config.totals.terminated, SEEDS as u64);
         assert!(
             config.shards.len() > 1,
@@ -385,6 +416,16 @@ mod tests {
             assert_eq!(
                 config.totals.games + config.totals.terminated,
                 k,
+                "{}",
+                name
+            );
+            let cursor = config.progress.cursor;
+            assert_eq!(
+                config.seeds,
+                SeedStats {
+                    unique: cursor,
+                    duplicates: fixture.duplicates_below(cursor),
+                },
                 "{}",
                 name
             );
@@ -543,6 +584,44 @@ mod tests {
             Outcome::Finished
         );
         assert_matches_reference(&fixture, name, &reference);
+    }
+
+    #[test]
+    fn test_seed_stats_leave_out_the_seeds_below_from() {
+        let fixture = Fixture::new("selfplay_from");
+        let from = 6;
+        let below = fixture.duplicates_below(from);
+        assert!(0 < below && below < DUPLICATES, "{}", below);
+
+        let name = "from";
+        let stop = Hooks {
+            stop_after_games: Some(3),
+            ..Hooks::default()
+        };
+        assert_eq!(
+            outcome(fixture.new_run(name, &["--from", &from.to_string()], &stop)),
+            Outcome::Interrupted
+        );
+        let cursor = fixture.config(name).progress.cursor;
+        assert_eq!(
+            fixture.config(name).seeds,
+            SeedStats {
+                unique: cursor - from,
+                duplicates: fixture.duplicates_below(cursor) - below,
+            }
+        );
+
+        assert_eq!(
+            outcome(fixture.resume(name, &[], &Hooks::default(), &always(false))),
+            Outcome::Finished
+        );
+        assert_eq!(
+            fixture.config(name).seeds,
+            SeedStats {
+                unique: SEEDS as u64 - from,
+                duplicates: DUPLICATES - below,
+            }
+        );
     }
 
     #[test]

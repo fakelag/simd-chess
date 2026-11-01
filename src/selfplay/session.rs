@@ -6,7 +6,7 @@ use crossbeam::channel::RecvTimeoutError;
 
 use super::run::unix_now;
 use super::run::{
-    Outcome, Params, PendingSeed, Progress, RunConfig, RunDir, Session, Shard, Stats,
+    Outcome, Params, PendingSeed, Progress, RunConfig, RunDir, SeedStats, Session, Shard, Stats,
 };
 use super::shard::{self, ShardWriter};
 use crate::engine::tables;
@@ -49,6 +49,7 @@ pub fn play(
     hooks: &Hooks,
 ) -> Result<Outcome, Failure> {
     let (cursor, pending, end) = (queue.cursor(), queue.pending().len(), queue.end());
+    let duplicates = queue.duplicates();
     let queue = Mutex::new(queue);
 
     let mut session = SessionState {
@@ -56,7 +57,7 @@ pub fn play(
         hooks,
         input_seeds,
         positions_before: run.as_ref().map_or(0, |run| run.config.totals.positions),
-        ledger: run.map(Ledger::begin).transpose()?,
+        ledger: run.map(|run| Ledger::begin(run, duplicates)).transpose()?,
         stats: Stats::default(),
         halt: None,
         started: Instant::now(),
@@ -300,13 +301,15 @@ impl SessionState<'_, '_> {
         if let Some(ledger) = &self.ledger {
             let config = &ledger.run.config;
             println!(
-                "Run '{}': {} games, {} positions in {} shard(s), seed cursor {} with {} pending",
+                "Run '{}': {} games, {} positions in {} shard(s), seed cursor {} with {} pending, seeds read: {} unique, {} duplicates",
                 config.name,
                 config.totals.games,
                 config.totals.positions,
                 config.shards.len(),
                 config.progress.cursor,
                 config.progress.pending.len(),
+                config.seeds.unique,
+                config.seeds.duplicates,
             );
         }
     }
@@ -351,11 +354,13 @@ struct Ledger<'a> {
     writer: Option<ShardWriter>,
     session: usize,
     last_commit: Instant,
+    run_duplicates: u64,
+    queue_duplicates: u64,
 }
 
 impl<'a> Ledger<'a> {
     /// Records the session's start in the config.
-    fn begin(run: Run<'a>) -> anyhow::Result<Self> {
+    fn begin(run: Run<'a>, queue_duplicates: u64) -> anyhow::Result<Self> {
         run.config.sessions.push(Session {
             started: unix_now(),
             ended: None,
@@ -368,6 +373,8 @@ impl<'a> Ledger<'a> {
 
         Ok(Self {
             session: run.config.sessions.len() - 1,
+            run_duplicates: run.config.seeds.duplicates,
+            queue_duplicates,
             run,
             writer: None,
             last_commit: Instant::now(),
@@ -457,13 +464,14 @@ impl<'a> Ledger<'a> {
             config.shards.last_mut().unwrap().bytes = writer.finish()?;
         }
 
-        let (cursor, exhausted, seed_hash, pending) = {
+        let (cursor, exhausted, seed_hash, pending, duplicates) = {
             let queue = queue.lock().unwrap();
             (
                 queue.cursor(),
                 queue.exhausted(),
                 queue.seed_hash(),
                 queue.pending(),
+                queue.duplicates(),
             )
         };
 
@@ -485,6 +493,10 @@ impl<'a> Ledger<'a> {
                 .into_iter()
                 .map(|(cursor, fen)| PendingSeed { cursor, fen })
                 .collect(),
+        };
+        config.seeds = SeedStats {
+            unique: cursor - config.params.from,
+            duplicates: self.run_duplicates + duplicates - self.queue_duplicates,
         };
 
         let session = &mut config.sessions[self.session];
@@ -550,10 +562,13 @@ mod tests {
         let (_dir, run_dir, mut config, queue) = one_seed_run("ledger_dropped");
         let (seed, _) = queue.lock().unwrap().next().unwrap();
 
-        let mut ledger = Ledger::begin(Run {
-            dir: &run_dir,
-            config: &mut config,
-        })
+        let mut ledger = Ledger::begin(
+            Run {
+                dir: &run_dir,
+                config: &mut config,
+            },
+            0,
+        )
         .unwrap();
         ledger.record(&dropped(seed)).unwrap();
         queue.lock().unwrap().complete(seed);
@@ -576,6 +591,13 @@ mod tests {
         assert!(saved.progress.pending.is_empty());
         assert_eq!(saved.progress.cursor, 1);
         assert_eq!(saved.progress.seed_hash, queue.lock().unwrap().seed_hash());
+        assert_eq!(
+            saved.seeds,
+            SeedStats {
+                unique: 1,
+                duplicates: 0
+            }
+        );
     }
 
     #[cfg(windows)]
@@ -587,10 +609,13 @@ mod tests {
         let (_dir, run_dir, mut config, queue) = one_seed_run("ledger_busy_config");
         let (seed, _) = queue.lock().unwrap().next().unwrap();
 
-        let mut ledger = Ledger::begin(Run {
-            dir: &run_dir,
-            config: &mut config,
-        })
+        let mut ledger = Ledger::begin(
+            Run {
+                dir: &run_dir,
+                config: &mut config,
+            },
+            0,
+        )
         .unwrap();
         ledger.record(&dropped(seed)).unwrap();
         queue.lock().unwrap().complete(seed);

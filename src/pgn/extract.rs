@@ -27,7 +27,7 @@ use crate::{
     util,
 };
 
-const TT_SIZE_MB: usize = 8;
+const TT_SIZE_MB: usize = 16;
 
 pub enum MovePick {
     First,

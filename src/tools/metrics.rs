@@ -26,6 +26,11 @@ fn output_bucket(piece_count: u32) -> usize {
 const FORM_LOW: u8 = 0b01; // own_key == canonical
 const FORM_HIGH: u8 = 0b10; // own_key is the mirror of the canonical
 
+struct SeenKey {
+    forms: u8,
+    file: u32,
+}
+
 #[derive(Default)]
 struct UniquenessTally {
     total: u64,
@@ -37,28 +42,43 @@ struct UniquenessTally {
 }
 
 impl UniquenessTally {
-    fn observe(&mut self, canonical: u64, own_key: u64, seen: &mut HashMap<u64, u8>) -> bool {
+    fn observe(
+        &mut self,
+        canonical: u64,
+        own_key: u64,
+        file: u32,
+        seen: &mut HashMap<u64, SeenKey>,
+    ) -> Option<u32> {
         self.parsed += 1;
         let form = if own_key == canonical {
             FORM_LOW
         } else {
             FORM_HIGH
         };
-        let mask = seen.entry(canonical).or_insert(0);
+        let key = seen.entry(canonical).or_insert(SeenKey { forms: 0, file });
 
-        if *mask == 0 {
-            *mask = form;
+        if key.forms == 0 {
+            key.forms = form;
             self.unique += 1;
-            true
+            None
         } else {
-            if *mask & form != 0 {
+            if key.forms & form != 0 {
                 self.exact_dups += 1;
             } else {
                 self.mirror_hits += 1;
-                *mask |= form;
+                key.forms |= form;
             }
-            false
+            Some(key.file)
         }
+    }
+
+    fn add(&mut self, other: &UniquenessTally) {
+        self.total += other.total;
+        self.parsed += other.parsed;
+        self.parse_failures += other.parse_failures;
+        self.unique += other.unique;
+        self.mirror_hits += other.mirror_hits;
+        self.exact_dups += other.exact_dups;
     }
 
     fn print(&self, label: &str) {
@@ -102,6 +122,40 @@ impl UniquenessTally {
     }
 }
 
+fn print_file_overlap(fen_paths: &[String], files: &[UniquenessTally], overlap: &[Vec<u64>]) {
+    let width = fen_paths.iter().map(String::len).max().unwrap_or(0);
+    println!("--- per file, in --fen order ---");
+    println!(
+        "{:<width$} {:>12} {:>12} {:>12} {:>12} {:>12}",
+        "file", "lines", "parse_fail", "new_unique", "dup_in_file", "dup_earlier"
+    );
+    for (i, (path, tally)) in fen_paths.iter().zip(files).enumerate() {
+        println!(
+            "{:<width$} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            path,
+            tally.total,
+            tally.parse_failures,
+            tally.unique,
+            overlap[i][i],
+            overlap[i][..i].iter().sum::<u64>()
+        );
+    }
+
+    println!("--- positions already in an earlier file ---");
+    let mut any = false;
+    for (i, row) in overlap.iter().enumerate() {
+        for (j, &count) in row[..i].iter().enumerate() {
+            if count > 0 {
+                println!("{}: {} already in {}", fen_paths[i], count, fen_paths[j]);
+                any = true;
+            }
+        }
+    }
+    if !any {
+        println!("none");
+    }
+}
+
 fn ensure_parent_dir(out_prefix: &str) -> std::io::Result<()> {
     if let Some(parent) = std::path::Path::new(out_prefix).parent() {
         if !parent.as_os_str().is_empty() {
@@ -111,34 +165,56 @@ fn ensure_parent_dir(out_prefix: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn run_fen_stats(fen_path: &str, out_prefix: &str) -> anyhow::Result<()> {
+pub fn run_fen_stats(fen_paths: &[String], out_prefix: &str) -> anyhow::Result<()> {
     let tables = Tables::new();
     let mut board = ChessGame::new();
-    let mut seen_forms: HashMap<u64, u8> = HashMap::new();
-    let mut tally = UniquenessTally::default();
+    let mut seen: HashMap<u64, SeenKey> = HashMap::new();
+    let mut files: Vec<UniquenessTally> = Vec::with_capacity(fen_paths.len());
+    let mut overlap = vec![vec![0u64; fen_paths.len()]; fen_paths.len()];
 
-    let file = File::open(fen_path)
-        .map_err(|e| anyhow::anyhow!("failed to open FEN file {}: {}", fen_path, e))?;
-    let reader = BufReader::new(file);
+    let readers = fen_paths
+        .iter()
+        .map(|path| {
+            File::open(path)
+                .map(BufReader::new)
+                .map_err(|e| anyhow::anyhow!("failed to open FEN file {}: {}", path, e))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    for line in reader.lines() {
-        let line = line?;
-        let fen = line.trim();
-        if fen.is_empty() {
-            continue;
+    for (file, (fen_path, reader)) in fen_paths.iter().zip(readers).enumerate() {
+        println!("reading {fen_path}...");
+        let mut tally = UniquenessTally::default();
+
+        for line in reader.lines() {
+            let line = line?;
+            let fen = line.trim();
+            if fen.is_empty() {
+                continue;
+            }
+            tally.total += 1;
+
+            if board.load_fen(fen, &tables).is_err() {
+                tally.parse_failures += 1;
+                continue;
+            }
+
+            let (own_key, flipped) = board.canonical_seed_key_parts(&tables);
+            let first_seen = tally.observe(own_key.min(flipped), own_key, file as u32, &mut seen);
+            if let Some(first) = first_seen {
+                overlap[file][first as usize] += 1;
+            }
         }
-        tally.total += 1;
-
-        if board.load_fen(fen, &tables).is_err() {
-            tally.parse_failures += 1;
-            continue;
-        }
-
-        let (own_key, flipped) = board.canonical_seed_key_parts(&tables);
-        tally.observe(own_key.min(flipped), own_key, &mut seen_forms);
+        files.push(tally);
     }
 
+    let mut tally = UniquenessTally::default();
+    for file in &files {
+        tally.add(file);
+    }
     tally.print("FEN seed-file uniqueness");
+    if fen_paths.len() > 1 {
+        print_file_overlap(fen_paths, &files, &overlap);
+    }
 
     ensure_parent_dir(out_prefix)?;
     let summary_path = format!("{out_prefix}_fen_summary.csv");

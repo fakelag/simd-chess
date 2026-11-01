@@ -27,7 +27,7 @@ pub const ANNOTATION_DEPTH: u8 = 9;
 const FORM: EngineForm = EngineForm::TacticalB;
 
 const LABELING_HARD_NODES: u64 = 100_000_000;
-const TT_SIZE_MB: usize = 8;
+const TT_SIZE_MB: usize = 16;
 const SCORE_CLAMP: i16 = 10000;
 
 const INSUFFICIENT_MATERIAL_DRAW: bool = true;

@@ -440,7 +440,7 @@ fn main() {
         "metrics" => {
             let mut arg_it = std::env::args().skip(2);
 
-            let mut fen_path = None;
+            let mut fen_paths: Vec<String> = vec![];
             let mut binpack_paths: Vec<String> = vec![];
             let mut lineage_keys_path = None;
             let mut out_prefix = "scratch/tmp_metrics".to_string();
@@ -454,7 +454,7 @@ fn main() {
                 };
 
                 match arg.as_str() {
-                    "--fen" => fen_path = Some(arg_it.next().unwrap()),
+                    "--fen" => fen_paths.push(arg_it.next().unwrap()),
                     "--binpack" => binpack_paths.push(arg_it.next().unwrap()),
                     "--lineage-keys" => lineage_keys_path = Some(arg_it.next().unwrap()),
                     "--out" => out_prefix = arg_it.next().unwrap(),
@@ -464,9 +464,9 @@ fn main() {
                 }
             }
 
-            match (fen_path, binpack_paths.is_empty()) {
-                (Some(fen), true) => tools::metrics::run_fen_stats(&fen, &out_prefix),
-                (None, false) => {
+            match (fen_paths.is_empty(), binpack_paths.is_empty()) {
+                (false, true) => tools::metrics::run_fen_stats(&fen_paths, &out_prefix),
+                (true, false) => {
                     let path_refs = binpack_paths.iter().map(|s| s.as_str()).collect::<Vec<_>>();
                     tools::metrics::run_binpack_metrics(
                         &path_refs,
@@ -476,8 +476,8 @@ fn main() {
                         track_uniqueness,
                     )
                 }
-                (Some(_), false) => panic!("Pass exactly one of --fen / --binpack, not both"),
-                (None, true) => panic!("Expected --fen <file> or --binpack <file> (repeatable)"),
+                (false, false) => panic!("Pass --fen or --binpack files, not both"),
+                (true, true) => panic!("Expected --fen <file> or --binpack <file> (repeatable)"),
             }
         }
         "uci" => {

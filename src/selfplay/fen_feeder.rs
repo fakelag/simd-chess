@@ -221,6 +221,7 @@ struct MixedFenFeeder {
     board: ChessGame,
     tables: tables::Tables,
     served_total: u64,
+    duplicates: u64,
 
     served_hash: u64,
     log_skips: bool,
@@ -240,6 +241,7 @@ impl MixedFenFeeder {
             board: ChessGame::new(),
             tables: tables::Tables::new(),
             served_total: 0,
+            duplicates: 0,
             served_hash: FNV_OFFSET,
             log_skips: true,
             skipped: 0,
@@ -252,6 +254,7 @@ impl MixedFenFeeder {
     }
 
     fn next_unique(&mut self) -> Option<String> {
+        let mut duplicates = 0;
         loop {
             let pick = self
                 .files
@@ -272,6 +275,7 @@ impl MixedFenFeeder {
                 };
 
                 if self.seen.contains(&key) {
+                    duplicates += 1;
                     continue;
                 }
 
@@ -295,6 +299,7 @@ impl MixedFenFeeder {
                 Some(line) => {
                     self.files[i].pass += self.files[i].stride;
                     self.served_total += 1;
+                    self.duplicates += duplicates;
                     self.served_hash = fnv1a(fnv1a(self.served_hash, line.as_bytes()), b"\n");
                     return Some(line);
                 }
@@ -450,6 +455,10 @@ impl StatefulFenQueue {
     /// Num of unusable positions met since the queue was created, not counting the skip to the cursor.
     pub fn skipped(&self) -> u64 {
         self.feeder.skipped
+    }
+
+    pub fn duplicates(&self) -> u64 {
+        self.feeder.duplicates
     }
 
     /// Identifies the seeds below cursor.
@@ -773,6 +782,48 @@ mod tests {
             .unwrap();
         take(&mut counted, 5);
         assert_eq!(counted.seeds_left(12), 3, "--count ends it first");
+    }
+
+    #[test]
+    fn test_duplicates_depend_only_on_the_cursor() {
+        let dir = TestDir::new("seed_queue_duplicates");
+        let paths = write_inputs(&dir);
+
+        let mut queue = StatefulFenQueue::new(&paths, 0, vec![], u64::MAX, None, || false)
+            .unwrap()
+            .unwrap();
+        let mut counts = vec![queue.duplicates()];
+        while queue.next().is_some() {
+            counts.push(queue.duplicates());
+        }
+        assert_eq!(counts.len(), 13);
+        assert_eq!(queue.duplicates(), 1);
+
+        for (cursor, &count) in counts.iter().enumerate() {
+            let resumed =
+                StatefulFenQueue::new(&paths, cursor as u64, vec![], u64::MAX, None, || false)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(resumed.duplicates(), count, "cursor {}", cursor);
+        }
+    }
+
+    #[test]
+    fn test_duplicates_after_the_last_seed_are_not_counted() {
+        let dir = TestDir::new("seed_queue_duplicate_tail");
+        let path = dir.path().join("tail.epd");
+        let paths = vec![path.to_string_lossy().into_owned()];
+        let duplicates = |lines: [&str; 3]| {
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            let mut queue = StatefulFenQueue::new(&paths, 0, vec![], u64::MAX, None, || false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(drain(&mut queue).len(), 2);
+            queue.duplicates()
+        };
+
+        assert_eq!(duplicates([FENS_A[1], FENS_A[0], FENS_A[0]]), 1);
+        assert_eq!(duplicates([FENS_A[0], FENS_A[1], FENS_A[0]]), 0);
     }
 
     #[test]
