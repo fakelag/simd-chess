@@ -37,7 +37,7 @@ const LMP_MAX_DEPTH: u8 = 8;
 
 macro_rules! net_path {
     () => {
-        "../../../nnue/v1-40M-1536-320-wdl75.bin"
+        "../../../nnue/v2-55M-1536-wdl45.bin"
     };
 }
 
