@@ -19,7 +19,7 @@ use crate::{
         tables::{self},
     },
     nnue::nnue::{self, UpdatableNnue},
-    nnue_load, util,
+    util,
 };
 
 pub const EVAL_NNUE: bool = true;
@@ -49,7 +49,21 @@ macro_rules! net_size {
 pub const NET_OSIZE: usize = 8;
 pub const NET_PATH: &str = net_path!();
 pub const NET_HIDDEN: usize = net_size!();
-pub static NET_BYTES: &[u8] = include_bytes!(net_path!());
+
+pub type Net = nnue::Network<{ net_size!() }, NET_OSIZE>;
+
+const NET_RAW_LEN: usize = include_bytes!(net_path!()).len();
+pub static NET_RAW_DATA: nnue::AlignedBytes<NET_RAW_LEN> =
+    nnue::AlignedBytes(*include_bytes!(net_path!()));
+
+const _: () = assert!(
+    size_of::<Net>() == NET_RAW_LEN,
+    concat!("NNUE file size does not match HS/OB: ", net_path!())
+);
+const _: () = assert!(align_of::<Net>() <= align_of::<nnue::AlignedBytes<NET_RAW_LEN>>());
+
+// Safety: NET_RAW_DATA is Net-sized and Net-aligned. Nets i16 arrays accept any bytes.
+pub static NETWORK: &Net = unsafe { &*(&raw const NET_RAW_DATA).cast::<Net>() };
 
 const QS_MOVE_STACK_SIZE: usize = 128;
 const MOVE_STACK_SIZE: usize = PV_DEPTH * 2 + QS_MOVE_STACK_SIZE;
@@ -298,7 +312,8 @@ impl<'a, const F: EngineForm> Search<'a, F> {
         tm: &'a SyncUnsafeCell<TimeManager>,
         rt: RepetitionTable,
     ) -> Search<'a, F> {
-        let nnue = nnue_load!(net_path!(), { net_size!() }, NET_OSIZE);
+        NETWORK.assert_output_weights_fit();
+        let nnue = nnue::LazyNnue::heap_alloc();
 
         let mut s = Search {
             nnue,
@@ -350,7 +365,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
             search_depth: 0,
         };
 
-        s.nnue.load(&s.chess);
+        s.nnue.load(&s.chess, NETWORK);
 
         s
     }
@@ -422,7 +437,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     #[inline(always)]
     pub fn load_from_fen(&mut self, fen: &str, tables: &tables::Tables) -> Result<usize, String> {
         let fen_length = self.chess.load_fen(fen, tables)?;
-        self.nnue.load(&self.chess);
+        self.nnue.load(&self.chess, NETWORK);
         Ok(fen_length)
     }
 
@@ -430,7 +445,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
     #[inline(always)]
     pub fn load_from_board(&mut self, board: &ChessGame) {
         self.chess = *board;
-        self.nnue.load(&self.chess);
+        self.nnue.load(&self.chess, NETWORK);
     }
 
     /// A hard reset. Clears transposition and repetition tables and
@@ -1627,7 +1642,7 @@ impl<'a, const F: EngineForm> Search<'a, F> {
 
         let score = if EVAL_NNUE {
             self.nnue
-                .evaluate(self.chess.b_move(), self.output_bucket()) as Eval
+                .evaluate(NETWORK, self.chess.b_move(), self.output_bucket()) as Eval
         } else {
             self.eval_hc()
         };

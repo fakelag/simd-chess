@@ -2801,8 +2801,8 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    use crate::engine::search::search;
     use crate::nnue::nnue;
-    use crate::nnue_load;
 
     use super::*;
 
@@ -2884,7 +2884,7 @@ mod tests {
         depth: u8,
         fen: &'static str,
         moves: Vec<String>,
-        nnue: Box<nnue::LazyNnue<1536, 8>>,
+        nnue: Box<nnue::LazyNnue<{ search::NET_HIDDEN }, { search::NET_OSIZE }>>,
     }
 
     impl PerftTestContext {
@@ -2894,8 +2894,8 @@ mod tests {
 
             assert!(board.load_fen(fen, &tables).is_ok());
 
-            let mut nnue = nnue_load!("../../nnue/v2-55M-1536-wdl45.bin", 1536, 8);
-            nnue.load(&board);
+            let mut nnue = nnue::LazyNnue::heap_alloc();
+            nnue.load(&board, search::NETWORK);
 
             Self {
                 board,

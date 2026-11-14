@@ -618,11 +618,13 @@ pub trait UpdatableNnue {
     fn rollback_move(&mut self);
 }
 
+#[repr(C, align(64))]
+pub struct AlignedBytes<const N: usize>(pub [u8; N]);
+
 pub struct LazyNnue<const HS: usize, const OB: usize>
 where
     [(); 2 * HS]:,
 {
-    net: Network<HS, OB>,
     accumulators: Vec<AccumulatorPair<HS, OB>>,
 
     updates: [NnueUpdate; LAZY_NNUE_MAX_PLY],
@@ -635,9 +637,7 @@ impl<const HS: usize, const OB: usize> LazyNnue<HS, OB>
 where
     [(); 2 * HS]:,
 {
-    pub fn heap_alloc(net: &Network<HS, OB>) -> Box<Self> {
-        net.assert_output_weights_fit();
-
+    pub fn heap_alloc() -> Box<Self> {
         unsafe {
             let layout = std::alloc::Layout::new::<Self>();
             let ptr = std::alloc::alloc(layout) as *mut Self;
@@ -648,7 +648,6 @@ where
                 accumulators.push(AccumulatorPair::new());
             }
 
-            (&raw mut (*ptr).net).write(*net);
             (&raw mut (*ptr).accumulators).write(accumulators);
             (&raw mut (*ptr).updates)
                 .write([NnueUpdate::NnueUpdateAddSub((0, 0)); LAZY_NNUE_MAX_PLY]);
@@ -660,18 +659,18 @@ where
         }
     }
 
-    pub fn load(&mut self, board: &chess_v2::ChessGame) {
+    pub fn load(&mut self, board: &chess_v2::ChessGame, net: &Network<HS, OB>) {
         debug_assert!(self.updates_len == 0);
 
         self.applied_accumulators[0] = 0;
         self.applied_len = 1;
 
-        self.accumulators[0].load(board, &self.net);
+        self.accumulators[0].load(board, net);
         self.updates_len = 0;
     }
 
     #[inline(always)]
-    pub fn evaluate(&mut self, b_move: bool, bucket: u8) -> i16 {
+    pub fn evaluate(&mut self, net: &Network<HS, OB>, b_move: bool, bucket: u8) -> i16 {
         debug_assert!(self.applied_len > 0 && self.applied_len <= LAZY_NNUE_MAX_PLY);
 
         // Safety: load() seeds one entry and rollback never pops below it.
@@ -719,14 +718,14 @@ where
 
                 match update {
                     NnueUpdate::NnueUpdateAddSub((add, sub)) => {
-                        acc.apply_from(prev, [*add], [*sub], &self.net);
+                        acc.apply_from(prev, [*add], [*sub], net);
                     }
                     NnueUpdate::NnueUpdateAddSubSub((add, sub1, sub2)) => {
-                        acc.apply_from(prev, [*add], [*sub1, *sub2], &self.net);
+                        acc.apply_from(prev, [*add], [*sub1, *sub2], net);
                     }
                     NnueUpdate::NnueUpdateAddAddSubSub((add1, add2, sub1, sub2)) => {
                         std::hint::cold_path();
-                        acc.apply_from_noinline(prev, [*add1, *add2], [*sub1, *sub2], &self.net);
+                        acc.apply_from_noinline(prev, [*add1, *add2], [*sub1, *sub2], net);
                     }
                 }
 
@@ -749,7 +748,7 @@ where
             let prev = unsafe { prev.last().unwrap_unchecked() };
             let acc = unsafe { acc.first_mut().unwrap_unchecked() };
 
-            let output = self.net.evaluate_fused(prev, acc, update, b_move, bucket);
+            let output = net.evaluate_fused(prev, acc, update, b_move, bucket);
             debug_assert!(self.applied_len < LAZY_NNUE_MAX_PLY);
             unsafe {
                 *self
@@ -763,7 +762,7 @@ where
 
             let stm = [&acc.white, &acc.black][b_move as usize];
             let ntm = [&acc.black, &acc.white][b_move as usize];
-            self.net.evaluate(stm, ntm, bucket)
+            net.evaluate(stm, ntm, bucket)
         }
     }
 }
@@ -800,19 +799,4 @@ where
             self.applied_len -= 1;
         }
     }
-}
-
-#[macro_export]
-macro_rules! nnue_load {
-    ($path:expr, $hs:expr,$ob:expr) => {{
-        const _: () = assert!(
-            std::mem::size_of::<nnue::Network<$hs, $ob>>() == include_bytes!($path).len(),
-            concat!("NNUE file size does not match HS/OB: ", $path)
-        );
-
-        let net: &nnue::Network<$hs, $ob> = unsafe { std::mem::transmute(include_bytes!($path)) };
-
-        nnue::LazyNnue::heap_alloc(net)
-    }};
-    ($path:expr, $hs:expr) => {{ nnue_load!($path, $hs, 1) }};
 }

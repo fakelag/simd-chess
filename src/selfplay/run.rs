@@ -418,10 +418,13 @@ pub fn current_engine_config() -> Engine {
         ("path".to_string(), Text(search::NET_PATH.to_string())),
         ("hidden".to_string(), Integer(search::NET_HIDDEN as i64)),
         ("buckets".to_string(), Integer(search::NET_OSIZE as i64)),
-        ("bytes".to_string(), Integer(search::NET_BYTES.len() as i64)),
+        (
+            "bytes".to_string(),
+            Integer(search::NET_RAW_DATA.0.len() as i64),
+        ),
         (
             "hash".to_string(),
-            Text(hex::to_string(fnv1a(FNV_OFFSET, search::NET_BYTES))),
+            Text(hex::to_string(fnv1a(FNV_OFFSET, &search::NET_RAW_DATA.0))),
         ),
     ]);
 
